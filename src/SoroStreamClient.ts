@@ -29,6 +29,7 @@ import {
   InsufficientAmountError,
   InvalidAddressError,
   AccountNotFoundError,
+  InsufficientAllowanceError,
 } from "./errors.js";
 import type {
   BatchCancelResult,
@@ -479,6 +480,41 @@ export class SoroStreamClient {
     }
   }
 
+  /**
+   * Checks the sender's token allowance for the contract via the SAC allowance view.
+   * Throws {@link InsufficientAllowanceError} if the current allowance is less than required.
+   * Silently passes when the allowance RPC call fails (non-SAC token, RPC outage, etc.).
+   */
+  private async checkAllowance(token: string, required: bigint): Promise<void> {
+    try {
+      const sender = await this.walletAdapter.getPublicKey();
+      const contractAddress = this.contract.contractId();
+
+      const tokenContract = new Contract(token);
+      const op = tokenContract
+        .call(
+          "allowance",
+          nativeToScVal(sender, { type: "address" }),
+          nativeToScVal(contractAddress, { type: "address" })
+        )
+        .build();
+
+      const result = await this.simulateOp(op);
+      if (rpc.Api.isSimulationError(result)) return; // non-SAC token — skip
+
+      const retval = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!retval) return;
+
+      const current = BigInt(scValToNative(retval) as number);
+      if (current < required) {
+        throw new InsufficientAllowanceError(token, required, current);
+      }
+    } catch (err) {
+      if (err instanceof InsufficientAllowanceError) throw err;
+      // RPC / parse failures — don't block stream creation
+    }
+  }
+
   // ── Stream mutations ──────────────────────────────────────────────────────
 
   /**
@@ -502,6 +538,10 @@ export class SoroStreamClient {
 
       await this.validateCliff(params.cliffSeconds ?? 0);
       await this.validateStreamParams(params);
+
+      if (!params.skipAllowanceCheck) {
+        await this.checkAllowance(params.token, params.amount);
+      }
 
       const sender = await this.walletAdapter.getPublicKey();
       const operation = this.encoder.createStream(sender, params);

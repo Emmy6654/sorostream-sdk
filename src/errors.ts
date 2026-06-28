@@ -53,3 +53,22 @@ export class InsufficientBalanceError extends SoroStreamError {
     this.name = "InsufficientBalanceError";
   }
 }
+
+export class InsufficientAllowanceError extends SoroStreamError {
+  /** Token contract address that was checked. */
+  readonly token: string;
+  /** Allowance required to create the stream (in stroops). */
+  readonly required: bigint;
+  /** Current allowance granted to the contract (in stroops). */
+  readonly current: bigint;
+
+  constructor(token: string, required: bigint, current: bigint) {
+    super(
+      `Insufficient allowance for token ${token}: required ${required}, current ${current} (shortfall ${required - current})`
+    );
+    this.name = "InsufficientAllowanceError";
+    this.token = token;
+    this.required = required;
+    this.current = current;
+  }
+}
