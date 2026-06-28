@@ -196,9 +196,6 @@ export class SoroStreamClient {
 
       response = await this.server.getTransaction(result.hash);
     }
-    return fn();
-  }
-
     if (response.status === "FAILED") {
       throw new TransactionFailedError(result.hash);
     }
@@ -641,21 +638,6 @@ export class SoroStreamClient {
           this.contract.call(
             "get_claimable",
             nativeToScVal(BigInt(streamId), { type: "u64" })
-    const publicKey = await this.walletAdapter.getPublicKey();
-    const account = await this.withBreaker(() =>
-      this.server.getAccount(publicKey)
-    );
-    const result = await this.withBreaker(() =>
-      this.server.simulateTransaction(
-        new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASES[this.network],
-        })
-          .addOperation(
-            this.contract.call(
-              "get_claimable",
-              nativeToScVal(BigInt(streamId), { type: "u64" })
-            )
           )
         ),
       this.readRetry
@@ -695,21 +677,6 @@ export class SoroStreamClient {
     const result = await withRetry(
       () => this.simulateOp(this.contract.call("get_streams_by_sender", ...args)),
       this.readRetry
-    const result = await this.withBreaker(async () =>
-      this.server.simulateTransaction(
-        new TransactionBuilder(
-          await this.server.getAccount(
-            await this.walletAdapter.getPublicKey()
-          ),
-          {
-            fee: BASE_FEE,
-            networkPassphrase: NETWORK_PASSPHRASES[this.network],
-          }
-        )
-          .addOperation(this.contract.call("get_streams_by_sender", ...args))
-          .setTimeout(30)
-          .build()
-      )
     );
 
     if (rpc.Api.isSimulationError(result)) {
@@ -733,8 +700,6 @@ export class SoroStreamClient {
     if (!pagination) return streams;
 
     const limit = pagination.limit ?? 20;
-    const p = pagination;
-    const limit = p.limit ?? 20;
     const last = streams[streams.length - 1];
     return {
       streams,
@@ -771,23 +736,6 @@ export class SoroStreamClient {
     const result = await withRetry(
       () => this.simulateOp(this.contract.call("get_streams_by_recipient", ...args)),
       this.readRetry
-    const result = await this.withBreaker(async () =>
-      this.server.simulateTransaction(
-        new TransactionBuilder(
-          await this.server.getAccount(
-            await this.walletAdapter.getPublicKey()
-          ),
-          {
-            fee: BASE_FEE,
-            networkPassphrase: NETWORK_PASSPHRASES[this.network],
-          }
-        )
-          .addOperation(
-            this.contract.call("get_streams_by_recipient", ...args)
-          )
-          .setTimeout(30)
-          .build()
-      )
     );
 
     if (rpc.Api.isSimulationError(result)) {
@@ -811,8 +759,6 @@ export class SoroStreamClient {
     if (!pagination) return streams;
 
     const limit = pagination.limit ?? 20;
-    const p = pagination;
-    const limit = p.limit ?? 20;
     const last = streams[streams.length - 1];
     return {
       streams,

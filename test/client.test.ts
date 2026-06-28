@@ -10,9 +10,6 @@ const TEST_TOKEN = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
 import { SoroStreamClient } from "../src/SoroStreamClient.js";
 import { createKeypairAdapter, createPasskeyAdapter } from "../src/wallet.js";
-import type { Stream, WalletAdapter, BulkStreamRow } from "../src/types.js";
-import { createKeypairAdapter } from "../src/wallet.js";
-import { Keypair } from "@stellar/stellar-sdk";
 import type { Stream, WalletAdapter, BulkStreamRow, PriceFeedAdapter, FeeBumpOptions } from "../src/types.js";
 import {
   toStroops,
@@ -29,6 +26,7 @@ import {
   parseCsvStreamRows,
   detectStreamDrift,
   watchStreamDrift,
+  batchSize,
 } from "../src/utils.js";
 import {
   InsufficientAmountError,
@@ -252,10 +250,10 @@ describe("calculateVestingSchedule", () => {
       now
     );
     expect(result.inCliff).toBe(false);
-    expect(result.effectiveClaimable).toBe(flowRate * 500n);
+    expect(result.effectiveClaimable).toBe(flowRate * BigInt(cliff + 500));
   });
 
-  it("caps effective claimable at total amount", () => {
+  it("caps effective claimable at total amount after end time", () => {
     const cliff = 365 * 24 * 3600;
     const now = endTime + 10_000;
     const result = calculateVestingSchedule(
@@ -263,8 +261,7 @@ describe("calculateVestingSchedule", () => {
       cliff,
       now
     );
-    const vestedAfterCliff = flowRate * BigInt(endTime - startTime - cliff);
-    expect(result.effectiveClaimable).toBe(vestedAfterCliff);
+    expect(result.effectiveClaimable).toBe(result.totalAmount);
   });
 
   it("includes cliff milestone when cliff < total duration", () => {
@@ -300,6 +297,134 @@ describe("calculateVestingSchedule", () => {
       startTime
     );
     expect(result.totalAmount).toBe(deposit);
+  });
+
+  describe("edge case: at cliff exactly (issue #95)", () => {
+    it("inCliff is false at exactly cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime);
+      expect(result.inCliff).toBe(false);
+    });
+
+    it("effectiveClaimable equals cliff amount at exactly cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime);
+      expect(result.effectiveClaimable).toBe(flowRate * BigInt(cliff));
+    });
+
+    it("milestone is placed at cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, startTime);
+      expect(result.milestones[0]).toBeDefined();
+      expect(result.milestones[0]!.time).toBe(cliffEndTime);
+    });
+
+    it("milestone vested amount matches claimable at cliff end", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime);
+      expect(result.milestones[0]).toBeDefined();
+      expect(result.milestones[0]!.time).toBe(cliffEndTime);
+      expect(result.milestones[0]!.vested).toBe(flowRate * BigInt(cliff));
+    });
+
+    it("effectiveClaimable is 0 one second before cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime - 1);
+      expect(result.inCliff).toBe(true);
+      expect(result.effectiveClaimable).toBe(0n);
+    });
+  });
+
+  describe("edge case: past end time (issue #96)", () => {
+    it("effectiveClaimable equals totalAmount at exactly endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime);
+      expect(result.effectiveClaimable).toBe(result.totalAmount);
+    });
+
+    it("effectiveClaimable equals totalAmount one second after endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 1);
+      expect(result.effectiveClaimable).toBe(result.totalAmount);
+    });
+
+    it("effectiveClaimable equals totalAmount far past endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 10_000);
+      expect(result.effectiveClaimable).toBe(result.totalAmount);
+    });
+
+    it("inCliff is false after endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 1);
+      expect(result.inCliff).toBe(false);
+    });
+
+    it("milestones remain correct after stream ends", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 10_000);
+      expect(result.milestones.length).toBeGreaterThanOrEqual(1);
+      expect(result.milestones[result.milestones.length - 1]!.time).toBe(endTime);
+      expect(result.milestones[result.milestones.length - 1]!.vested).toBe(result.totalAmount);
+    });
+  });
+
+  describe("edge case: zero elapsed time (issue #97)", () => {
+    it("effectiveClaimable is 0 when now equals startTime with zero cliff", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 0, startTime);
+      expect(result.effectiveClaimable).toBe(0n);
+    });
+
+    it("effectiveClaimable is 0 when still in cliff at startTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, startTime);
+      expect(result.effectiveClaimable).toBe(0n);
+      expect(result.inCliff).toBe(true);
+    });
+
+    it("acts like normal stream when cliff is 0", () => {
+      const now = startTime + 500;
+      const result = calculateVestingSchedule(makeVestingStream(), 0, now);
+      expect(result.inCliff).toBe(false);
+      expect(result.effectiveClaimable).toBe(flowRate * 500n);
+    });
+
+    it("includes full milestone set when cliff is 0", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 0, startTime + 500);
+      // cliff milestone at startTime + 25%/50%/75%/100% milestones
+      expect(result.milestones.length).toBe(5);
+    });
+
+    it("effectiveClaimable is 0 at exactly cliffEndTime when cliff is 0", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 0, startTime);
+      expect(result.effectiveClaimable).toBe(0n);
+    });
+  });
+
+  describe("edge case: rounding / truncation (issue #98)", () => {
+    it("handles rounding when flowRate * duration produces truncated totalAmount", () => {
+      const totalSeconds = 3;
+      const truncatedFlowRate = 7n / 3n;
+      const stream = makeVestingStream({
+        flowRate: truncatedFlowRate,
+        endTime: startTime + totalSeconds,
+      });
+      const result = calculateVestingSchedule(stream, 0, startTime + totalSeconds);
+      expect(result.effectiveClaimable).toBe(truncatedFlowRate * BigInt(totalSeconds));
+      expect(result.totalAmount).toBe(truncatedFlowRate * BigInt(totalSeconds));
+    });
+
+    it("truncation does not affect milestone ordering", () => {
+      const totalSeconds = 3;
+      const truncatedFlowRate = 7n / 3n;
+      const stream = makeVestingStream({
+        flowRate: truncatedFlowRate,
+        endTime: startTime + totalSeconds,
+      });
+      const result = calculateVestingSchedule(stream, 1, startTime);
+      for (let i = 1; i < result.milestones.length; i++) {
+        expect(result.milestones[i]!.time).toBeGreaterThan(result.milestones[i - 1]!.time);
+      }
+    });
   });
 });
 
@@ -397,6 +522,30 @@ describe("watchClaimable", () => {
     unsubscribe();
     vi.advanceTimersByTime(5000);
     expect(onTick).not.toHaveBeenCalled();
+  });
+});
+
+// ── batchSize helper (issue #95) ─────────────────────────────────────────────
+
+describe("batchSize", () => {
+  it("returns 8 by default", () => {
+    expect(batchSize()).toBe(8);
+  });
+
+  it("returns custom value when provided", () => {
+    expect(batchSize(12)).toBe(12);
+  });
+
+  it("throws on zero", () => {
+    expect(() => batchSize(0)).toThrow(SoroStreamError);
+  });
+
+  it("throws on value exceeding maximum", () => {
+    expect(() => batchSize(26)).toThrow(SoroStreamError);
+  });
+
+  it("throws on non-integer", () => {
+    expect(() => batchSize(2.5)).toThrow(SoroStreamError);
   });
 });
 

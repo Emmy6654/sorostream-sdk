@@ -9,8 +9,6 @@ import type {
   FormatUSDCOptions,
   StreamDrift,
   ReconcileStreamOptions,
-  BulkStreamRow,
-  TokenAggregate,
 } from "./types.js";
 
 /** A single point in a stream's payout forecast. */
@@ -183,12 +181,10 @@ export function calculateVestingSchedule(
     // Stream has ended — all tokens are fully vested
     effectiveClaimable = totalAmount;
   } else {
-    const elapsed = currentTime - Math.max(cliffEndTime, stream.startTime);
     const elapsed =
       Math.min(currentTime, stream.endTime) -
       Math.max(cliffEndTime, stream.startTime);
-    effectiveClaimable = stream.flowRate * BigInt(Math.max(0, elapsed));
-    if (currentTime >= stream.endTime) effectiveClaimable = totalAmount;
+    effectiveClaimable = stream.flowRate * BigInt(cliffSeconds + Math.max(0, elapsed));
   }
 
   const milestones: Array<{ time: number; vested: bigint }> = [];
@@ -478,3 +474,43 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
   return rows;
 }
 
+
+/**
+ * Returns the safe maximum number of operations per Soroban transaction.
+ *
+ * Soroban imposes resource limits (CPU instructions, memory, read/write
+ * ledger bytes) that constrain how many contract calls fit in a single
+ * transaction. The default safe limit is **8** operations; pass a lower
+ * value when your operations are heavier than average (e.g. large `topUp`
+ * payloads), or a higher value only after profiling against your specific
+ * workload.
+ *
+ * @param custom - Optional override. Must be a positive integer ≤ 25.
+ * @returns The resolved safe batch size.
+ *
+ * @example
+ * ```ts
+ * // Use the default safe limit
+ * const size = batchSize();          // 8
+ *
+ * // Override for lighter operations
+ * const size = batchSize(12);        // 12
+ *
+ * // Chunk a large list yourself
+ * const ids = await client.getStreamsByRecipient(recipient);
+ * for (let i = 0; i < ids.length; i += batchSize()) {
+ *   await client.batchWithdraw(ids.slice(i, i + batchSize()));
+ * }
+ * ```
+ */
+export function batchSize(custom?: number): number {
+  const DEFAULT = 8;
+  const MAX = 25;
+  if (custom === undefined) return DEFAULT;
+  if (!Number.isInteger(custom) || custom <= 0 || custom > MAX) {
+    throw new SoroStreamError(
+      `batchSize must be a positive integer ≤ ${MAX}, got ${custom}`
+    );
+  }
+  return custom;
+}

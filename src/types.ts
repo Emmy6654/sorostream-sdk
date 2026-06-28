@@ -263,6 +263,8 @@ export interface PasskeyAdapterConfig {
    * Required — without it the browser may select the wrong passkey silently.
    */
   credentialId: ArrayBuffer;
+}
+
 // ── Price feed adapter (#Issue 1) ────────────────────────────────────────────
 
 /**
