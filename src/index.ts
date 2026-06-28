@@ -106,4 +106,9 @@ export type {
   DurationStats,
   StreamHealthReport,
   RecipientAggregate,
+  StreamSnapshot,
+  StreamHistoryEntry,
+  SnapshotVestingPoint,
+  SoroStreamPlugin,
+  MiddlewareContext,
 } from "./types.js";
