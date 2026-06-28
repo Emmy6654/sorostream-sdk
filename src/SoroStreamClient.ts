@@ -66,6 +66,8 @@ import type {
   FeeBumpOptions,
   SoroStreamPlugin,
   MiddlewareContext,
+  StreamActivityEntry,
+  GetActivityLogOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import { calculateVestingSchedule } from "./utils.js";
@@ -1353,6 +1355,60 @@ export class SoroStreamClient {
 
   getPriceFeed(): PriceFeedAdapter | null {
     return this.priceFeed;
+  }
+
+  // ── Issue #166: Stream activity log ──────────────────────────────────────
+
+  /**
+   * Returns a time-ordered list of on-chain events for a stream.
+   *
+   * Supported event types: StreamCreated, StreamWithdrawn, StreamCancelled.
+   * Results are sorted oldest-first and filtered by optional timestamp range.
+   *
+   * @param streamId - The stream to query.
+   * @param options - Optional timestamp filters (`from`/`to` in ms) and pagination.
+   * @returns `StreamActivityEntry[]` sorted oldest-first. Empty array when no events exist.
+   *
+   * @example
+   * ```ts
+   * const log = await client.getActivityLog("42");
+   * const withdrawals = log.filter((e) => e.type === "StreamWithdrawn");
+   * ```
+   */
+  async getActivityLog(
+    streamId: string,
+    options?: GetActivityLogOptions
+  ): Promise<StreamActivityEntry[]> {
+    const { StreamIndexer } = await import("./indexer.js");
+    const indexer = new StreamIndexer(this.server, this.contract.contractId());
+
+    const { events } = await indexer.getStreamHistory(streamId, {
+      limit: options?.limit ?? 100,
+      cursor: options?.cursor,
+    });
+
+    return events
+      .map((e): StreamActivityEntry => {
+        let amount = 0n;
+        if (e.type === "StreamWithdrawn") {
+          amount = e.data.amount;
+        } else if (e.type === "StreamCreated") {
+          amount = e.data.deposit;
+        }
+        return {
+          type: e.type as StreamActivityEntry["type"],
+          timestamp: new Date(e.ledgerClosedAt).getTime(),
+          amount,
+          txHash: e.txHash,
+          ledger: e.ledger,
+        };
+      })
+      .filter((entry) => {
+        if (options?.from != null && entry.timestamp < options.from) return false;
+        if (options?.to != null && entry.timestamp > options.to) return false;
+        return true;
+      })
+      .sort((a, b) => a.timestamp - b.timestamp);
   }
 }
 

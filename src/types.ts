@@ -473,6 +473,41 @@ export interface StreamFilterCriteria {
   status?: StreamStatus;
 }
 
+// ── Issue #166: Stream activity log ─────────────────────────────────────────
+
+/** The type of activity recorded in a stream's activity log. */
+export type StreamActivityType =
+  | "StreamCreated"
+  | "StreamWithdrawn"
+  | "StreamCancelled"
+  | "StreamToppedUp";
+
+/** A single entry in a stream's on-chain activity log. */
+export interface StreamActivityEntry {
+  /** Type of on-chain event. */
+  type: StreamActivityType;
+  /** Unix timestamp (ms) of the ledger close. */
+  timestamp: number;
+  /** Token amount involved, in stroops. `0n` for events with no amount. */
+  amount: bigint;
+  /** Transaction hash that emitted this event. */
+  txHash: string;
+  /** Raw ledger number. */
+  ledger: number;
+}
+
+/** Options for {@link SoroStreamClient.getActivityLog}. */
+export interface GetActivityLogOptions {
+  /** Only return entries at or after this Unix timestamp (ms). */
+  from?: number;
+  /** Only return entries at or before this Unix timestamp (ms). */
+  to?: number;
+  /** Max number of entries to return per page (default 100). */
+  limit?: number;
+  /** Cursor from a previous page for continuation. */
+  cursor?: string;
+}
+
 // ── Issue #73: Stream snapshot export/import ─────────────────────────────────
 
 /** A history entry recording a past event on a stream. */
