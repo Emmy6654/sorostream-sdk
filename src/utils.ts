@@ -368,17 +368,36 @@ export function watchClaimable(
   const reconcileMs = options?.reconcileMs ?? 5_000;
   let baseValue = claimableNow(stream);
   let baseTime = Date.now();
+  let lastEmitted: bigint | null = null;
   let stopped = false;
-
-  onTick(baseValue);
 
   function emit() {
     if (stopped) return;
     const elapsedMs = Date.now() - baseTime;
     const perMs = Number(stream.flowRate) / 1000;
     const interpolated = baseValue + BigInt(Math.floor(perMs * elapsedMs));
+    // Deduplicate emissions across all three emit sources (tickTimer,
+    // reconcile, and the optional WebSocket subscription). Without dedup,
+    // reconcile (or WS) returning the same bigint that the most recent
+    // tick already interpolated to would call onTick twice — once from the
+    // last cached tick, once from the fresh fetch. The most common path
+    // is a network blip: ticks keep interpolating from a stale baseValue,
+    // then reconcile recovers and immediately calls emit() with a value
+    // that matches the last cached value. The same dedup also (correctly)
+    // keeps sub-stroop ticks quiet when Math.floor(perMs * elapsedMs)
+    // rounds to zero between stroop increments — so it is always-on, not
+    // a network-recovery-specific hack.
+    if (interpolated === lastEmitted) return;
+    lastEmitted = interpolated;
     onTick(interpolated);
   }
+
+  // Seed the dedupe cache BEFORE the initial onTick so that a re-entrant
+  // onTick callback (e.g. one that synchronously triggers another
+  // emit() path) cannot be dropped as a duplicate of the uninitialised
+  // cache sentinel.
+  lastEmitted = baseValue;
+  onTick(baseValue);
 
   const tickTimer = setInterval(emit, tickMs);
 

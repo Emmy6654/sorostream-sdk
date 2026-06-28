@@ -102,6 +102,12 @@ export interface CreateStreamParams {
   autoRenew: boolean;
   /** Opt-in check for duplicate stream creation. */
   checkDuplicate?: boolean;
+  /**
+   * Cliff duration in seconds (issue #74).
+   * When set, the configured `validateCliff` function is called before
+   * the transaction is submitted. Defaults to 0 (no cliff).
+   */
+  cliffSeconds?: number;
 }
 
 /** Alias for a single stream creation params object. */
@@ -235,6 +241,8 @@ export interface BulkStreamRow {
   durationSeconds: number;
   /** Optional per-row token override. Falls back to BulkCreateOptions.token when omitted. */
   token?: string;
+  /** Optional cliff duration in seconds for this row (issue #74). Defaults to 0. */
+  cliffSeconds?: number;
 }
 
 /** Options for bulkCreateStreams. */
@@ -463,4 +471,68 @@ export interface StreamFilterCriteria {
   recipient?: string;
   token?: string;
   status?: StreamStatus;
+}
+
+// ── Issue #73: Stream snapshot export/import ─────────────────────────────────
+
+/** A history entry recording a past event on a stream. */
+export interface StreamHistoryEntry {
+  type: string;
+  timestamp: number;
+  txHash: string;
+  data?: Record<string, unknown>;
+}
+
+/** A projected vesting milestone used in the snapshot. */
+export interface SnapshotVestingPoint {
+  time: number;
+  vested: string; // serialised as string to survive JSON bigint round-trip
+}
+
+/** A serialisable snapshot of a stream at a point in time. */
+export interface StreamSnapshot {
+  /** Snapshot schema version. */
+  version: 1;
+  /** Unix timestamp (ms) when the snapshot was taken. */
+  exportedAt: number;
+  /** The full stream parameter set. */
+  stream: Omit<Stream, "deposit" | "flowRate"> & {
+    deposit: string;
+    flowRate: string;
+  };
+  /** Current claimable amount at snapshot time, serialised as string. */
+  claimableAtExport: string;
+  /** Projected vesting curve milestones. */
+  vestingProjection: SnapshotVestingPoint[];
+  /** Recorded event history (may be empty when history is unavailable). */
+  history: StreamHistoryEntry[];
+}
+
+// ── Issue #50: Middleware / plugin system ────────────────────────────────────
+
+/** Context passed to every middleware hook. */
+export interface MiddlewareContext {
+  /** Name of the client method being called (e.g. "createStream"). */
+  method: string;
+  /** Arguments passed to the method. */
+  args: unknown[];
+}
+
+/** A middleware plugin that can observe or intercept client calls. */
+export interface SoroStreamPlugin {
+  /**
+   * Called before the client method executes.
+   * Throw to prevent the call from proceeding.
+   */
+  before?(ctx: MiddlewareContext): void | Promise<void>;
+  /**
+   * Called after the client method resolves successfully.
+   * `result` is the return value of the method.
+   */
+  after?(ctx: MiddlewareContext, result: unknown): void | Promise<void>;
+  /**
+   * Called when the client method throws.
+   * Re-throwing replaces the original error; returning swallows it.
+   */
+  onError?(ctx: MiddlewareContext, error: unknown): void | Promise<void>;
 }
