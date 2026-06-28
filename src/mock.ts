@@ -32,7 +32,9 @@ import type {
   Stream,
   StreamEvent,
   StreamEventFilter,
+  StreamSnapshot,
   StreamSubscription,
+  SoroStreamPlugin,
   TopUpParams,
   TransferStreamParams,
   PauseStreamParams,
@@ -393,6 +395,32 @@ export class MockSoroStreamClient {
       type: "StreamCancelled",
       streamId: params.streamId,
       txHash,
+      ledger: 0,
+      timestamp: now,
+      data: {},
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idA,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamA.sender, recipient: streamA.recipient },
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idB,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamB.sender, recipient: streamB.recipient },
+    });
+
+    return { txHash, streamIdA: idA, streamIdB: idB };
+  }
+
   async transferStream(
     params: TransferStreamParams
   ): Promise<{ txHash: string }> {
@@ -440,25 +468,6 @@ export class MockSoroStreamClient {
       data: {},
     });
 
-    this.emit({
-      type: "StreamCreated",
-      streamId: idA,
-      txHash,
-      ledger: 0,
-      timestamp: now,
-      data: { sender: streamA.sender, recipient: streamA.recipient },
-    });
-
-    this.emit({
-      type: "StreamCreated",
-      streamId: idB,
-      txHash,
-      ledger: 0,
-      timestamp: now,
-      data: { sender: streamB.sender, recipient: streamB.recipient },
-    });
-
-    return { txHash, streamIdA: idA, streamIdB: idB };
     return { txHash: `mock-tx-pause-${params.streamId}` };
   }
 
@@ -556,5 +565,34 @@ export class MockSoroStreamClient {
       callback,
     });
     return { unsubscribe: () => this.listeners.delete(key) };
+  }
+
+  // ── Issue #73: Stream snapshot export / import ───────────────────────────
+
+  async exportStream(streamId: string, cliffSeconds = 0): Promise<StreamSnapshot> {
+    const stream = await this.getStream(streamId);
+    const claimable = await this.getClaimable(streamId);
+    return {
+      version: 1,
+      exportedAt: Date.now(),
+      stream: { ...stream, deposit: stream.deposit.toString(), flowRate: stream.flowRate.toString() },
+      claimableAtExport: claimable.toString(),
+      vestingProjection: [],
+      history: [],
+    };
+  }
+
+  importStream(snapshot: StreamSnapshot): Stream {
+    return {
+      ...snapshot.stream,
+      deposit: BigInt(snapshot.stream.deposit),
+      flowRate: BigInt(snapshot.stream.flowRate),
+    };
+  }
+
+  // ── Issue #50: Middleware / plugin system ─────────────────────────────────
+
+  use(_plugin: SoroStreamPlugin): this {
+    return this;
   }
 }

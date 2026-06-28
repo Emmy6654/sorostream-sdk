@@ -41,6 +41,7 @@ import type {
   StreamEvent,
   StreamEventFilter,
   StreamEventType,
+  StreamSnapshot,
   StreamSubscription,
   TopUpParams,
   TransferStreamParams,
@@ -56,8 +57,11 @@ import type {
   CreateStreamsParams,
   ContractVersion,
   FeeBumpOptions,
+  SoroStreamPlugin,
+  MiddlewareContext,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
+import { calculateVestingSchedule } from "./utils.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -95,6 +99,19 @@ export interface SoroStreamClientOptions {
   contractVersion?: ContractVersion;
   /** Default fee-bump options applied to all transactions (can be overridden per-call). */
   feeBump?: FeeBumpOptions;
+  /**
+   * Custom cliff-duration validator (issue #74).
+   * Called before every `createStream` / `bulkCreateStreams` call.
+   * Throw an error to block transaction submission.
+   * Default behaviour enforces `cliffSeconds >= 0`.
+   */
+  validateCliff?: (cliffSeconds: number) => void | Promise<void>;
+  /**
+   * Middleware plugins to register on the client (issue #50).
+   * Plugins are invoked in registration order for `before` hooks and in
+   * reverse order for `after` and `onError` hooks.
+   */
+  plugins?: SoroStreamPlugin[];
 }
 
 /** Maps a raw Soroban contract value to a Stream object. */
@@ -143,6 +160,8 @@ export class SoroStreamClient {
   private readonly defaultFeeBump: FeeBumpOptions | null = null;
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
+  private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
+  private readonly plugins: SoroStreamPlugin[] = [];
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -161,10 +180,46 @@ export class SoroStreamClient {
     this.encoder = createContractEncoder(this.contract, options.contractVersion ?? "v1");
     this.defaultFeeBump = options.feeBump ?? null;
     this.priceFeed = options.priceFeed ?? null;
+    this.validateCliff = options.validateCliff ?? ((s) => {
+      if (s < 0) throw new Error("cliffSeconds must be >= 0");
+    });
+    this.plugins = options.plugins ?? [];
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
     return this.breaker ? this.breaker.call(fn) : fn();
+  }
+
+  // ── Issue #50: Middleware / plugin system ─────────────────────────────────
+
+  /** Register a middleware plugin. Returns the client for chaining. */
+  use(plugin: SoroStreamPlugin): this {
+    this.plugins.push(plugin);
+    return this;
+  }
+
+  private async runWithMiddleware<T>(
+    method: string,
+    args: unknown[],
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const ctx: MiddlewareContext = { method, args };
+    for (const p of this.plugins) {
+      await p.before?.(ctx);
+    }
+    let result: T;
+    try {
+      result = await fn();
+    } catch (err) {
+      for (const p of [...this.plugins].reverse()) {
+        await p.onError?.(ctx, err);
+      }
+      throw err;
+    }
+    for (const p of [...this.plugins].reverse()) {
+      await p.after?.(ctx, result);
+    }
+    return result;
   }
 
   private async buildAndSubmit(
@@ -362,26 +417,29 @@ export class SoroStreamClient {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ streamId: string; txHash: string }> {
-    if (params.amount <= 0n) throw new InsufficientAmountError();
-    if (params.durationSeconds <= 0)
-      throw new InsufficientAmountError("Duration must be > 0");
+    return this.runWithMiddleware("createStream", [params], async () => {
+      if (params.amount <= 0n) throw new InsufficientAmountError();
+      if (params.durationSeconds <= 0)
+        throw new InsufficientAmountError("Duration must be > 0");
 
-    await this.validateStreamParams(params);
+      await this.validateCliff(params.cliffSeconds ?? 0);
+      await this.validateStreamParams(params);
 
-    const sender = await this.walletAdapter.getPublicKey();
-    const operation = this.encoder.createStream(sender, params);
-    const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+      const sender = await this.walletAdapter.getPublicKey();
+      const operation = this.encoder.createStream(sender, params);
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const txHash = await this.buildAndSubmit(operation, signal, feeBump);
 
-    const result = await this.getStreamsBySender(sender);
-    const streams = Array.isArray(result) ? result : result.streams;
-    const latest = streams[streams.length - 1];
-    if (!latest)
-      throw new StreamNotFoundError(
-        "(unknown — post-creation fetch returned empty)"
-      );
+      const result = await this.getStreamsBySender(sender);
+      const streams = Array.isArray(result) ? result : result.streams;
+      const latest = streams[streams.length - 1];
+      if (!latest)
+        throw new StreamNotFoundError(
+          "(unknown — post-creation fetch returned empty)"
+        );
 
-    return { streamId: latest.id, txHash };
+      return { streamId: latest.id, txHash };
+    });
   }
 
   /**
@@ -661,6 +719,9 @@ export class SoroStreamClient {
     const streamIdB = latest[1]?.id ?? "";
 
     return { txHash, streamIdA, streamIdB };
+  }
+
+  /**
    * Transfers ownership of a stream to a new recipient address mid-flight.
    * Only the sender can transfer ownership.
    */
@@ -912,7 +973,6 @@ export class SoroStreamClient {
             "get_stream",
             nativeToScVal(BigInt(streamId), { type: "u64" })
           )
-          .build()
       )
     );
 
@@ -1071,70 +1131,123 @@ export class SoroStreamClient {
     };
   }
 
+  // ── Issue #73: Stream snapshot export / import ───────────────────────────
+
+  /**
+   * Exports a complete stream snapshot including current claimable amount and
+   * a projected vesting curve. The result is fully JSON-serialisable.
+   *
+   * @param streamId - The stream to snapshot.
+   * @param cliffSeconds - Optional cliff duration in seconds for the vesting projection (default 0).
+   */
+  async exportStream(streamId: string, cliffSeconds = 0): Promise<StreamSnapshot> {
+    const stream = await this.getStream(streamId);
+    const claimable = await this.getClaimable(streamId);
+
+    const now = Math.floor(Date.now() / 1000);
+    const vesting = calculateVestingSchedule(stream, cliffSeconds, now);
+
+    return {
+      version: 1,
+      exportedAt: Date.now(),
+      stream: {
+        ...stream,
+        deposit: stream.deposit.toString(),
+        flowRate: stream.flowRate.toString(),
+      },
+      claimableAtExport: claimable.toString(),
+      vestingProjection: vesting.milestones.map((m) => ({
+        time: m.time,
+        vested: m.vested.toString(),
+      })),
+      history: [],
+    };
+  }
+
+  /**
+   * Reconstructs a read-only stream view from a previously exported snapshot.
+   * Useful for offline analysis without a live RPC connection.
+   *
+   * @param snapshot - A `StreamSnapshot` produced by `exportStream`.
+   * @returns The deserialized `Stream` object with bigint fields restored.
+   */
+  importStream(snapshot: StreamSnapshot): import("./types.js").Stream {
+    return {
+      ...snapshot.stream,
+      deposit: BigInt(snapshot.stream.deposit),
+      flowRate: BigInt(snapshot.stream.flowRate),
+    };
+  }
+
   // ── Bulk operations ───────────────────────────────────────────────────────
 
   async bulkCreateStreams(
     rows: import("./types.js").BulkStreamRow[],
     options: BulkCreateOptions
   ): Promise<BulkCreateResult> {
-    const sender = await this.walletAdapter.getPublicKey();
-    const defaultToken = options.token;
-    const autoRenew = options.autoRenew ?? false;
-    const batchSize = options.batchSize ?? 8;
+    return this.runWithMiddleware("bulkCreateStreams", [rows, options], async () => {
+      const sender = await this.walletAdapter.getPublicKey();
+      const defaultToken = options.token;
+      const autoRenew = options.autoRenew ?? false;
+      const batchSize = options.batchSize ?? 8;
 
-    const results: BulkCreateResult["batches"] = [];
+      // Validate cliff for all rows before submitting anything
+      for (const row of rows) {
+        await this.validateCliff(row.cliffSeconds ?? 0);
+      }
 
-    for (let i = 0; i < rows.length; i += batchSize) {
-      const chunk = rows.slice(i, i + batchSize);
-      const chunkHasMixedTokens = chunk.some(
-        (r) => r.token != null && r.token !== defaultToken
-      );
+      const results: BulkCreateResult["batches"] = [];
 
-      if (chunkHasMixedTokens) {
-        // When rows have different tokens, submit each as a separate transaction
-        for (const row of chunk) {
-          const rowToken = row.token ?? defaultToken;
-          const operation = this.encoder.createStream(sender, {
-            recipient: row.recipient,
-            token: rowToken,
-            amount: row.amount,
-            durationSeconds: row.durationSeconds,
-            autoRenew,
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const chunk = rows.slice(i, i + batchSize);
+        const chunkHasMixedTokens = chunk.some(
+          (r) => r.token != null && r.token !== defaultToken
+        );
+
+        if (chunkHasMixedTokens) {
+          for (const row of chunk) {
+            const rowToken = row.token ?? defaultToken;
+            const operation = this.encoder.createStream(sender, {
+              recipient: row.recipient,
+              token: rowToken,
+              amount: row.amount,
+              durationSeconds: row.durationSeconds,
+              autoRenew,
+            });
+            const txHash = await this.buildAndSubmit(operation);
+
+            const result = await this.getStreamsBySender(sender);
+            const streams = Array.isArray(result) ? result : result.streams;
+            const newStreams = streams.slice(-1);
+            const streamIds = newStreams.map((s) => s.id);
+
+            results.push({ txHash, streamIds, rows: [row] });
+          }
+        } else {
+          const operations = chunk.map((row) => {
+            const rowToken = row.token ?? defaultToken;
+            return this.encoder.createStream(sender, {
+              recipient: row.recipient,
+              token: rowToken,
+              amount: row.amount,
+              durationSeconds: row.durationSeconds,
+              autoRenew,
+            });
           });
-          const txHash = await this.buildAndSubmit(operation);
+
+          const txHash = await this.executeBatch(operations);
 
           const result = await this.getStreamsBySender(sender);
           const streams = Array.isArray(result) ? result : result.streams;
-          const newStreams = streams.slice(-1);
+          const newStreams = streams.slice(-chunk.length);
           const streamIds = newStreams.map((s) => s.id);
 
-          results.push({ txHash, streamIds, rows: [row] });
+          results.push({ txHash, streamIds, rows: chunk });
         }
-      } else {
-        // All rows in this chunk use the same token — batch into one transaction
-        const operations = chunk.map((row) => {
-          const rowToken = row.token ?? defaultToken;
-          return this.encoder.createStream(sender, {
-            recipient: row.recipient,
-            token: rowToken,
-            amount: row.amount,
-            durationSeconds: row.durationSeconds,
-            autoRenew,
-          });
-        });
-
-        const txHash = await this.executeBatch(operations);
-
-        const result = await this.getStreamsBySender(sender);
-        const streams = Array.isArray(result) ? result : result.streams;
-        const newStreams = streams.slice(-chunk.length);
-        const streamIds = newStreams.map((s) => s.id);
-
-        results.push({ txHash, streamIds, rows: chunk });
       }
-    }
 
-    return { batches: results };
+      return { batches: results };
+    });
   }
 
   // ── Utility ───────────────────────────────────────────────────────────────
