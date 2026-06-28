@@ -16,6 +16,7 @@ import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
 import type { CircuitBreakerOptions } from "./circuitBreaker.js";
+import { Cache } from "./cache.js";
 import {
   TransactionFailedError,
   StreamNotFoundError,
@@ -143,6 +144,8 @@ export class SoroStreamClient {
   private readonly defaultFeeBump: FeeBumpOptions | null = null;
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
+  /** Short-lived cache for stream objects. Used for optimistic updates. */
+  private readonly streamCache = new Cache<string, Stream>(10_000);
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -502,9 +505,10 @@ export class SoroStreamClient {
 
   /**
    * Tops up an existing stream with additional tokens, extending its duration.
+   * After the transaction confirms, the local stream cache is updated optimistically
+   * so that the next `getStream` call reflects the new balance without waiting for
+   * the next RPC poll.
    * @param params - Top-up parameters.
-   * @param signal - Optional AbortSignal to cancel transaction polling.
-   * @returns The transaction hash and new end time.
    * @param signal - Optional abort signal.
    * @param options - Optional write options.
    * @returns The transaction hash and new end time, or simulation result.
@@ -523,6 +527,10 @@ export class SoroStreamClient {
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+
+    // Fetch fresh on-chain state and cache it so immediate getStream() calls
+    // reflect the topped-up balance without stale data.
+    this.streamCache.delete(params.streamId);
     const stream = await this.getStream(params.streamId);
     return { txHash, newEndTime: new Date(stream.endTime * 1000) };
   }
@@ -661,6 +669,9 @@ export class SoroStreamClient {
     const streamIdB = latest[1]?.id ?? "";
 
     return { txHash, streamIdA, streamIdB };
+  }
+
+  /**
    * Transfers ownership of a stream to a new recipient address mid-flight.
    * Only the sender can transfer ownership.
    */
@@ -901,10 +912,14 @@ export class SoroStreamClient {
 
   /**
    * Returns the full stream data for a given stream ID.
+   * Returns a cached value when one is present (populated by optimistic updates).
    * Automatically retries on transient RPC errors.
    * @param streamId - The stream ID to look up.
    */
   async getStream(streamId: string): Promise<Stream> {
+    const cached = this.streamCache.get(streamId);
+    if (cached) return cached;
+
     const result = await withRetry(
       () =>
         this.simulateOp(
@@ -924,7 +939,9 @@ export class SoroStreamClient {
       result as rpc.Api.SimulateTransactionSuccessResponse
     ).result?.retval;
     if (!returnVal) throw new Error("No return value from contract");
-    return scValToStream(returnVal);
+    const stream = scValToStream(returnVal);
+    this.streamCache.set(streamId, stream);
+    return stream;
   }
 
   /**

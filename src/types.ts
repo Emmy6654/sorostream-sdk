@@ -74,17 +74,17 @@ export interface Stream {
   deposit: bigint;
   /** Tokens released per second in stroops. */
   flowRate: bigint;
-  /** Unix timestamp when the stream started. */
+  /** Unix timestamp (seconds) when the stream started. */
   startTime: number;
-  /** Unix timestamp when the stream ends. */
+  /** Unix timestamp (seconds) when the stream ends. */
   endTime: number;
-  /** Unix timestamp of the last withdrawal. */
+  /** Unix timestamp (seconds) of the last withdrawal. */
   lastWithdrawTime: number;
   /** Current stream status. */
   status: StreamStatus;
   /** Whether the stream auto-renews on completion. */
   autoRenew: boolean;
-  /** Unix timestamp when the stream was paused (undefined if not paused). */
+  /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
 }
 
