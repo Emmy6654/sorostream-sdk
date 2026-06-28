@@ -526,6 +526,106 @@ describe("watchClaimable", () => {
     vi.advanceTimersByTime(5000);
     expect(onTick).not.toHaveBeenCalled();
   });
+
+  it("deduplicates emissions when reconcile resumes after a network blip (same value twice)", async () => {
+    // Pick parameters so that interpolation is **invariant** over the test
+    // window: flowRate = 1 stroop/sec means perMs ≈ 0.001, and with
+    // tickMs = 200 the floored per-tick increment is 0. That means every
+    // tick AND the reconcile-driven emit() compute the same value (5000n)
+    // — exactly the duplicate-emission scenario from the bug report.
+    // A weak test with a coarser flow rate would never exercise the
+    // dedup branch because each tick would advance by ≥1 stroop and
+    // look distinct from the last.
+    const now = Math.floor(Date.now() / 1000);
+    const stream: Stream = {
+      id: "0",
+      sender: "GSENDER",
+      recipient: "GRECIPIENT",
+      token: "GTOKEN",
+      deposit: 100_000n,
+      flowRate: 1n,
+      startTime: now - 6000,
+      endTime: now + 6000,
+      lastWithdrawTime: now - 5000, // claimableNow(stream) = 1n * 5000 = 5000n
+      status: "Active",
+      autoRenew: false,
+    };
+
+    // First reconcile throws (simulate network down on first poll);
+    // subsequent reconciles return 5000n — the exact same value the
+    // invariant interpolation emits on every tick.
+    let reconcileCalls = 0;
+    const reconcile = vi.fn().mockImplementation(async () => {
+      reconcileCalls++;
+      if (reconcileCalls === 1) throw new Error("network down");
+      return 5000n;
+    });
+
+    const onTick = vi.fn();
+    const unsubscribe = watchClaimable(stream, reconcile, onTick, {
+      tickMs: 200,
+      reconcileMs: 1_000,
+    });
+
+    // Advance enough to fire ~12 ticks AND 2 reconcile attempts.
+    await vi.advanceTimersByTimeAsync(2_500);
+
+    // Without dedup, 5000n would be emitted ~13 times. With dedup, only
+    // the initial seed call survives — every other emit() finds
+    // interpolated === lastEmitted (5000n) and short-circuits.
+    const callsWith5000 = onTick.mock.calls.filter(
+      ([v]) => v === 5000n
+    ).length;
+    expect(callsWith5000).toBe(1);
+    // Sanity: the watcher did actually run (not just an early-skip bug).
+    expect(reconcileCalls).toBeGreaterThanOrEqual(2);
+
+    unsubscribe();
+  });
+
+  it("still emits when reconcile returns a value that differs from the last emitted value", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream: Stream = {
+      id: "0",
+      sender: "GSENDER",
+      recipient: "GRECIPIENT",
+      token: "GTOKEN",
+      deposit: 100_000n,
+      flowRate: 1n,
+      startTime: now - 6000,
+      endTime: now + 6000,
+      lastWithdrawTime: now - 5000,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    let reconcileCalls = 0;
+    const reconcile = vi.fn().mockImplementation(async () => {
+      reconcileCalls++;
+      // First reconcile: throw (simulate dropped network).
+      // Second reconcile: succeed with a value materially larger than
+      // 5000n, so it must produce a fresh emission distinct from the
+      // last cached tick.
+      if (reconcileCalls === 1) throw new Error("network down");
+      return 9_999n;
+    });
+
+    const onTick = vi.fn();
+    const unsubscribe = watchClaimable(stream, reconcile, onTick, {
+      tickMs: 200,
+      reconcileMs: 1_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(2_500);
+
+    // Asserting `some` would let a buggy (no-dedup) implementation
+    // pass if reconcile happened to emit more than once. Asserting
+    // exactly one catches both "didn't emit at all" and "over-emitted".
+    const callsWith9999 = onTick.mock.calls.filter(([v]) => v === 9_999n).length;
+    expect(callsWith9999).toBe(1);
+
+    unsubscribe();
+  });
 });
 
 // ── batchSize helper (issue #95) ─────────────────────────────────────────────
