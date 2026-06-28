@@ -35,6 +35,8 @@ import type {
   PaginatedStreams,
   PaginationParams,
   PriceFeedAdapter,
+  SplitStreamParams,
+  SplitStreamResult,
   Stream,
   StreamEvent,
   StreamEventFilter,
@@ -615,6 +617,50 @@ export class SoroStreamClient {
   }
 
   /**
+   * Splits an active stream into two streams with a user-defined ratio,
+   * cancelling the original stream.
+   *
+   * The remaining balance of the original stream is divided according to the
+   * ratio (ratioNumerator / ratioDenominator) and two new streams are created
+   * with proportional flow rates. The original stream is cancelled.
+   *
+   * @param params - Split stream parameters.
+   * @param signal - Optional AbortSignal to cancel transaction polling.
+   * @param options - Optional write options.
+   * @returns The transaction hash and the two new stream IDs.
+   */
+  async splitStream(
+    params: SplitStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<SplitStreamResult> {
+    if (params.ratioNumerator <= 0 || params.ratioDenominator <= 0) {
+      throw new Error("Ratio must be positive");
+    }
+    if (params.ratioNumerator >= params.ratioDenominator) {
+      throw new Error("Ratio numerator must be less than denominator");
+    }
+
+    const sender = await this.walletAdapter.getPublicKey();
+
+    if (!isValidStellarAddress(params.recipientA)) {
+      throw new InvalidAddressError(params.recipientA);
+    }
+    if (!isValidStellarAddress(params.recipientB)) {
+      throw new InvalidAddressError(params.recipientB);
+    }
+
+    const operation = this.encoder.splitStream(sender, params);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+
+    const result = await this.getStreamsBySender(sender);
+    const streams = Array.isArray(result) ? result : result.streams;
+    const latest = streams.slice(-2);
+    const streamIdA = latest[0]?.id ?? "";
+    const streamIdB = latest[1]?.id ?? "";
+
+    return { txHash, streamIdA, streamIdB };
    * Transfers ownership of a stream to a new recipient address mid-flight.
    * Only the sender can transfer ownership.
    */
@@ -1032,7 +1078,7 @@ export class SoroStreamClient {
     options: BulkCreateOptions
   ): Promise<BulkCreateResult> {
     const sender = await this.walletAdapter.getPublicKey();
-    const token = options.token;
+    const defaultToken = options.token;
     const autoRenew = options.autoRenew ?? false;
     const batchSize = options.batchSize ?? 8;
 
@@ -1040,24 +1086,52 @@ export class SoroStreamClient {
 
     for (let i = 0; i < rows.length; i += batchSize) {
       const chunk = rows.slice(i, i + batchSize);
-      const operations = chunk.map((row) =>
-        this.encoder.createStream(sender, {
-          recipient: row.recipient,
-          token,
-          amount: row.amount,
-          durationSeconds: row.durationSeconds,
-          autoRenew,
-        })
+      const chunkHasMixedTokens = chunk.some(
+        (r) => r.token != null && r.token !== defaultToken
       );
 
-      const txHash = await this.executeBatch(operations);
+      if (chunkHasMixedTokens) {
+        // When rows have different tokens, submit each as a separate transaction
+        for (const row of chunk) {
+          const rowToken = row.token ?? defaultToken;
+          const operation = this.encoder.createStream(sender, {
+            recipient: row.recipient,
+            token: rowToken,
+            amount: row.amount,
+            durationSeconds: row.durationSeconds,
+            autoRenew,
+          });
+          const txHash = await this.buildAndSubmit(operation);
 
-      const result = await this.getStreamsBySender(sender);
-      const streams = Array.isArray(result) ? result : result.streams;
-      const newStreams = streams.slice(-chunk.length);
-      const streamIds = newStreams.map((s) => s.id);
+          const result = await this.getStreamsBySender(sender);
+          const streams = Array.isArray(result) ? result : result.streams;
+          const newStreams = streams.slice(-1);
+          const streamIds = newStreams.map((s) => s.id);
 
-      results.push({ txHash, streamIds, rows: chunk });
+          results.push({ txHash, streamIds, rows: [row] });
+        }
+      } else {
+        // All rows in this chunk use the same token — batch into one transaction
+        const operations = chunk.map((row) => {
+          const rowToken = row.token ?? defaultToken;
+          return this.encoder.createStream(sender, {
+            recipient: row.recipient,
+            token: rowToken,
+            amount: row.amount,
+            durationSeconds: row.durationSeconds,
+            autoRenew,
+          });
+        });
+
+        const txHash = await this.executeBatch(operations);
+
+        const result = await this.getStreamsBySender(sender);
+        const streams = Array.isArray(result) ? result : result.streams;
+        const newStreams = streams.slice(-chunk.length);
+        const streamIds = newStreams.map((s) => s.id);
+
+        results.push({ txHash, streamIds, rows: chunk });
+      }
     }
 
     return { batches: results };

@@ -27,6 +27,8 @@ import type {
   PaginatedStreams,
   PaginationParams,
   SetOperatorParams,
+  SplitStreamParams,
+  SplitStreamResult,
   Stream,
   StreamEvent,
   StreamEventFilter,
@@ -322,6 +324,75 @@ export class MockSoroStreamClient {
     return { txHash: `mock-tx-op-topup-${params.streamId}` };
   }
 
+  async splitStream(params: SplitStreamParams): Promise<SplitStreamResult> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (params.ratioNumerator <= 0 || params.ratioDenominator <= 0) {
+      throw new Error("Ratio must be positive");
+    }
+    if (params.ratioNumerator >= params.ratioDenominator) {
+      throw new Error("Ratio numerator must be less than denominator");
+    }
+
+    // Cancel the original stream
+    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+
+    const now = nowSec();
+    const remainingDuration = stream.endTime - Math.max(now, stream.lastWithdrawTime);
+    const remainingBalance = stream.flowRate * BigInt(Math.max(0, remainingDuration));
+
+    // Calculate split amounts based on ratio
+    const ratioA = BigInt(params.ratioNumerator);
+    const ratioB = BigInt(params.ratioDenominator - params.ratioNumerator);
+    const totalRatio = BigInt(params.ratioDenominator);
+
+    const amountA = (remainingBalance * ratioA) / totalRatio;
+    const amountB = (remainingBalance * ratioB) / totalRatio;
+
+    const flowRateA = amountA / BigInt(Math.max(1, remainingDuration));
+    const flowRateB = amountB / BigInt(Math.max(1, remainingDuration));
+
+    const idA = String(nextId++);
+    const idB = String(nextId++);
+
+    const streamA: Stream = {
+      id: idA,
+      sender: stream.sender,
+      recipient: params.recipientA,
+      token: stream.token,
+      deposit: amountA,
+      flowRate: flowRateA,
+      startTime: now,
+      endTime: now + remainingDuration,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    const streamB: Stream = {
+      id: idB,
+      sender: stream.sender,
+      recipient: params.recipientB,
+      token: stream.token,
+      deposit: amountB,
+      flowRate: flowRateB,
+      startTime: now,
+      endTime: now + remainingDuration,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    this.streams.set(idA, streamA);
+    this.streams.set(idB, streamB);
+
+    const txHash = `mock-tx-split-${params.streamId}`;
+
+    this.emit({
+      type: "StreamCancelled",
+      streamId: params.streamId,
+      txHash,
   async transferStream(
     params: TransferStreamParams
   ): Promise<{ txHash: string }> {
@@ -369,6 +440,25 @@ export class MockSoroStreamClient {
       data: {},
     });
 
+    this.emit({
+      type: "StreamCreated",
+      streamId: idA,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamA.sender, recipient: streamA.recipient },
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idB,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamB.sender, recipient: streamB.recipient },
+    });
+
+    return { txHash, streamIdA: idA, streamIdB: idB };
     return { txHash: `mock-tx-pause-${params.streamId}` };
   }
 
