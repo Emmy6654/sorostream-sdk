@@ -164,6 +164,12 @@ export function claimableNow(stream: Stream): bigint {
  * A "4-year vesting with 1-year cliff" can only be approximated by adjusting
  * the displayed schedule — **this is NOT enforced on-chain**.
  *
+ * All duration / elapsed / milestone arithmetic is performed in BigInt so that
+ * streams whose `flowRate × duration` exceeds `Number.MAX_SAFE_INTEGER`
+ * (≈9.007e15) do not lose precision through implicit Number coercions.
+ * The `time` field of each milestone is the only place we round back to Number
+ * since Unix timestamps must be representable as Numbers.
+ *
  * @param stream - The stream object.
  * @param cliffSeconds - Duration of the cliff period in seconds.
  * @param now - Optional override for "current" time (Unix seconds). Defaults to Date.now().
@@ -176,17 +182,33 @@ export function calculateVestingSchedule(
   const currentTime = now ?? Math.floor(Date.now() / 1000);
   const cliffEndTime = stream.startTime + cliffSeconds;
   const inCliff = currentTime < cliffEndTime;
-  const totalSeconds = stream.endTime - stream.startTime;
-  const totalAmount = stream.flowRate * BigInt(totalSeconds);
+
+  // Promote all duration / elapsed arithmetic to BigInt so we never round
+  // intermediate counts through Number. This keeps totalAmount, vested
+  // amounts, and effectiveClaimable exact when stream.flowRate × duration
+  // exceeds Number.MAX_SAFE_INTEGER.
+  const totalSecondsBig = BigInt(stream.endTime - stream.startTime);
+  const cliffSecondsBig = BigInt(cliffSeconds);
+  const totalAmount = stream.flowRate * totalSecondsBig;
 
   let effectiveClaimable: bigint;
   if (inCliff) {
     effectiveClaimable = 0n;
   } else if (currentTime >= stream.endTime) {
-    effectiveClaimable = stream.flowRate * BigInt(
-      stream.endTime - Math.max(cliffEndTime, stream.startTime)
-    );
+    // Post-cliff portion of the schedule (clamp at 0 if no real cliff applies).
+    const postCliffSeconds =
+      cliffSecondsBig < totalSecondsBig
+        ? totalSecondsBig - cliffSecondsBig
+        : 0n;
+    effectiveClaimable = stream.flowRate * postCliffSeconds;
   } else {
+    // Elapsed seconds from end-of-cliff (or from startTime when no cliff)
+    // up to min(now, endTime).
+    const minNowBig = BigInt(Math.min(currentTime, stream.endTime));
+    const vestingStartBig = BigInt(Math.max(cliffEndTime, stream.startTime));
+    const elapsedBig =
+      minNowBig > vestingStartBig ? minNowBig - vestingStartBig : 0n;
+    effectiveClaimable = stream.flowRate * elapsedBig;
     const elapsed =
       Math.min(currentTime, stream.endTime) -
       Math.max(cliffEndTime, stream.startTime);
@@ -196,19 +218,25 @@ export function calculateVestingSchedule(
 
   const milestones: Array<{ time: number; vested: bigint }> = [];
 
-  if (cliffSeconds < totalSeconds) {
+  if (cliffSecondsBig < totalSecondsBig) {
     milestones.push({
       time: cliffEndTime,
-      vested: stream.flowRate * BigInt(cliffSeconds),
+      vested: stream.flowRate * cliffSecondsBig,
     });
   }
 
-  for (const pct of [0.25, 0.5, 0.75, 1]) {
-    const t = stream.startTime + Math.floor(totalSeconds * pct);
+  // Use integer percentage literals (25n, 50n, 75n, 100n) and divide in
+  // BigInt — this avoids `Math.floor(totalSeconds × decimalPct)` losing
+  // precision when totalSeconds is large. The final `Number()` cast below
+  // is for the `time` Unix-timestamp field and is the only intentional
+  // Number conversion.
+  for (const pct of [25n, 50n, 75n, 100n] as const) {
+    const secondsAtPct = (totalSecondsBig * pct) / 100n;
+    const t = stream.startTime + Number(secondsAtPct);
     if (t > cliffEndTime) {
       milestones.push({
         time: t,
-        vested: stream.flowRate * BigInt(Math.floor(totalSeconds * pct)),
+        vested: stream.flowRate * secondsAtPct,
       });
     }
   }
