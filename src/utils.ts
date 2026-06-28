@@ -9,6 +9,11 @@ import type {
   FormatUSDCOptions,
   StreamDrift,
   ReconcileStreamOptions,
+  StreamTotals,
+  StatusBreakdown,
+  DurationStats,
+  StreamHealthReport,
+  RecipientAggregate,
 } from "./types.js";
 
 /** A single point in a stream's payout forecast. */
@@ -219,11 +224,83 @@ export function calculateVestingSchedule(
 }
 
 /**
+ * Subscribes to real-time claimable balance updates via WebSocket.
+ *
+ * Returns an unsubscribe function. Falls back to a no-op if WebSocket is
+ * unavailable or the connection fails, relying on the caller to provide
+ * a fallback mechanism.
+ *
+ * @param wsUrl - WebSocket endpoint URL.
+ * @param streamId - The stream ID to subscribe to.
+ * @param onClaimable - Callback invoked with the latest on-chain claimable value.
+ * @returns A function that closes the WS connection when called.
+ *
+ * @example
+ * ```ts
+ * const stop = watchClaimableWs("wss://rpc.example.com/ws", "42", (v) => {
+ *   console.log("On-chain claimable:", v);
+ * });
+ * // later: stop();
+ * ```
+ */
+export function watchClaimableWs(
+  wsUrl: string,
+  streamId: string,
+  onClaimable: (claimable: bigint) => void
+): () => void {
+  let ws: WebSocket | null = null;
+  let stopped = false;
+
+  try {
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      if (stopped) return;
+      ws?.send(JSON.stringify({ type: "subscribe", streamId }));
+    };
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (stopped) return;
+      try {
+        const data = JSON.parse(event.data as string);
+        if (data.type === "claimable" && data.streamId === streamId) {
+          onClaimable(BigInt(data.value));
+        }
+      } catch {
+        // swallow parse errors
+      }
+    };
+
+    ws.onerror = () => {
+      // Connection failed — silently no-op; caller should provide fallback
+    };
+  } catch {
+    // WebSocket not supported in this environment
+  }
+
+  return () => {
+    stopped = true;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.close();
+      ws = null;
+    }
+  };
+}
+
+/**
  * Creates a live "counting up" ticker for the claimable balance of a stream.
  *
  * Emits smoothly interpolated claimable values on an interval, reconciled
  * periodically against the on-chain `getClaimable` value. Returns an unsubscribe
  * function to stop the ticker.
+ *
+ * When `options.wsUrl` is provided, the function also subscribes to real-time
+ * WebSocket updates from the RPC endpoint. The WS handler updates the base
+ * value used for interpolation, providing more accurate estimates between
+ * polling reconciliations. Falls back to polling-only if WS is unavailable.
  *
  * @param stream - The stream object.
  * @param reconcile - Async function that fetches the current on-chain claimable (typically `client.getClaimable(id)`).
@@ -239,6 +316,17 @@ export function calculateVestingSchedule(
  *   (claimable) => { displayElement.textContent = formatUSDC(claimable); }
  * );
  * // later: unsubscribe();
+ * ```
+ *
+ * @example
+ * ```ts
+ * // With WebSocket subscription for real-time updates
+ * const unsubscribe = watchClaimable(
+ *   stream,
+ *   () => client.getClaimable(stream.id),
+ *   (claimable) => { displayElement.textContent = formatUSDC(claimable); },
+ *   { wsUrl: "wss://rpc.example.com/ws", wsStreamId: stream.id }
+ * );
  * ```
  */
 export function watchClaimable(
@@ -277,10 +365,21 @@ export function watchClaimable(
     }
   }, reconcileMs);
 
+  // Optional WebSocket subscription for real-time on-chain updates
+  let stopWs: (() => void) | null = null;
+  if (options?.wsUrl && options?.wsStreamId) {
+    stopWs = watchClaimableWs(options.wsUrl, options.wsStreamId, (actual) => {
+      baseValue = actual;
+      baseTime = Date.now();
+      emit();
+    });
+  }
+
   return () => {
     stopped = true;
     clearInterval(tickTimer);
     clearInterval(reconcileTimer);
+    stopWs?.();
   };
 }
 
@@ -457,6 +556,155 @@ export function aggregateStreamsByToken(streams: Stream[]): TokenAggregate[] {
   });
 }
 
+// ── Dashboard / reporting aggregators ─────────────────────────────────────────
+
+/**
+ * Aggregates total deposited, claimable, claimed, and remaining amounts
+ * across a set of streams.
+ *
+ * @param streams - Stream list.
+ * @returns Aggregate totals.
+ *
+ * @example
+ * ```ts
+ * const totals = totalValueStreamed(streams);
+ * console.log(totals.totalDeposited, totals.totalClaimable);
+ * ```
+ */
+export function totalValueStreamed(streams: Stream[]): StreamTotals {
+  let totalDeposited = 0n;
+  let totalClaimable = 0n;
+  let totalClaimed = 0n;
+  let totalRemaining = 0n;
+
+  for (const s of streams) {
+    totalDeposited += s.deposit;
+    totalClaimable += claimableNow(s);
+    const claimed = s.deposit - s.flowRate * BigInt(s.endTime - s.lastWithdrawTime);
+    totalClaimed += claimed > 0n ? claimed : 0n;
+    totalRemaining += s.deposit - (claimed > 0n ? claimed : 0n);
+  }
+
+  return {
+    totalStreams: streams.length,
+    totalDeposited,
+    totalClaimable,
+    totalClaimed,
+    totalRemaining,
+  };
+}
+
+/**
+ * Breaks down a set of streams by their status (Active, Cancelled, Completed).
+ *
+ * @param streams - Stream list.
+ * @returns Per-status counts.
+ */
+export function aggregateStreamsByStatus(streams: Stream[]): StatusBreakdown {
+  let active = 0;
+  let cancelled = 0;
+  let completed = 0;
+
+  for (const s of streams) {
+    if (s.status === "Active") active++;
+    else if (s.status === "Cancelled") cancelled++;
+    else if (s.status === "Completed") completed++;
+  }
+
+  return { active, cancelled, completed };
+}
+
+/**
+ * Computes duration statistics (average, min, max, median) for a set of streams.
+ * Durations are calculated as `endTime - startTime` for each stream.
+ *
+ * @param streams - Stream list.
+ * @returns Duration statistics in seconds.
+ */
+export function averageStreamDuration(streams: Stream[]): DurationStats {
+  if (streams.length === 0) {
+    return { average: 0, min: 0, max: 0, median: 0 };
+  }
+
+  const durations = streams
+    .map((s) => Math.max(0, s.endTime - s.startTime))
+    .sort((a, b) => a - b);
+
+  const sum = durations.reduce((a, b) => a + b, 0);
+  const mid = Math.floor(durations.length / 2);
+
+  return {
+    average: Math.round(sum / durations.length),
+    min: durations[0]!,
+    max: durations[durations.length - 1]!,
+    median: durations.length % 2 === 0
+      ? Math.round((durations[mid - 1]! + durations[mid]!) / 2)
+      : durations[mid]!,
+  };
+}
+
+/**
+ * Generates a health report for a set of streams, counting how many are
+ * expiring, stalled, or underfunded.
+ *
+ * @param streams - Stream list.
+ * @param expiringThresholdSeconds - Seconds threshold for expiry (default 86400 = 24h).
+ * @param staleThresholdSeconds - Seconds since last withdraw for stall (default 604800 = 7d).
+ * @returns Health report.
+ */
+export function streamHealthSummary(
+  streams: Stream[],
+  expiringThresholdSeconds = 86400,
+  staleThresholdSeconds = 604800
+): StreamHealthReport {
+  let expiring = 0;
+  let stalled = 0;
+  let underfunded = 0;
+  let totalActive = 0;
+
+  for (const s of streams) {
+    if (s.status !== "Active") continue;
+    totalActive++;
+    if (isStreamExpiring(s, expiringThresholdSeconds)) expiring++;
+    if (isStreamStalled(s, staleThresholdSeconds)) stalled++;
+    if (isStreamUnderfunded(s)) underfunded++;
+  }
+
+  return { expiring, stalled, underfunded, totalActive };
+}
+
+/**
+ * Groups streams by recipient address and returns per-recipient aggregates.
+ *
+ * @param streams - Stream list.
+ * @returns Per-recipient aggregates sorted by deposited amount descending.
+ */
+export function aggregateStreamsByRecipient(streams: Stream[]): RecipientAggregate[] {
+  const map = new Map<string, RecipientAggregate>();
+
+  for (const s of streams) {
+    const existing = map.get(s.recipient) ?? {
+      recipient: s.recipient,
+      streamCount: 0,
+      deposited: 0n,
+      claimable: 0n,
+      claimedSoFar: 0n,
+    };
+    existing.streamCount += 1;
+    existing.deposited += s.deposit;
+    existing.claimable += claimableNow(s);
+    const claimed = s.deposit - s.flowRate * BigInt(s.endTime - s.lastWithdrawTime);
+    existing.claimedSoFar += claimed > 0n ? claimed : 0n;
+    map.set(s.recipient, existing);
+  }
+
+  return [...map.values()].sort((a, b) => {
+    if (b.deposited > a.deposited) return 1;
+    if (b.deposited < a.deposited) return -1;
+    return 0;
+  });
+}
+
 /**
  * Parses a CSV string into BulkStreamRow objects.
  *
@@ -483,6 +731,7 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
   const recipientIdx = cols.indexOf("recipient");
   const amountIdx = cols.indexOf("amount");
   const durationIdx = cols.indexOf("durationseconds");
+  const tokenIdx = cols.indexOf("token");
 
   if (recipientIdx === -1) throw new Error("CSV missing 'recipient' column");
   if (amountIdx === -1) throw new Error("CSV missing 'amount' column");
@@ -506,7 +755,12 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
       throw new Error(`Row ${i + 1}: invalid durationSeconds`);
     }
 
-    rows.push({ recipient, amount, durationSeconds });
+    const row: BulkStreamRow = { recipient, amount, durationSeconds };
+    if (tokenIdx !== -1 && fields[tokenIdx]) {
+      row.token = fields[tokenIdx];
+    }
+
+    rows.push(row);
   }
 
   return rows;

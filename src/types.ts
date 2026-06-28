@@ -207,6 +207,17 @@ export interface WatchClaimableOptions {
   tickMs?: number;
   /** Interval in ms between on-chain reconciliations (default: 5000). */
   reconcileMs?: number;
+  /**
+   * WebSocket URL for real-time claimable updates.
+   * When provided, the watcher will subscribe via WS and fall back to
+   * polling-based interpolation if the WS connection fails.
+   */
+  wsUrl?: string;
+  /**
+   * The stream ID to subscribe to for WS updates.
+   * Required when `wsUrl` is set.
+   */
+  wsStreamId?: string;
 }
 
 
@@ -222,11 +233,13 @@ export interface BulkStreamRow {
   recipient: string;
   amount: bigint;
   durationSeconds: number;
+  /** Optional per-row token override. Falls back to BulkCreateOptions.token when omitted. */
+  token?: string;
 }
 
 /** Options for bulkCreateStreams. */
 export interface BulkCreateOptions {
-  /** SAC token contract address applied to every row. */
+  /** SAC token contract address. Applied as default when a row omits `token`. */
   token: string;
   /** Whether auto-renew is enabled (default false). */
   autoRenew?: boolean;
@@ -322,6 +335,32 @@ export interface PriceFeedAdapter {
   getPrice(tokenAddress: string, displayCurrency?: string): Promise<number>;
 }
 
+// ── Split stream types ───────────────────────────────────────────────────────
+
+/** Parameters for splitting an active stream into two streams. */
+export interface SplitStreamParams {
+  /** Stream ID to split. */
+  streamId: string;
+  /** Numerator of the split ratio (e.g. 70 for a 70/30 split). */
+  ratioNumerator: number;
+  /** Denominator of the split ratio (e.g. 100 for 70/100 = 70%). */
+  ratioDenominator: number;
+  /** First destination address for the split stream. */
+  recipientA: string;
+  /** Second destination address for the split stream. */
+  recipientB: string;
+}
+
+/** Result of splitting a stream. */
+export interface SplitStreamResult {
+  /** Transaction hash of the split operation. */
+  txHash: string;
+  /** Stream ID for the first split stream. */
+  streamIdA: string;
+  /** Stream ID for the second split stream. */
+  streamIdB: string;
+}
+
 // ── Fee bump types (#Issue 3) ────────────────────────────────────────────────
 
 /**
@@ -351,6 +390,70 @@ export interface WriteOptions {
 
 /** Supported contract versions for call encoding. */
 export type ContractVersion = "v1" | "v2";
+
+// ── Dashboard / reporting aggregate types ────────────────────────────────────
+
+/** Aggregate totals across a set of streams. */
+export interface StreamTotals {
+  /** Total number of streams. */
+  totalStreams: number;
+  /** Sum of all deposits in stroops. */
+  totalDeposited: bigint;
+  /** Sum of all claimable amounts in stroops (estimated). */
+  totalClaimable: bigint;
+  /** Sum of all claimed amounts in stroops. */
+  totalClaimed: bigint;
+  /** Sum of all remaining deposits in stroops. */
+  totalRemaining: bigint;
+}
+
+/** Per-status breakdown of a set of streams. */
+export interface StatusBreakdown {
+  /** Streams with status "Active". */
+  active: number;
+  /** Streams with status "Cancelled". */
+  cancelled: number;
+  /** Streams with status "Completed". */
+  completed: number;
+}
+
+/** Duration statistics for a set of streams. */
+export interface DurationStats {
+  /** Average duration in seconds. */
+  average: number;
+  /** Minimum duration in seconds. */
+  min: number;
+  /** Maximum duration in seconds. */
+  max: number;
+  /** Median duration in seconds. */
+  median: number;
+}
+
+/** Summary of stream health issues. */
+export interface StreamHealthReport {
+  /** Number of active streams expiring within the threshold. */
+  expiring: number;
+  /** Number of active streams that have stalled. */
+  stalled: number;
+  /** Number of active streams that are underfunded. */
+  underfunded: number;
+  /** Total active streams checked. */
+  totalActive: number;
+}
+
+/** Per-recipient aggregate of a set of streams. */
+export interface RecipientAggregate {
+  /** Recipient address. */
+  recipient: string;
+  /** Number of streams targeting this recipient. */
+  streamCount: number;
+  /** Total deposited in stroops. */
+  deposited: bigint;
+  /** Estimated claimable amount in stroops. */
+  claimable: bigint;
+  /** Total claimed so far in stroops. */
+  claimedSoFar: bigint;
+}
 
 // ── Stream filtering ────────────────────────────────────────────────────────
 
