@@ -1,0 +1,5 @@
+{
+  "createStream": 50,
+  "getStream": 20,
+  "batchWithdraw": 80
+}

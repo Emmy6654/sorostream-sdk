@@ -25,10 +25,15 @@
       "import": "./dist/mock.mjs",
       "require": "./dist/mock.js",
       "types": "./dist/mock.d.ts"
+    },
+    "./testing": {
+      "import": "./dist/testing.mjs",
+      "require": "./dist/testing.js",
+      "types": "./dist/testing.d.ts"
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/wallets.ts src/mock.ts --format cjs,esm --dts --clean",
+    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
@@ -53,6 +58,7 @@
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",
     "@types/node": "^22.0.0",
+    "fast-check": "^3.22.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"

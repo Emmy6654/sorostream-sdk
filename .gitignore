@@ -9,8 +9,9 @@ dist/
 
 # test artefacts
 coverage/
-__snapshots__/
-*.snap
+# snapshots are intentionally committed (issue #100)
+# __snapshots__/
+# *.snap
 
 # editor & OS
 .DS_Store

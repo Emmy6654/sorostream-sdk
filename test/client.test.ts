@@ -27,6 +27,9 @@ import {
   detectStreamDrift,
   watchStreamDrift,
   batchSize,
+  isStreamExpiring,
+  isStreamStalled,
+  isStreamUnderfunded,
 } from "../src/utils.js";
 import {
   InsufficientAmountError,
@@ -1315,6 +1318,227 @@ describe("watchStreamDrift", () => {
     expect(onDrift).not.toHaveBeenCalled();
 
     stop();
+  });
+});
+
+// ── Stream detection helpers ──────────────────────────────────────────────────
+
+describe("isStreamExpiring", () => {
+  it("returns false for non-active streams", () => {
+    expect(isStreamExpiring(makeStream({ status: "Cancelled" }))).toBe(false);
+    expect(isStreamExpiring(makeStream({ status: "Completed" }))).toBe(false);
+  });
+
+  it("returns true when stream ends within threshold", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream = makeStream({
+      status: "Active",
+      endTime: now + 100,
+    });
+    expect(isStreamExpiring(stream, 200)).toBe(true);
+  });
+
+  it("returns false when stream has plenty of time left", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream = makeStream({
+      status: "Active",
+      endTime: now + 100_000,
+    });
+    expect(isStreamExpiring(stream, 200)).toBe(false);
+  });
+});
+
+describe("isStreamStalled", () => {
+  it("returns false for non-active streams", () => {
+    expect(isStreamStalled(makeStream({ status: "Cancelled" }))).toBe(false);
+  });
+
+  it("returns true when last withdrawal was too long ago", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream = makeStream({
+      status: "Active",
+      lastWithdrawTime: now - 100_000,
+    });
+    expect(isStreamStalled(stream, 1000)).toBe(true);
+  });
+
+  it("returns false for recent withdrawals", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream = makeStream({
+      status: "Active",
+      lastWithdrawTime: now - 10,
+    });
+    expect(isStreamStalled(stream, 1000)).toBe(false);
+  });
+});
+
+describe("isStreamUnderfunded", () => {
+  it("returns false for non-active streams", () => {
+    expect(isStreamUnderfunded(makeStream({ status: "Cancelled" }))).toBe(false);
+  });
+
+  it("returns false for properly funded stream", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - 500;
+    const stream = makeStream({
+      status: "Active",
+      flowRate: 100n,
+      deposit: 100_000n,
+      startTime: start,
+      endTime: start + 1000,
+      lastWithdrawTime: start,
+    });
+    expect(isStreamUnderfunded(stream)).toBe(false);
+  });
+
+  it("returns true when deposit is too low for flow rate until end time", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - 100;
+    const stream = makeStream({
+      status: "Active",
+      flowRate: 100n,
+      deposit: 1000n,
+      startTime: start,
+      endTime: start + 1000,
+      lastWithdrawTime: start,
+    });
+    expect(isStreamUnderfunded(stream)).toBe(true);
+  });
+});
+
+// ── Operator delegation tests ────────────────────────────────────────────────
+
+describe("SoroStreamClient setOperator", () => {
+  let client: SoroStreamClient;
+  let mockAdapter: WalletAdapter;
+
+  beforeEach(() => {
+    mockAdapter = {
+      getPublicKey: vi.fn().mockResolvedValue(TEST_PK),
+      signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+      isConnected: vi.fn().mockResolvedValue(true),
+    };
+
+    client = new SoroStreamClient({
+      network: "testnet",
+      contractId: VALID_CONTRACT,
+      walletAdapter: mockAdapter,
+    });
+
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_op");
+  });
+
+  it("sets an operator and returns tx hash", async () => {
+    const result = await client.setOperator({
+      streamId: "1",
+      operator: TEST_PK,
+      approved: true,
+    });
+    expect(result.txHash).toBe("txhash_op");
+  });
+
+  it("revokes an operator when approved is false", async () => {
+    const result = await client.setOperator({
+      streamId: "1",
+      operator: TEST_PK,
+      approved: false,
+    });
+    expect(result.txHash).toBe("txhash_op");
+  });
+});
+
+describe("SoroStreamClient operatorCancelStream", () => {
+  let client: SoroStreamClient;
+  let mockAdapter: WalletAdapter;
+
+  beforeEach(() => {
+    mockAdapter = {
+      getPublicKey: vi.fn().mockResolvedValue(TEST_PK),
+      signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+      isConnected: vi.fn().mockResolvedValue(true),
+    };
+
+    client = new SoroStreamClient({
+      network: "testnet",
+      contractId: VALID_CONTRACT,
+      walletAdapter: mockAdapter,
+    });
+
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_op_cancel");
+  });
+
+  it("cancels stream as operator and returns tx hash", async () => {
+    const result = await client.operatorCancelStream({ streamId: "1" });
+    expect(result.txHash).toBe("txhash_op_cancel");
+  });
+});
+
+describe("SoroStreamClient operatorTopUp", () => {
+  let client: SoroStreamClient;
+  let mockAdapter: WalletAdapter;
+
+  beforeEach(() => {
+    mockAdapter = {
+      getPublicKey: vi.fn().mockResolvedValue(TEST_PK),
+      signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+      isConnected: vi.fn().mockResolvedValue(true),
+    };
+
+    client = new SoroStreamClient({
+      network: "testnet",
+      contractId: VALID_CONTRACT,
+      walletAdapter: mockAdapter,
+    });
+
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_op_topup");
+  });
+
+  it("tops up stream as operator and returns tx hash", async () => {
+    const result = await client.operatorTopUp({ streamId: "1", amount: 1000n });
+    expect(result.txHash).toBe("txhash_op_topup");
+  });
+
+  it("rejects zero amount", async () => {
+    await expect(
+      client.operatorTopUp({ streamId: "1", amount: 0n })
+    ).rejects.toThrow(InsufficientAmountError);
+  });
+});
+
+// ── updateFlowRate tests ─────────────────────────────────────────────────────
+
+describe("SoroStreamClient updateFlowRate", () => {
+  let client: SoroStreamClient;
+  let mockAdapter: WalletAdapter;
+
+  beforeEach(() => {
+    mockAdapter = {
+      getPublicKey: vi.fn().mockResolvedValue(TEST_PK),
+      signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+      isConnected: vi.fn().mockResolvedValue(true),
+    };
+
+    client = new SoroStreamClient({
+      network: "testnet",
+      contractId: VALID_CONTRACT,
+      walletAdapter: mockAdapter,
+    });
+
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_update");
+  });
+
+  it("updates flow rate and returns tx hash", async () => {
+    const result = await client.updateFlowRate({
+      streamId: "1",
+      newFlowRate: 200n,
+    });
+    expect(result.txHash).toBe("txhash_update");
+  });
+
+  it("rejects zero or negative flow rate", async () => {
+    await expect(
+      client.updateFlowRate({ streamId: "1", newFlowRate: 0n })
+    ).rejects.toThrow(InsufficientAmountError);
   });
 });
 

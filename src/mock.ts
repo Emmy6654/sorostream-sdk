@@ -21,15 +21,24 @@
  */
 
 import type {
+  BatchCancelResult,
   CancelStreamParams,
   CreateStreamParams,
   PaginatedStreams,
   PaginationParams,
+  SetOperatorParams,
+  SplitStreamParams,
+  SplitStreamResult,
   Stream,
   StreamEvent,
   StreamEventFilter,
   StreamSubscription,
   TopUpParams,
+  TransferStreamParams,
+  PauseStreamParams,
+  ResumeStreamParams,
+  UpdateFlowRateParams,
+  OperatorTopUpParams,
   WithdrawParams,
 } from "./types.js";
 
@@ -40,7 +49,12 @@ function nowSec(): number {
 }
 
 function claimableAt(stream: Stream, atSec: number): bigint {
-  if (stream.status !== "Active") return 0n;
+  if (stream.status === "Cancelled" || stream.status === "Completed") return 0n;
+  if (stream.status === "Paused") {
+    const effectiveNow = Math.min(stream.pausedAt ?? atSec, stream.endTime);
+    const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
+    return stream.flowRate * BigInt(elapsed);
+  }
   const effectiveNow = Math.min(atSec, stream.endTime);
   const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
   return stream.flowRate * BigInt(elapsed);
@@ -209,6 +223,272 @@ export class MockSoroStreamClient {
       txHash: `mock-tx-topup-${params.streamId}`,
       newEndTime: new Date(newEndTime * 1000),
     };
+  }
+
+  async batchCancel(
+    streamIds: string[],
+    _batchSize = 8
+  ): Promise<BatchCancelResult[]> {
+    const results: BatchCancelResult[] = [];
+    for (const id of streamIds) {
+      const stream = this.streams.get(id);
+      if (!stream) throw new Error(`Stream not found: ${id}`);
+      if (stream.status !== "Active") throw new Error("Stream is not active");
+      this.streams.set(id, { ...stream, status: "Cancelled" });
+      this.emit({
+        type: "StreamCancelled",
+        streamId: id,
+        txHash: `mock-tx-cancel-${id}`,
+        ledger: 0,
+        timestamp: nowSec(),
+        data: {},
+      });
+    }
+    results.push({ txHash: "mock-tx-batch-cancel", streamIds });
+    return results;
+  }
+
+  async updateFlowRate(
+    params: UpdateFlowRateParams
+  ): Promise<{ txHash: string }> {
+    if (params.newFlowRate <= 0n) throw new Error("Flow rate must be > 0");
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Active") throw new Error("Stream is not active");
+
+    const streamedSoFar = stream.flowRate * BigInt(nowSec() - stream.startTime);
+    const remaining = stream.deposit - streamedSoFar;
+    const newEndTime = nowSec() + Number(remaining / params.newFlowRate);
+
+    this.streams.set(params.streamId, {
+      ...stream,
+      flowRate: params.newFlowRate,
+      endTime: newEndTime,
+    });
+
+    return { txHash: `mock-tx-update-fr-${params.streamId}` };
+  }
+
+  private operators = new Map<string, string[]>();
+
+  async setOperator(
+    params: SetOperatorParams
+  ): Promise<{ txHash: string }> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+
+    const existing = this.operators.get(params.streamId) ?? [];
+    if (params.approved) {
+      if (!existing.includes(params.operator)) {
+        this.operators.set(params.streamId, [...existing, params.operator]);
+      }
+    } else {
+      this.operators.set(
+        params.streamId,
+        existing.filter((o) => o !== params.operator)
+      );
+    }
+
+    return { txHash: `mock-tx-set-op-${params.streamId}` };
+  }
+
+  async operatorCancelStream(
+    params: { streamId: string }
+  ): Promise<{ txHash: string }> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    const ops = this.operators.get(params.streamId) ?? [];
+    if (!ops.includes(this.senderKey)) throw new Error("Not an authorised operator");
+
+    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+    return { txHash: `mock-tx-op-cancel-${params.streamId}` };
+  }
+
+  async operatorTopUp(
+    params: OperatorTopUpParams
+  ): Promise<{ txHash: string }> {
+    if (params.amount <= 0n) throw new Error("Amount must be > 0");
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    const ops = this.operators.get(params.streamId) ?? [];
+    if (!ops.includes(this.senderKey)) throw new Error("Not an authorised operator");
+
+    const extraSeconds = Number(params.amount / stream.flowRate);
+    const newEndTime = stream.endTime + extraSeconds;
+    this.streams.set(params.streamId, {
+      ...stream,
+      deposit: stream.deposit + params.amount,
+      endTime: newEndTime,
+    });
+
+    return { txHash: `mock-tx-op-topup-${params.streamId}` };
+  }
+
+  async splitStream(params: SplitStreamParams): Promise<SplitStreamResult> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (params.ratioNumerator <= 0 || params.ratioDenominator <= 0) {
+      throw new Error("Ratio must be positive");
+    }
+    if (params.ratioNumerator >= params.ratioDenominator) {
+      throw new Error("Ratio numerator must be less than denominator");
+    }
+
+    // Cancel the original stream
+    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+
+    const now = nowSec();
+    const remainingDuration = stream.endTime - Math.max(now, stream.lastWithdrawTime);
+    const remainingBalance = stream.flowRate * BigInt(Math.max(0, remainingDuration));
+
+    // Calculate split amounts based on ratio
+    const ratioA = BigInt(params.ratioNumerator);
+    const ratioB = BigInt(params.ratioDenominator - params.ratioNumerator);
+    const totalRatio = BigInt(params.ratioDenominator);
+
+    const amountA = (remainingBalance * ratioA) / totalRatio;
+    const amountB = (remainingBalance * ratioB) / totalRatio;
+
+    const flowRateA = amountA / BigInt(Math.max(1, remainingDuration));
+    const flowRateB = amountB / BigInt(Math.max(1, remainingDuration));
+
+    const idA = String(nextId++);
+    const idB = String(nextId++);
+
+    const streamA: Stream = {
+      id: idA,
+      sender: stream.sender,
+      recipient: params.recipientA,
+      token: stream.token,
+      deposit: amountA,
+      flowRate: flowRateA,
+      startTime: now,
+      endTime: now + remainingDuration,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    const streamB: Stream = {
+      id: idB,
+      sender: stream.sender,
+      recipient: params.recipientB,
+      token: stream.token,
+      deposit: amountB,
+      flowRate: flowRateB,
+      startTime: now,
+      endTime: now + remainingDuration,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    this.streams.set(idA, streamA);
+    this.streams.set(idB, streamB);
+
+    const txHash = `mock-tx-split-${params.streamId}`;
+
+    this.emit({
+      type: "StreamCancelled",
+      streamId: params.streamId,
+      txHash,
+  async transferStream(
+    params: TransferStreamParams
+  ): Promise<{ txHash: string }> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Active") throw new Error("Stream is not active");
+
+    this.streams.set(params.streamId, {
+      ...stream,
+      recipient: params.newRecipient,
+    });
+
+    this.emit({
+      type: "StreamTransferred",
+      streamId: params.streamId,
+      txHash: `mock-tx-transfer-${params.streamId}`,
+      ledger: 0,
+      timestamp: nowSec(),
+      data: { newRecipient: params.newRecipient },
+    });
+
+    return { txHash: `mock-tx-transfer-${params.streamId}` };
+  }
+
+  async pause(
+    params: PauseStreamParams
+  ): Promise<{ txHash: string }> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Active") throw new Error("Stream is not active");
+
+    const now = nowSec();
+    this.streams.set(params.streamId, {
+      ...stream,
+      status: "Paused",
+      pausedAt: now,
+    });
+
+    this.emit({
+      type: "StreamPaused",
+      streamId: params.streamId,
+      txHash: `mock-tx-pause-${params.streamId}`,
+      ledger: 0,
+      timestamp: now,
+      data: {},
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idA,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamA.sender, recipient: streamA.recipient },
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idB,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamB.sender, recipient: streamB.recipient },
+    });
+
+    return { txHash, streamIdA: idA, streamIdB: idB };
+    return { txHash: `mock-tx-pause-${params.streamId}` };
+  }
+
+  async resume(
+    params: ResumeStreamParams
+  ): Promise<{ txHash: string }> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Paused") throw new Error("Stream is not paused");
+
+    const now = nowSec();
+    const pauseDuration = now - (stream.pausedAt ?? now);
+
+    this.streams.set(params.streamId, {
+      ...stream,
+      status: "Active",
+      pausedAt: undefined,
+      endTime: stream.endTime + pauseDuration,
+    });
+
+    this.emit({
+      type: "StreamResumed",
+      streamId: params.streamId,
+      txHash: `mock-tx-resume-${params.streamId}`,
+      ledger: 0,
+      timestamp: now,
+      data: {},
+    });
+
+    return { txHash: `mock-tx-resume-${params.streamId}` };
   }
 
   async getStream(streamId: string): Promise<Stream> {

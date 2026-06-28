@@ -11,15 +11,20 @@ import {
   FeeBumpTransaction,
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
+import { isValidStellarAddress } from "./utils.js";
+import { createContractEncoder } from "./contractEncoders.js";
+import type { ContractCallEncoder } from "./contractEncoders.js";
+import { CircuitBreaker } from "./circuitBreaker.js";
+import type { CircuitBreakerOptions } from "./circuitBreaker.js";
 import {
   TransactionFailedError,
   StreamNotFoundError,
   InsufficientAmountError,
+  InvalidAddressError,
+  AccountNotFoundError,
 } from "./errors.js";
-import { CircuitBreaker } from "./circuitBreaker.js";
-import type { CircuitBreakerOptions } from "./circuitBreaker.js";
-import { withRetry } from "./retry.js";
 import type {
+  BatchCancelResult,
   BatchWithdrawResult,
   BulkCreateOptions,
   BulkCreateResult,
@@ -30,18 +35,29 @@ import type {
   PaginatedStreams,
   PaginationParams,
   PriceFeedAdapter,
+  SplitStreamParams,
+  SplitStreamResult,
   Stream,
   StreamEvent,
   StreamEventFilter,
+  StreamEventType,
   StreamSubscription,
   TopUpParams,
+  TransferStreamParams,
+  PauseStreamParams,
+  ResumeStreamParams,
+  UpdateFlowRateParams,
+  SetOperatorParams,
+  OperatorTopUpParams,
   WalletAdapter,
   WithdrawParams,
   WriteOptions,
   StreamFilterCriteria,
   CreateStreamsParams,
+  ContractVersion,
+  FeeBumpOptions,
 } from "./types.js";
-import type { RetryOptions } from "./retry.js";
+import { withRetry, type RetryOptions } from "./retry.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -71,6 +87,8 @@ export interface SoroStreamClientOptions {
   txTimeoutMs?: number;
   /** Retry policy for read methods (getStream, getClaimable, etc.). */
   readRetry?: RetryOptions;
+  /** Retry policy for transaction submission RPC calls (getAccount, prepareTransaction, sendTransaction). */
+  submitRetry?: RetryOptions;
   /** Optional price-feed adapter for token-to-fiat display conversion. */
   priceFeed?: PriceFeedAdapter;
   /** Contract version to use for call encoding (default: "v1"). */
@@ -94,6 +112,7 @@ function scValToStream(val: xdr.ScVal): Stream {
     lastWithdrawTime: Number(raw["last_withdraw_time"]),
     status: raw["status"] as Stream["status"],
     autoRenew: Boolean(raw["auto_renew"]),
+    ...(raw["paused_at"] != null ? { pausedAt: Number(raw["paused_at"]) } : {}),
   };
 }
 
@@ -119,6 +138,10 @@ export class SoroStreamClient {
   private readonly walletAdapter: WalletAdapter;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
+  private readonly submitRetry: RetryOptions;
+  private readonly encoder: ContractCallEncoder;
+  private readonly defaultFeeBump: FeeBumpOptions | null = null;
+  private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
 
   constructor(options: SoroStreamClientOptions) {
@@ -134,6 +157,10 @@ export class SoroStreamClient {
       ? new CircuitBreaker(options.circuitBreaker)
       : null;
     this.readRetry = options.readRetry ?? {};
+    this.submitRetry = options.submitRetry ?? {};
+    this.encoder = createContractEncoder(this.contract, options.contractVersion ?? "v1");
+    this.defaultFeeBump = options.feeBump ?? null;
+    this.priceFeed = options.priceFeed ?? null;
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
@@ -142,10 +169,15 @@ export class SoroStreamClient {
 
   private async buildAndSubmit(
     operation: xdr.Operation,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    feeBumpOpts?: FeeBumpOptions
   ): Promise<string> {
     const publicKey = await this.walletAdapter.getPublicKey();
-    const account = await this.withBreaker(() => this.server.getAccount(publicKey));
+
+    const account = await withRetry(
+      () => this.withBreaker(() => this.server.getAccount(publicKey)),
+      { ...this.submitRetry, signal }
+    );
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -155,18 +187,23 @@ export class SoroStreamClient {
       .setTimeout(30)
       .build();
 
-    const preparedTx = await this.withBreaker(() =>
-      this.server.prepareTransaction(tx)
+    const preparedTx = await withRetry(
+      () => this.withBreaker(() => this.server.prepareTransaction(tx)),
+      { ...this.submitRetry, signal }
     );
+
     const signedXdr = await this.walletAdapter.signTransaction(
       preparedTx.toXDR(),
       this.network
     );
 
-    const result = await this.withBreaker(() =>
-      this.server.sendTransaction(
-        TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
-      )
+    const result = await withRetry(
+      () => this.withBreaker(() =>
+        this.server.sendTransaction(
+          TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
+        )
+      ),
+      { ...this.submitRetry, signal }
     );
 
     if (result.status === "ERROR") {
@@ -196,6 +233,7 @@ export class SoroStreamClient {
 
       response = await this.server.getTransaction(result.hash);
     }
+
     if (response.status === "FAILED") {
       throw new TransactionFailedError(result.hash);
     }
@@ -203,10 +241,17 @@ export class SoroStreamClient {
     return result.hash;
   }
 
+  private resolveFeeBump(override?: FeeBumpOptions): FeeBumpOptions | undefined {
+    return override ?? this.defaultFeeBump ?? undefined;
+  }
 
   private async buildAndSubmitBatch(operations: xdr.Operation[]): Promise<string> {
     const publicKey = await this.walletAdapter.getPublicKey();
-    const account = await this.server.getAccount(publicKey);
+
+    const account = await withRetry(
+      () => this.server.getAccount(publicKey),
+      this.submitRetry
+    );
 
     let builder = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -217,14 +262,21 @@ export class SoroStreamClient {
     }
     const tx = builder.setTimeout(30).build();
 
-    const preparedTx = await this.server.prepareTransaction(tx);
+    const preparedTx = await withRetry(
+      () => this.server.prepareTransaction(tx),
+      this.submitRetry
+    );
+
     const signedXdr = await this.walletAdapter.signTransaction(
       preparedTx.toXDR(),
       this.network
     );
 
-    const result = await this.server.sendTransaction(
-      TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
+    const result = await withRetry(
+      () => this.server.sendTransaction(
+        TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
+      ),
+      this.submitRetry
     );
 
     if (result.status === "ERROR") {
@@ -244,6 +296,11 @@ export class SoroStreamClient {
     return result.hash;
   }
 
+  /** Public wrapper for submitting a batch of operations in a single transaction. */
+  async executeBatch(operations: xdr.Operation[]): Promise<string> {
+    return this.buildAndSubmitBatch(operations);
+  }
+
   private async simulateOp(
     operation: xdr.Operation
   ): Promise<rpc.Api.SimulateTransactionResponse> {
@@ -258,7 +315,7 @@ export class SoroStreamClient {
       .addOperation(operation)
       .setTimeout(30)
       .build();
-    return this.rpcCall("simulateTransaction", () => this.server.simulateTransaction(tx));
+    return this.withBreaker(() => this.server.simulateTransaction(tx));
   }
 
   // ── Pre-flight validation (Issue 2) ───────────────────────────────────────
@@ -470,6 +527,192 @@ export class SoroStreamClient {
     return { txHash, newEndTime: new Date(stream.endTime * 1000) };
   }
 
+  /**
+   * Cancels multiple streams in batches.
+   */
+  async batchCancel(
+    streamIds: string[],
+    batchSize = 8
+  ): Promise<BatchCancelResult[]> {
+    const results: BatchCancelResult[] = [];
+    const sender = await this.walletAdapter.getPublicKey();
+
+    for (let i = 0; i < streamIds.length; i += batchSize) {
+      const chunk = streamIds.slice(i, i + batchSize);
+      const operations = chunk.map((id) =>
+        this.encoder.cancelStream(id, sender)
+      );
+      const txHash = await this.executeBatch(operations);
+      results.push({ txHash, streamIds: chunk });
+    }
+
+    return results;
+  }
+
+  /**
+   * Updates the flow rate on an active stream without cancelling it.
+   */
+  async updateFlowRate(
+    params: UpdateFlowRateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    if (params.newFlowRate <= 0n) throw new InsufficientAmountError();
+    const sender = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
+  /**
+   * Authorises or revokes an operator address for a stream.
+   */
+  async setOperator(
+    params: SetOperatorParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const sender = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.setOperator(
+      params.streamId,
+      sender,
+      params.operator,
+      params.approved
+    );
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
+  /**
+   * Cancels a stream as an authorised operator.
+   */
+  async operatorCancelStream(
+    params: { streamId: string },
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const operator = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.operatorCancelStream(params.streamId, operator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
+  /**
+   * Tops up a stream as an authorised operator.
+   */
+  async operatorTopUp(
+    params: OperatorTopUpParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    if (params.amount <= 0n) throw new InsufficientAmountError();
+    const operator = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
+  /**
+   * Splits an active stream into two streams with a user-defined ratio,
+   * cancelling the original stream.
+   *
+   * The remaining balance of the original stream is divided according to the
+   * ratio (ratioNumerator / ratioDenominator) and two new streams are created
+   * with proportional flow rates. The original stream is cancelled.
+   *
+   * @param params - Split stream parameters.
+   * @param signal - Optional AbortSignal to cancel transaction polling.
+   * @param options - Optional write options.
+   * @returns The transaction hash and the two new stream IDs.
+   */
+  async splitStream(
+    params: SplitStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<SplitStreamResult> {
+    if (params.ratioNumerator <= 0 || params.ratioDenominator <= 0) {
+      throw new Error("Ratio must be positive");
+    }
+    if (params.ratioNumerator >= params.ratioDenominator) {
+      throw new Error("Ratio numerator must be less than denominator");
+    }
+
+    const sender = await this.walletAdapter.getPublicKey();
+
+    if (!isValidStellarAddress(params.recipientA)) {
+      throw new InvalidAddressError(params.recipientA);
+    }
+    if (!isValidStellarAddress(params.recipientB)) {
+      throw new InvalidAddressError(params.recipientB);
+    }
+
+    const operation = this.encoder.splitStream(sender, params);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+
+    const result = await this.getStreamsBySender(sender);
+    const streams = Array.isArray(result) ? result : result.streams;
+    const latest = streams.slice(-2);
+    const streamIdA = latest[0]?.id ?? "";
+    const streamIdB = latest[1]?.id ?? "";
+
+    return { txHash, streamIdA, streamIdB };
+   * Transfers ownership of a stream to a new recipient address mid-flight.
+   * Only the sender can transfer ownership.
+   */
+  async transferStream(
+    params: TransferStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    if (!isValidStellarAddress(params.newRecipient)) {
+      throw new InvalidAddressError(params.newRecipient);
+    }
+    const sender = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.transferStream(
+      params.streamId,
+      sender,
+      params.newRecipient
+    );
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
+  /**
+   * Pauses an active stream. While paused, no new claimable tokens accumulate.
+   */
+  async pause(
+    params: PauseStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const sender = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.pauseStream(params.streamId, sender);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
+  /**
+   * Resumes a previously paused stream. Claimable tokens will again accumulate.
+   */
+  async resume(
+    params: ResumeStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const sender = await this.walletAdapter.getPublicKey();
+    const operation = this.encoder.resumeStream(params.streamId, sender);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    return { txHash };
+  }
+
   // ── Fee estimation ────────────────────────────────────────────────────────
 
   private async estimateOperationFee(
@@ -582,6 +825,77 @@ export class SoroStreamClient {
     });
   }
 
+  /**
+   * Subscribe to a specific stream lifecycle event type.
+   *
+   * @example
+   * ```ts
+   * const sub = client.on("StreamCreated", (event) => {
+   *   console.log("Stream created:", event.streamId);
+   * });
+   * // later: sub.unsubscribe();
+   * ```
+   */
+  on(
+    eventType: StreamEventType,
+    callback: (event: StreamEvent) => void
+  ): StreamSubscription {
+    return this.subscribeEvents({}, (event) => {
+      if (event.type === eventType) {
+        callback(event);
+      }
+    });
+  }
+
+  /**
+   * Shorthand for subscribing to stream-created events.
+   */
+  onStreamCreated(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamCreated", callback);
+  }
+
+  /**
+   * Shorthand for subscribing to stream-withdrawn events.
+   */
+  onStreamWithdrawn(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamWithdrawn", callback);
+  }
+
+  /**
+   * Shorthand for subscribing to stream-topped-up events.
+   */
+  onStreamToppedUp(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamToppedUp", callback);
+  }
+
+  /**
+   * Shorthand for subscribing to stream-cancelled events.
+   */
+  onStreamCancelled(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamCancelled", callback);
+  }
+
+  /**
+   * Shorthand for subscribing to stream-transferred events.
+   */
+  onStreamTransferred(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamTransferred", callback);
+  }
+
+  /**
+   * Shorthand for subscribing to stream-paused events.
+   */
+  onStreamPaused(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamPaused", callback);
+  }
+
+  /**
+   * Shorthand for subscribing to stream-resumed events.
+   */
+  onStreamResumed(callback: (event: StreamEvent) => void): StreamSubscription {
+    return this.on("StreamResumed", callback);
+  }
+
   // ── Read methods (with retry) ────────────────────────────────────────────────
   // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -591,24 +905,15 @@ export class SoroStreamClient {
    * @param streamId - The stream ID to look up.
    */
   async getStream(streamId: string): Promise<Stream> {
-    const publicKey = await this.walletAdapter.getPublicKey();
-    const account = await this.withBreaker(() =>
-      this.server.getAccount(publicKey)
-    );
-    const result = await this.withBreaker(() =>
-      this.server.simulateTransaction(
-        new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASES[this.network],
-        })
-          .addOperation(
-            this.contract.call(
-              "get_stream",
-              nativeToScVal(BigInt(streamId), { type: "u64" })
-            )
+    const result = await withRetry(
+      () =>
+        this.simulateOp(
+          this.contract.call(
+            "get_stream",
+            nativeToScVal(BigInt(streamId), { type: "u64" })
           )
-        ),
-      this.readRetry
+          .build()
+      )
     );
 
     if (rpc.Api.isSimulationError(result)) {
@@ -643,7 +948,6 @@ export class SoroStreamClient {
       this.readRetry
     );
 
-    // Contract-level error = stream not found; return 0 (not a retriable error)
     if (rpc.Api.isSimulationError(result)) return 0n;
 
     const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
@@ -774,7 +1078,7 @@ export class SoroStreamClient {
     options: BulkCreateOptions
   ): Promise<BulkCreateResult> {
     const sender = await this.walletAdapter.getPublicKey();
-    const token = options.token;
+    const defaultToken = options.token;
     const autoRenew = options.autoRenew ?? false;
     const batchSize = options.batchSize ?? 8;
 
@@ -782,24 +1086,52 @@ export class SoroStreamClient {
 
     for (let i = 0; i < rows.length; i += batchSize) {
       const chunk = rows.slice(i, i + batchSize);
-      const operations = chunk.map((row) =>
-        this.encoder.createStream(sender, {
-          recipient: row.recipient,
-          token,
-          amount: row.amount,
-          durationSeconds: row.durationSeconds,
-          autoRenew,
-        })
+      const chunkHasMixedTokens = chunk.some(
+        (r) => r.token != null && r.token !== defaultToken
       );
 
-      const txHash = await this.executeBatch(operations);
+      if (chunkHasMixedTokens) {
+        // When rows have different tokens, submit each as a separate transaction
+        for (const row of chunk) {
+          const rowToken = row.token ?? defaultToken;
+          const operation = this.encoder.createStream(sender, {
+            recipient: row.recipient,
+            token: rowToken,
+            amount: row.amount,
+            durationSeconds: row.durationSeconds,
+            autoRenew,
+          });
+          const txHash = await this.buildAndSubmit(operation);
 
-      const result = await this.getStreamsBySender(sender);
-      const streams = Array.isArray(result) ? result : result.streams;
-      const newStreams = streams.slice(-chunk.length);
-      const streamIds = newStreams.map((s) => s.id);
+          const result = await this.getStreamsBySender(sender);
+          const streams = Array.isArray(result) ? result : result.streams;
+          const newStreams = streams.slice(-1);
+          const streamIds = newStreams.map((s) => s.id);
 
-      results.push({ txHash, streamIds, rows: chunk });
+          results.push({ txHash, streamIds, rows: [row] });
+        }
+      } else {
+        // All rows in this chunk use the same token — batch into one transaction
+        const operations = chunk.map((row) => {
+          const rowToken = row.token ?? defaultToken;
+          return this.encoder.createStream(sender, {
+            recipient: row.recipient,
+            token: rowToken,
+            amount: row.amount,
+            durationSeconds: row.durationSeconds,
+            autoRenew,
+          });
+        });
+
+        const txHash = await this.executeBatch(operations);
+
+        const result = await this.getStreamsBySender(sender);
+        const streams = Array.isArray(result) ? result : result.streams;
+        const newStreams = streams.slice(-chunk.length);
+        const streamIds = newStreams.map((s) => s.id);
+
+        results.push({ txHash, streamIds, rows: chunk });
+      }
     }
 
     return { batches: results };

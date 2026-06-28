@@ -1,0 +1,21 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ScVal serialisation snapshots > address (account) serialises consistently 1`] = `"AAAAEgAAAAAAAAAAx5Ksf8wnKQ12IyQ/UYvTJ04pTRH/7psuqcGFZbFLLV4="`;
+
+exports[`ScVal serialisation snapshots > address (contract) serialises consistently 1`] = `"AAAAEgAAAAErO7RasI6Gja/lQrk6ANe9+pNxfDLTD7MqOU1CR51ALw=="`;
+
+exports[`ScVal serialisation snapshots > bool false serialises consistently 1`] = `"AAAAAAAAAAA="`;
+
+exports[`ScVal serialisation snapshots > bool true serialises consistently 1`] = `"AAAAAAAAAAE="`;
+
+exports[`ScVal serialisation snapshots > i128 serialises consistently 1`] = `"AAAACgAAAAAAAAAAAAAAADuaygA="`;
+
+exports[`ScVal serialisation snapshots > map (stream-like object) serialises consistently 1`] = `"AAAAEQAAAAEAAAACAAAADwAAAAZhbW91bnQAAAAAAAoAAAAAAAAAAAAAAAA7msoAAAAADwAAAAhkdXJhdGlvbgAAAAUAAAAAAAAOEA=="`;
+
+exports[`ScVal serialisation snapshots > symbol serialises consistently 1`] = `"AAAADwAAAA1jcmVhdGVfc3RyZWFtAAAA"`;
+
+exports[`ScVal serialisation snapshots > u64 large value serialises consistently 1`] = `"AAAABQAf////////"`;
+
+exports[`ScVal serialisation snapshots > u64 serialises consistently 1`] = `"AAAABQAAAAAAAAAq"`;
+
+exports[`ScVal serialisation snapshots > u128 serialises consistently 1`] = `"AAAACQAAAAAAAAAAAAAAADuaygA="`;

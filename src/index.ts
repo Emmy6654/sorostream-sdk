@@ -23,15 +23,23 @@ export {
   claimableNow,
   calculateVestingSchedule,
   watchClaimable,
+  watchClaimableWs,
   aggregateStreamsByToken,
+  totalValueStreamed,
+  aggregateStreamsByStatus,
+  averageStreamDuration,
+  streamHealthSummary,
+  aggregateStreamsByRecipient,
   parseCsvStreamRows,
   detectStreamDrift,
   watchStreamDrift,
+  isStreamExpiring,
+  isStreamStalled,
+  isStreamUnderfunded,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
 export { withRetry } from "./retry.js";
-export type { CircuitState } from "./circuitBreaker.js";
 export type { RetryOptions } from "./retry.js";
 export type { CircuitState, CircuitBreakerOptions } from "./circuitBreaker.js";
 export { createContractEncoder } from "./contractEncoders.js";
@@ -55,6 +63,12 @@ export type {
   WithdrawParams,
   CancelStreamParams,
   TopUpParams,
+  TransferStreamParams,
+  PauseStreamParams,
+  ResumeStreamParams,
+  UpdateFlowRateParams,
+  SetOperatorParams,
+  OperatorTopUpParams,
   Network,
   WalletAdapter,
   FeeEstimate,
@@ -65,6 +79,7 @@ export type {
   BulkCreateOptions,
   BulkCreateBatchResult,
   BulkCreateResult,
+  BatchCancelResult,
   BatchWithdrawResult,
   TokenAggregate,
   MultisigSigner,
@@ -82,6 +97,12 @@ export type {
   PasskeyAdapterConfig,
   PriceFeedAdapter,
   FeeBumpOptions,
-  WriteOptions,
   ContractVersion,
+  SplitStreamParams,
+  SplitStreamResult,
+  StreamTotals,
+  StatusBreakdown,
+  DurationStats,
+  StreamHealthReport,
+  RecipientAggregate,
 } from "./types.js";
