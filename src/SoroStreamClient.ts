@@ -11,7 +11,14 @@ import {
   FeeBumpTransaction,
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
+import { Cache } from "./cache.js";
 import { isValidStellarAddress } from "./utils.js";
+
+// Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
+// poll interval so that without an explicit `setNetwork` call, a stream read
+// is at most one poll cycle stale on its own network. `setNetwork` flushes
+// the cache immediately regardless of this TTL.
+const STREAM_CACHE_TTL_MS = 5_000;
 import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
@@ -97,7 +104,6 @@ export interface SoroStreamClientOptions {
   feeBump?: FeeBumpOptions;
 }
 
-/** Maps a raw Soroban contract value to a Stream object. */
 function scValToStream(val: xdr.ScVal): Stream {
   const raw = scValToNative(val) as Record<string, unknown>;
   return {
@@ -131,10 +137,10 @@ export type SimulateOnlyResult = {
  * ```
  */
 export class SoroStreamClient {
-  private readonly server: rpc.Server;
+  private server: rpc.Server;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
-  private readonly network: Network;
+  private network: Network;
   private readonly walletAdapter: WalletAdapter;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
@@ -143,6 +149,8 @@ export class SoroStreamClient {
   private readonly defaultFeeBump: FeeBumpOptions | null = null;
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
+  /** Per-stream read cache, keyed by `${network}:${streamId}`. */
+  private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -161,6 +169,76 @@ export class SoroStreamClient {
     this.encoder = createContractEncoder(this.contract, options.contractVersion ?? "v1");
     this.defaultFeeBump = options.feeBump ?? null;
     this.priceFeed = options.priceFeed ?? null;
+  }
+
+  /** Returns the network this client is currently connected to. */
+  getNetwork(): Network {
+    return this.network;
+  }
+
+  /**
+   * Switches the client to a different Stellar network.
+   *
+   * Flushes the read cache and the event poller, then re-initialises the
+   * RPC server for the new network. This guarantees the next `getStream`
+   * call (or any other read) fetches fresh data instead of returning values
+   * cached under the previous network.
+   *
+   * **Note:** Calling `setNetwork` with the same value as the current
+   * network (and without overriding the RPC URL) is a no-op — the cache and
+   * event poller are preserved. Use `clearStreamCache()` if you only want
+   * to invalidate the cache without changing networks.
+   *
+   * @param network - The network to switch to ("mainnet" | "testnet" | "futurenet").
+   * @param options - Optional overrides (e.g. a custom RPC URL for the new network).
+   */
+  setNetwork(network: Network, options?: { rpcUrl?: string }): void {
+    if (this.network === network && !options?.rpcUrl) {
+      // Nothing to do — avoid destroying subscribers unnecessarily.
+      return;
+    }
+
+    // 1. Drop the read cache so stale stream data from the previous network
+    //    is never served from cache after the switch.
+    this.streamCache.clear();
+
+    // 2. Destroy the existing event poller — it's still pointing at the
+    //    previous network's RPC and would otherwise emit stale events for
+    //    up to one polling cycle after the switch.
+    if (this.eventPoller) {
+      this.eventPoller.destroy();
+      this.eventPoller = null;
+    }
+
+    // 3. Update the network and rebuild the RPC server for the new endpoint.
+    this.network = network;
+    this.server = new rpc.Server(
+      options?.rpcUrl ?? RPC_URLS[network],
+      { allowHttp: false }
+    );
+
+    // Note: `this.encoder` is bound to the contract address (not the network)
+    // and is therefore safe to reuse. The contract instance and wallet adapter
+    // are also network-agnostic.
+  }
+
+  /**
+   * Clears the internal stream read cache. Useful when callers know the
+   * on-chain state has changed (e.g. after an out-of-band mutation).
+   *
+   * @param streamId - Optional specific stream to invalidate. If omitted,
+   *   the entire cache is cleared.
+   */
+  clearStreamCache(streamId?: string): void {
+    if (streamId === undefined) {
+      this.streamCache.clear();
+      return;
+    }
+    // Cache keys are network-prefixed to defend against mid-flight network
+    // switches. Remove entries for every known network.
+    for (const key of ["mainnet", "testnet", "futurenet"] as Network[]) {
+      this.streamCache.delete(`${key}:${streamId}`);
+    }
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
@@ -661,6 +739,9 @@ export class SoroStreamClient {
     const streamIdB = latest[1]?.id ?? "";
 
     return { txHash, streamIdA, streamIdB };
+  }
+
+  /**
    * Transfers ownership of a stream to a new recipient address mid-flight.
    * Only the sender can transfer ownership.
    */
@@ -903,17 +984,21 @@ export class SoroStreamClient {
    * Returns the full stream data for a given stream ID.
    * Automatically retries on transient RPC errors.
    * @param streamId - The stream ID to look up.
-   */
-  async getStream(streamId: string): Promise<Stream> {
+   */  async getStream(streamId: string): Promise<Stream> {
+    // Capture the current network so a concurrent `setNetwork` call can't
+    // poison the cache with data fetched under a different network.
+    const networkAtCallTime = this.network;
+    const cached = this.streamCache.get(`${networkAtCallTime}:${streamId}`);
+    if (cached) return cached;
+
     const result = await withRetry(
       () =>
         this.simulateOp(
           this.contract.call(
             "get_stream",
             nativeToScVal(BigInt(streamId), { type: "u64" })
-          )
-          .build()
-      )
+          ).build()
+        )
     );
 
     if (rpc.Api.isSimulationError(result)) {
@@ -924,7 +1009,17 @@ export class SoroStreamClient {
       result as rpc.Api.SimulateTransactionSuccessResponse
     ).result?.retval;
     if (!returnVal) throw new Error("No return value from contract");
-    return scValToStream(returnVal);
+    const stream = scValToStream(returnVal);
+
+    // Only cache the result if the network hasn't changed during the RPC.
+    // This guard maintains the cache contract keyed by the *current*
+    // network: an in-flight read on the old network must never write into
+    // the new network's slot, and any entry already present must remain
+    // addressable under the network in which it was originally fetched.
+    if (networkAtCallTime === this.network) {
+      this.streamCache.set(`${networkAtCallTime}:${streamId}`, stream);
+    }
+    return stream;
   }
 
   /**
