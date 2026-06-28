@@ -396,6 +396,7 @@ export class MockSoroStreamClient {
       streamId: params.streamId,
       txHash,
       ledger: 0,
+      timestamp: nowSec(),
       timestamp: now,
       data: {},
     });
