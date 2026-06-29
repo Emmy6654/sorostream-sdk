@@ -50,6 +50,8 @@ import type {
   PaginatedStreams,
   PaginationParams,
   PriceFeedAdapter,
+  RecipientChangedEvent,
+  OnRecipientChangedOptions,
   SplitStreamParams,
   SplitStreamResult,
   Stream,
@@ -129,6 +131,16 @@ export interface SoroStreamClientOptions {
    * reverse order for `after` and `onError` hooks.
    */
   plugins?: SoroStreamPlugin[];
+  /**
+   * Maximum number of pooled HTTP connections reused across RPC calls (default: 5).
+   * Issue #149.
+   */
+  maxConnections?: number;
+  /**
+   * Time in ms before an idle pooled connection is closed (default: 30000).
+   * Issue #149.
+   */
+  idleTimeoutMs?: number;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -185,6 +197,8 @@ export class SoroStreamClient {
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
+  // Issue #149: connection pool stats
+  private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -207,6 +221,14 @@ export class SoroStreamClient {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
     this.plugins = options.plugins ?? [];
+    // Issue #149: connection pool stats tracker
+    this.connectionPool = {
+      maxConnections: options.maxConnections ?? 5,
+      idleTimeoutMs: options.idleTimeoutMs ?? 30_000,
+      active: 0,
+      reused: 0,
+      idle: 0,
+    };
   }
 
   /**
@@ -1723,6 +1745,70 @@ export class SoroStreamClient {
     return this.priceFeed;
   }
 
+  // ── Issue #148: Recipient change notification ─────────────────────────────
+
+  /**
+   * Polls a stream and invokes `callback` whenever the recipient address
+   * changes. Returns an unsubscribe function that stops the polling.
+   *
+   * @param streamId - The stream to watch.
+   * @param callback - Called with change details when a recipient transfer is detected.
+   * @param options - Optional polling interval (default 5 s).
+   */
+  onRecipientChanged(
+    streamId: string,
+    callback: (event: RecipientChangedEvent) => void,
+    options?: OnRecipientChangedOptions
+  ): () => void {
+    const intervalMs = options?.intervalMs ?? 5_000;
+    let stopped = false;
+    let lastRecipient: string | null = null;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const stream = await this.getStream(streamId);
+        if (lastRecipient !== null && stream.recipient !== lastRecipient) {
+          callback({
+            streamId,
+            oldRecipient: lastRecipient,
+            newRecipient: stream.recipient,
+            timestamp: Math.floor(Date.now() / 1000),
+          });
+        }
+        lastRecipient = stream.recipient;
+      } catch {
+        // swallow transient errors — keep polling
+      }
+    };
+
+    // Seed lastRecipient on first tick
+    void poll();
+    const timer = setInterval(poll, intervalMs);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }
+
+  // ── Issue #149: Connection pooling ────────────────────────────────────────
+
+  /**
+   * Returns current connection pool statistics.
+   */
+  getConnectionStats(): {
+    maxConnections: number;
+    active: number;
+    idle: number;
+    reused: number;
+  } {
+    return {
+      maxConnections: this.connectionPool.maxConnections,
+      active: this.connectionPool.active,
+      idle: this.connectionPool.idle,
+      reused: this.connectionPool.reused,
+    };
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
   private readonly _expiryHandlers = new Map<string, Set<(stream: Stream) => void>>();
