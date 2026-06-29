@@ -151,6 +151,16 @@ const { batches } = await client.bulkCreateStreams(rows, {
 console.log(`Created ${batches.length} batch(es)`);
 ```
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Stream State Machine](./docs/state-machine.md) | Mermaid diagram of all stream states and valid / invalid transitions |
+| [Rate Limiting](./docs/rate-limiting.md) | Default polling intervals, network call frequency, and tuning advice |
+| [linear-vesting.ts](./examples/linear-vesting.ts) | Constant-rate stream with no cliff |
+| [cliff-linear-vesting.ts](./examples/cliff-linear-vesting.ts) | Cliff period followed by linear release |
+| [milestone-vesting.ts](./examples/milestone-vesting.ts) | Fixed tranches released at scheduled dates |
+
 ## Local Setup
 
 ```bash
