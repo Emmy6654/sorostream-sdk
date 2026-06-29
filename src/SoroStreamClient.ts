@@ -19,6 +19,9 @@ import { isValidStellarAddress } from "./utils.js";
 // is at most one poll cycle stale on its own network. `setNetwork` flushes
 // the cache immediately regardless of this TTL.
 const STREAM_CACHE_TTL_MS = 5_000;
+
+/** Minimum allowed stream duration in seconds. */
+export const MIN_STREAM_DURATION_SECONDS = 1;
 import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
@@ -29,7 +32,10 @@ import {
   InsufficientAmountError,
   InvalidAddressError,
   AccountNotFoundError,
+  ZeroDurationError,
+  BulkCreatePartialError,
 } from "./errors.js";
+import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
   BatchCancelResult,
   BatchWithdrawResult,
@@ -147,6 +153,9 @@ export type SimulateOnlyResult = {
 /**
  * Main client for interacting with the SoroStream contract.
  *
+ * See `ERRORS.md` for the cause, typical trigger, and recommended recovery
+ * action for every error class referenced in this client's `@throws` tags.
+ *
  * @example
  * ```ts
  * const client = new SoroStreamClient({ network: "testnet", contractId: "...", walletAdapter });
@@ -194,7 +203,10 @@ export class SoroStreamClient {
     this.plugins = options.plugins ?? [];
   }
 
-  /** Returns the network this client is currently connected to. */
+  /**
+   * Returns the network this client is currently connected to.
+   * @returns The currently active network.
+   */
   getNetwork(): Network {
     return this.network;
   }
@@ -270,7 +282,11 @@ export class SoroStreamClient {
 
   // ── Issue #50: Middleware / plugin system ─────────────────────────────────
 
-  /** Register a middleware plugin. Returns the client for chaining. */
+  /**
+   * Registers a middleware plugin on the client.
+   * @param plugin - The plugin to register.
+   * @returns This client instance, for chaining.
+   */
   use(plugin: SoroStreamPlugin): this {
     this.plugins.push(plugin);
     return this;
@@ -429,7 +445,12 @@ export class SoroStreamClient {
     return result.hash;
   }
 
-  /** Public wrapper for submitting a batch of operations in a single transaction. */
+  /**
+   * Submits a batch of operations in a single transaction.
+   * @param operations - The Soroban operations to include in the transaction.
+   * @returns The confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected by the network.
+   */
   async executeBatch(operations: xdr.Operation[]): Promise<string> {
     return this.buildAndSubmitBatch(operations);
   }
@@ -463,6 +484,21 @@ export class SoroStreamClient {
       throw new InvalidAddressError(params.token);
     }
 
+    if (params.durationSeconds < MIN_STREAM_DURATION_SECONDS) {
+      throw new ZeroDurationError(
+        `Stream duration must be >= ${MIN_STREAM_DURATION_SECONDS}s, got ${params.durationSeconds}s`
+      );
+    }
+
+    // Verify endTime > startTime at the time of submission.
+    const startTime = Math.floor(Date.now() / 1000);
+    const endTime = startTime + params.durationSeconds;
+    if (endTime <= startTime) {
+      throw new ZeroDurationError(
+        `Computed endTime (${endTime}) must be greater than startTime (${startTime})`
+      );
+    }
+
     try {
       await this.withBreaker(() =>
         this.server.getAccount(params.recipient)
@@ -482,13 +518,39 @@ export class SoroStreamClient {
   // ── Stream mutations ──────────────────────────────────────────────────────
 
   /**
-   * Creates a new payment stream.
+   * Creates a new payment stream on the SoroStream contract.
+   *
+   * Validates the recipient address, token address, and sender account before
+   * submitting. Enforces that `amount > 0` and `durationSeconds >= 1`.
+   *
    * @param params - Stream creation parameters.
-   * @param signal - Optional AbortSignal to cancel transaction polling.
-   * @returns The new stream ID and transaction hash.
-   * @param signal - Optional abort signal.
-   * @param options - Optional write options.
-   * @returns The new stream ID and transaction hash, or simulation result.
+   * @param params.recipient - Beneficiary Stellar address.
+   * @param params.token - SAC token contract address.
+   * @param params.amount - Total amount to stream in stroops (must be > 0).
+   * @param params.durationSeconds - Stream duration in seconds (must be >= 1).
+   * @param params.autoRenew - Whether the stream auto-renews on completion.
+   * @param params.cliffSeconds - Optional cliff duration in seconds (default 0).
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options (e.g. `simulateOnly`, `feeBump`).
+   * @returns `{ streamId, txHash }` — the new stream ID and confirming transaction hash.
+   * @throws {InsufficientAmountError} If `amount` is 0 or negative.
+   * @throws {ZeroDurationError} If `durationSeconds` is less than 1.
+   * @throws {InvalidAddressError} If `recipient` or `token` is not a valid Stellar address.
+   * @throws {AccountNotFoundError} If `recipient` or the sender account does not exist on-chain.
+   * @throws {TransactionFailedError} If the Soroban transaction is rejected by the network.
+   * @throws {StreamNotFoundError} If the post-creation fetch cannot locate the new stream.
+   *
+   * @example
+   * ```ts
+   * const { streamId, txHash } = await client.createStream({
+   *   recipient: "GRECIPIENT...",
+   *   token:     "GUSDC...",
+   *   amount:    toStroops("100"),      // 100 USDC
+   *   durationSeconds: 30 * 24 * 3600, // 30 days
+   *   autoRenew: false,
+   * });
+   * console.log("Stream created:", streamId, txHash);
+   * ```
    */
   async createStream(
     params: CreateStreamParams,
@@ -497,9 +559,6 @@ export class SoroStreamClient {
   ): Promise<{ streamId: string; txHash: string }> {
     return this.runWithMiddleware("createStream", [params], async () => {
       if (params.amount <= 0n) throw new InsufficientAmountError();
-      if (params.durationSeconds <= 0)
-        throw new InsufficientAmountError("Duration must be > 0");
-
       await this.validateCliff(params.cliffSeconds ?? 0);
       await this.validateStreamParams(params);
 
@@ -521,10 +580,21 @@ export class SoroStreamClient {
   }
 
   /**
-   * Creates multiple payment streams in a single transaction.
-   * @param paramsArray - Array of stream creation parameters.
-   * @param options - Optional write options (e.g. simulateOnly).
-   * @returns Array of stream IDs and the transaction hash, or simulation result.
+   * Creates multiple payment streams in a single batched transaction.
+   *
+   * All streams are validated before submission. When `options.simulateOnly`
+   * is `true`, the first operation is simulated without broadcasting.
+   *
+   * @param paramsArray - Array of stream creation parameter objects.
+   * @param paramsArray[].recipient - Beneficiary Stellar address.
+   * @param paramsArray[].token - SAC token contract address.
+   * @param paramsArray[].amount - Total amount to stream in stroops (must be > 0).
+   * @param paramsArray[].durationSeconds - Stream duration in seconds (must be > 0).
+   * @param paramsArray[].autoRenew - Whether the stream auto-renews on completion.
+   * @param options - Optional write options (e.g. `simulateOnly`).
+   * @returns `{ streamIds, txHash }`, or a `SimulateOnlyResult` when `options.simulateOnly` is set.
+   * @throws {Error} If `paramsArray` is empty or any entry has `amount <= 0` or `durationSeconds <= 0`.
+   * @throws {TransactionFailedError} If the batch transaction is rejected.
    */
   async createStreams(
     paramsArray: CreateStreamsParams[],
@@ -559,12 +629,21 @@ export class SoroStreamClient {
 
   /**
    * Withdraws all currently claimable tokens from a stream.
+   *
+   * The connected wallet must be the stream recipient.
+   *
    * @param params - Withdraw parameters.
-   * @param signal - Optional AbortSignal to cancel transaction polling.
-   * @returns The transaction hash and withdrawn amount.
-   * @param signal - Optional abort signal.
-   * @param options - Optional write options.
-   * @returns The transaction hash and withdrawn amount, or simulation result.
+   * @param params.streamId - ID of the stream to withdraw from.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options (e.g. `feeBump`).
+   * @returns `{ txHash, amount }` — confirming transaction hash and withdrawn amount in stroops.
+   * @throws {TransactionFailedError} If the transaction is rejected by the network.
+   *
+   * @example
+   * ```ts
+   * const { txHash, amount } = await client.withdraw({ streamId: "42" });
+   * console.log(`Withdrew ${formatUSDC(BigInt(amount))} USDC — tx: ${txHash}`);
+   * ```
    */
   async withdraw(
     params: WithdrawParams,
@@ -581,13 +660,21 @@ export class SoroStreamClient {
   }
 
   /**
-   * Withdraws from multiple streams in a single transaction.
-   * Streams are grouped into batches to stay within Stellar's per-transaction
-   * operation limit. Each batch becomes one submitted transaction.
+   * Withdraws from multiple streams in batched transactions.
    *
-   * @param streamIds - Array of stream IDs to withdraw from.
-   * @param batchSize - Max operations per transaction (default 8).
-   * @returns Array of batch results, one per transaction.
+   * Streams are chunked by `batchSize` to stay within Stellar's per-transaction
+   * operation limit. Each chunk becomes one submitted transaction.
+   *
+   * @param streamIds - Stream IDs to withdraw from.
+   * @param batchSize - Maximum operations per transaction (default 8).
+   * @returns Array of `BatchWithdrawResult`, one entry per submitted transaction.
+   * @throws {TransactionFailedError} If any batch transaction is rejected.
+   *
+   * @example
+   * ```ts
+   * const results = await client.batchWithdraw(["1", "2", "3"]);
+   * for (const r of results) console.log(r.txHash, r.amounts);
+   * ```
    */
   async batchWithdraw(
     streamIds: string[],
@@ -616,13 +703,22 @@ export class SoroStreamClient {
   }
 
   /**
-   * Cancels an active stream. Refunds unstreamed tokens to sender.
+   * Cancels an active stream and refunds the unstreamed deposit to the sender.
+   *
+   * Only the original sender can cancel a stream. Any claimable tokens
+   * already accrued remain available for the recipient to withdraw.
+   *
    * @param params - Cancel parameters.
-   * @param signal - Optional AbortSignal to cancel transaction polling.
-   * @returns The transaction hash.
-   * @param signal - Optional abort signal.
-   * @param options - Optional write options.
-   * @returns The transaction hash, or simulation result.
+   * @param params.streamId - ID of the stream to cancel.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options (e.g. `feeBump`).
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected (e.g. stream already cancelled).
+   *
+   * @example
+   * ```ts
+   * const { txHash } = await client.cancelStream({ streamId: "42" });
+   * ```
    */
   async cancelStream(
     params: CancelStreamParams,
@@ -638,12 +734,27 @@ export class SoroStreamClient {
 
   /**
    * Tops up an existing stream with additional tokens, extending its duration.
+   *
+   * The additional deposit is added to the remaining balance, and the stream's
+   * `endTime` is extended proportionally based on the current flow rate.
+   *
    * @param params - Top-up parameters.
-   * @param signal - Optional AbortSignal to cancel transaction polling.
-   * @returns The transaction hash and new end time.
-   * @param signal - Optional abort signal.
-   * @param options - Optional write options.
-   * @returns The transaction hash and new end time, or simulation result.
+   * @param params.streamId - ID of the stream to top up.
+   * @param params.amount - Additional amount to deposit in stroops (must be > 0).
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options (e.g. `feeBump`).
+   * @returns `{ txHash, newEndTime }` — confirming transaction hash and updated end time.
+   * @throws {InsufficientAmountError} If `amount` is 0 or negative.
+   * @throws {TransactionFailedError} If the transaction is rejected.
+   *
+   * @example
+   * ```ts
+   * const { txHash, newEndTime } = await client.topUp({
+   *   streamId: "42",
+   *   amount: toStroops("50"),
+   * });
+   * console.log("Stream extended until:", newEndTime.toISOString());
+   * ```
    */
   async topUp(
     params: TopUpParams,
@@ -664,7 +775,12 @@ export class SoroStreamClient {
   }
 
   /**
-   * Cancels multiple streams in batches.
+   * Cancels multiple streams in batched transactions.
+   *
+   * @param streamIds - Stream IDs to cancel.
+   * @param batchSize - Maximum operations per transaction (default 8).
+   * @returns Array of `BatchCancelResult`, one entry per submitted transaction.
+   * @throws {TransactionFailedError} If any batch transaction is rejected.
    */
   async batchCancel(
     streamIds: string[],
@@ -686,7 +802,16 @@ export class SoroStreamClient {
   }
 
   /**
-   * Updates the flow rate on an active stream without cancelling it.
+   * Updates the per-second flow rate on an active stream without cancelling it.
+   *
+   * @param params - Flow rate update parameters.
+   * @param params.streamId - ID of the stream to update.
+   * @param params.newFlowRate - New flow rate in stroops per second (must be > 0).
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {InsufficientAmountError} If `newFlowRate` is 0 or negative.
+   * @throws {TransactionFailedError} If the transaction is rejected.
    */
   async updateFlowRate(
     params: UpdateFlowRateParams,
@@ -703,6 +828,18 @@ export class SoroStreamClient {
 
   /**
    * Authorises or revokes an operator address for a stream.
+   *
+   * An authorised operator can call `operatorCancelStream` and `operatorTopUp`
+   * on behalf of the stream sender.
+   *
+   * @param params - Operator configuration parameters.
+   * @param params.streamId - ID of the stream.
+   * @param params.operator - Stellar address to grant or revoke operator rights.
+   * @param params.approved - `true` to grant, `false` to revoke.
+   * @param signal - Optional `AbortSignal`.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected.
    */
   async setOperator(
     params: SetOperatorParams,
@@ -722,7 +859,14 @@ export class SoroStreamClient {
   }
 
   /**
-   * Cancels a stream as an authorised operator.
+   * Cancels a stream as an authorised operator, on behalf of the sender.
+   *
+   * @param params - Operator cancel parameters.
+   * @param params.streamId - ID of the stream to cancel.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected (e.g. caller is not an authorised operator).
    */
   async operatorCancelStream(
     params: { streamId: string },
@@ -737,7 +881,16 @@ export class SoroStreamClient {
   }
 
   /**
-   * Tops up a stream as an authorised operator.
+   * Tops up a stream as an authorised operator, on behalf of the sender.
+   *
+   * @param params - Operator top-up parameters.
+   * @param params.streamId - ID of the stream to top up.
+   * @param params.amount - Additional amount to deposit in stroops (must be > 0).
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {InsufficientAmountError} If `amount` is 0 or negative.
+   * @throws {TransactionFailedError} If the transaction is rejected (e.g. caller is not an authorised operator).
    */
   async operatorTopUp(
     params: OperatorTopUpParams,
@@ -761,9 +914,17 @@ export class SoroStreamClient {
    * with proportional flow rates. The original stream is cancelled.
    *
    * @param params - Split stream parameters.
-   * @param signal - Optional AbortSignal to cancel transaction polling.
+   * @param params.streamId - ID of the stream to split.
+   * @param params.recipientA - Beneficiary address for the first resulting stream.
+   * @param params.recipientB - Beneficiary address for the second resulting stream.
+   * @param params.ratioNumerator - Numerator of the split ratio (must be > 0 and < `ratioDenominator`).
+   * @param params.ratioDenominator - Denominator of the split ratio (must be > 0).
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
    * @param options - Optional write options.
-   * @returns The transaction hash and the two new stream IDs.
+   * @returns `{ txHash, streamIdA, streamIdB }` — confirming transaction hash and the two new stream IDs.
+   * @throws {Error} If the ratio is not positive or `ratioNumerator >= ratioDenominator`.
+   * @throws {InvalidAddressError} If `recipientA` or `recipientB` is not a valid Stellar address.
+   * @throws {TransactionFailedError} If the transaction is rejected.
    */
   async splitStream(
     params: SplitStreamParams,
@@ -802,6 +963,15 @@ export class SoroStreamClient {
   /**
    * Transfers ownership of a stream to a new recipient address mid-flight.
    * Only the sender can transfer ownership.
+   *
+   * @param params - Transfer parameters.
+   * @param params.streamId - ID of the stream to transfer.
+   * @param params.newRecipient - Stellar address of the new beneficiary.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {InvalidAddressError} If `newRecipient` is not a valid Stellar address.
+   * @throws {TransactionFailedError} If the transaction is rejected.
    */
   async transferStream(
     params: TransferStreamParams,
@@ -824,6 +994,13 @@ export class SoroStreamClient {
 
   /**
    * Pauses an active stream. While paused, no new claimable tokens accumulate.
+   *
+   * @param params - Pause parameters.
+   * @param params.streamId - ID of the stream to pause.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected (e.g. stream already paused).
    */
   async pause(
     params: PauseStreamParams,
@@ -839,6 +1016,13 @@ export class SoroStreamClient {
 
   /**
    * Resumes a previously paused stream. Claimable tokens will again accumulate.
+   *
+   * @param params - Resume parameters.
+   * @param params.streamId - ID of the stream to resume.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected (e.g. stream is not paused).
    */
   async resume(
     params: ResumeStreamParams,
@@ -885,6 +1069,12 @@ export class SoroStreamClient {
     };
   }
 
+  /**
+   * Estimates the network fee for a {@link createStream} call without submitting it.
+   * @param params - Same shape as {@link createStream}'s `params`.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   * @throws {Error} If `amount` is 0 or negative, or `durationSeconds` is 0 or negative.
+   */
   async estimateCreateStreamFee(
     params: CreateStreamParams
   ): Promise<FeeEstimate> {
@@ -896,12 +1086,24 @@ export class SoroStreamClient {
     return this.estimateOperationFee(operation);
   }
 
+  /**
+   * Estimates the network fee for a {@link withdraw} call without submitting it.
+   * @param params - Withdraw parameters.
+   * @param params.streamId - ID of the stream to withdraw from.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
   async estimateWithdrawFee(params: WithdrawParams): Promise<FeeEstimate> {
     const recipient = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.withdraw(params.streamId, recipient);
     return this.estimateOperationFee(operation);
   }
 
+  /**
+   * Estimates the network fee for a {@link cancelStream} call without submitting it.
+   * @param params - Cancel parameters.
+   * @param params.streamId - ID of the stream to cancel.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
   async estimateCancelStreamFee(
     params: CancelStreamParams
   ): Promise<FeeEstimate> {
@@ -910,6 +1112,14 @@ export class SoroStreamClient {
     return this.estimateOperationFee(operation);
   }
 
+  /**
+   * Estimates the network fee for a {@link topUp} call without submitting it.
+   * @param params - Top-up parameters.
+   * @param params.streamId - ID of the stream to top up.
+   * @param params.amount - Additional amount to deposit in stroops (must be > 0).
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   * @throws {Error} If `amount` is 0 or negative.
+   */
   async estimateTopUpFee(params: TopUpParams): Promise<FeeEstimate> {
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
     const sender = await this.walletAdapter.getPublicKey();
@@ -936,6 +1146,10 @@ export class SoroStreamClient {
   /**
    * Subscribes to real-time stream lifecycle events matching the given filter.
    * The callback is invoked each time a matching event is detected.
+   *
+   * @param filter - Criteria to match events against (`streamId`, `sender`, `recipient`); omitted fields match anything.
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    *
    * @example
    * ```ts
@@ -967,6 +1181,10 @@ export class SoroStreamClient {
   /**
    * Subscribe to a specific stream lifecycle event type.
    *
+   * @param eventType - The lifecycle event type to listen for.
+   * @param callback - Invoked with the matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
+   *
    * @example
    * ```ts
    * const sub = client.on("StreamCreated", (event) => {
@@ -988,6 +1206,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-created events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamCreated(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamCreated", callback);
@@ -995,6 +1216,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-withdrawn events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamWithdrawn(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamWithdrawn", callback);
@@ -1002,6 +1226,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-topped-up events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamToppedUp(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamToppedUp", callback);
@@ -1009,6 +1236,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-cancelled events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamCancelled(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamCancelled", callback);
@@ -1016,6 +1246,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-transferred events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamTransferred(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamTransferred", callback);
@@ -1023,6 +1256,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-paused events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamPaused(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamPaused", callback);
@@ -1030,6 +1266,9 @@ export class SoroStreamClient {
 
   /**
    * Shorthand for subscribing to stream-resumed events.
+   *
+   * @param callback - Invoked with each matching event.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
   onStreamResumed(callback: (event: StreamEvent) => void): StreamSubscription {
     return this.on("StreamResumed", callback);
@@ -1042,7 +1281,10 @@ export class SoroStreamClient {
    * Returns the full stream data for a given stream ID.
    * Automatically retries on transient RPC errors.
    * @param streamId - The stream ID to look up.
-   */  async getStream(streamId: string): Promise<Stream> {
+   * @returns The `Stream` record.
+   * @throws {StreamNotFoundError} If no stream exists with the given ID.
+   */
+  async getStream(streamId: string): Promise<Stream> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
@@ -1055,10 +1297,9 @@ export class SoroStreamClient {
           this.contract.call(
             "get_stream",
             nativeToScVal(BigInt(streamId), { type: "u64" })
-          ).build()
-        )
           )
-      )
+        ),
+      this.readRetry
     );
 
     if (rpc.Api.isSimulationError(result)) {
@@ -1090,6 +1331,7 @@ export class SoroStreamClient {
    * indicates the stream does not exist; network failures are retried.
    *
    * @param streamId - The stream ID to check.
+   * @returns The claimable amount in stroops, or `0n` if the stream does not exist.
    */
   async getClaimable(streamId: string): Promise<bigint> {
     const result = await withRetry(
@@ -1117,6 +1359,7 @@ export class SoroStreamClient {
    *
    * @param sender - The sender address to query.
    * @param pagination - Optional limit/cursor for paginated results.
+   * @returns A `Stream[]` when `pagination` is omitted, otherwise a `PaginatedStreams` page.
    */
   async getStreamsBySender(
     sender: string,
@@ -1174,6 +1417,7 @@ export class SoroStreamClient {
    *
    * @param recipient - The recipient address to query.
    * @param pagination - Optional limit/cursor for paginated results.
+   * @returns A `Stream[]` when `pagination` is omitted, otherwise a `PaginatedStreams` page.
    */
   async getStreamsByRecipient(
     recipient: string,
@@ -1234,6 +1478,8 @@ export class SoroStreamClient {
    *
    * @param streamId - The stream to snapshot.
    * @param cliffSeconds - Optional cliff duration in seconds for the vesting projection (default 0).
+   * @returns A JSON-serialisable `StreamSnapshot`.
+   * @throws {StreamNotFoundError} If no stream exists with the given ID.
    */
   async exportStream(streamId: string, cliffSeconds = 0): Promise<StreamSnapshot> {
     const stream = await this.getStream(streamId);
@@ -1276,6 +1522,42 @@ export class SoroStreamClient {
 
   // ── Bulk operations ───────────────────────────────────────────────────────
 
+  /**
+   * Creates multiple payment streams across one or more batched transactions.
+   *
+   * Rows are chunked by `options.batchSize`. A chunk where every row shares
+   * the default token is submitted as a single multi-operation transaction;
+   * a chunk with per-row token overrides falls back to one transaction per
+   * row. If any row or chunk fails, the successfully created streams are
+   * **not** rolled back — the method throws {@link BulkCreatePartialError}
+   * describing exactly which rows succeeded and which failed, instead of
+   * silently dropping the failed slots.
+   *
+   * @param rows - Rows describing the streams to create.
+   * @param rows[].recipient - Beneficiary Stellar address for this row.
+   * @param rows[].amount - Total amount to stream in stroops (must be > 0).
+   * @param rows[].durationSeconds - Stream duration in seconds (must be > 0).
+   * @param rows[].token - Optional per-row token override (defaults to `options.token`).
+   * @param rows[].cliffSeconds - Optional per-row cliff duration in seconds (default 0).
+   * @param options - Bulk creation options.
+   * @param options.token - Default SAC token contract address for rows that omit `token`.
+   * @param options.autoRenew - Whether created streams auto-renew (default false).
+   * @param options.batchSize - Maximum operations per transaction (default 8).
+   * @returns `{ batches }` — one entry per submitted transaction, each with its `txHash` and the resulting `streamIds`.
+   * @throws {BulkCreatePartialError} If one or more rows fail; carries `successfulBatches` and `failedSlots`.
+   * @throws {TransactionFailedError} If a submitted transaction is rejected (wrapped into `failedSlots` rather than thrown directly).
+   *
+   * @example
+   * ```ts
+   * try {
+   *   const { batches } = await client.bulkCreateStreams(rows, { token: usdc });
+   * } catch (err) {
+   *   if (err instanceof BulkCreatePartialError) {
+   *     console.error(`${err.failedSlots.length} stream(s) failed:`, err.failedSlots);
+   *   }
+   * }
+   * ```
+   */
   async bulkCreateStreams(
     rows: import("./types.js").BulkStreamRow[],
     options: BulkCreateOptions
@@ -1292,6 +1574,7 @@ export class SoroStreamClient {
       }
 
       const results: BulkCreateResult["batches"] = [];
+      const failedSlots: BulkCreateFailedSlot[] = [];
 
       for (let i = 0; i < rows.length; i += batchSize) {
         const chunk = rows.slice(i, i + batchSize);
@@ -1300,45 +1583,60 @@ export class SoroStreamClient {
         );
 
         if (chunkHasMixedTokens) {
-          for (const row of chunk) {
-            const rowToken = row.token ?? defaultToken;
-            const operation = this.encoder.createStream(sender, {
-              recipient: row.recipient,
-              token: rowToken,
-              amount: row.amount,
-              durationSeconds: row.durationSeconds,
-              autoRenew,
+          for (let j = 0; j < chunk.length; j++) {
+            const row = chunk[j]!;
+            try {
+              const rowToken = row.token ?? defaultToken;
+              const operation = this.encoder.createStream(sender, {
+                recipient: row.recipient,
+                token: rowToken,
+                amount: row.amount,
+                durationSeconds: row.durationSeconds,
+                autoRenew,
+              });
+              const txHash = await this.buildAndSubmit(operation);
+
+              const result = await this.getStreamsBySender(sender);
+              const streams = Array.isArray(result) ? result : result.streams;
+              const newStreams = streams.slice(-1);
+              const streamIds = newStreams.map((s) => s.id);
+
+              results.push({ txHash, streamIds, rows: [row] });
+            } catch (error) {
+              failedSlots.push({ index: i + j, row, error });
+            }
+          }
+        } else {
+          try {
+            const operations = chunk.map((row) => {
+              const rowToken = row.token ?? defaultToken;
+              return this.encoder.createStream(sender, {
+                recipient: row.recipient,
+                token: rowToken,
+                amount: row.amount,
+                durationSeconds: row.durationSeconds,
+                autoRenew,
+              });
             });
-            const txHash = await this.buildAndSubmit(operation);
+
+            const txHash = await this.executeBatch(operations);
 
             const result = await this.getStreamsBySender(sender);
             const streams = Array.isArray(result) ? result : result.streams;
-            const newStreams = streams.slice(-1);
+            const newStreams = streams.slice(-chunk.length);
             const streamIds = newStreams.map((s) => s.id);
 
-            results.push({ txHash, streamIds, rows: [row] });
-          }
-        } else {
-          const operations = chunk.map((row) => {
-            const rowToken = row.token ?? defaultToken;
-            return this.encoder.createStream(sender, {
-              recipient: row.recipient,
-              token: rowToken,
-              amount: row.amount,
-              durationSeconds: row.durationSeconds,
-              autoRenew,
+            results.push({ txHash, streamIds, rows: chunk });
+          } catch (error) {
+            chunk.forEach((row, j) => {
+              failedSlots.push({ index: i + j, row, error });
             });
-          });
-
-          const txHash = await this.executeBatch(operations);
-
-          const result = await this.getStreamsBySender(sender);
-          const streams = Array.isArray(result) ? result : result.streams;
-          const newStreams = streams.slice(-chunk.length);
-          const streamIds = newStreams.map((s) => s.id);
-
-          results.push({ txHash, streamIds, rows: chunk });
+          }
         }
+      }
+
+      if (failedSlots.length > 0) {
+        throw new BulkCreatePartialError(results, failedSlots);
       }
 
       return { batches: results };
@@ -1347,10 +1645,18 @@ export class SoroStreamClient {
 
   // ── Utility ───────────────────────────────────────────────────────────────
 
+  /**
+   * Returns the circuit breaker guarding RPC calls, if one was configured.
+   * @returns The active `CircuitBreaker`, or `null` if none was configured.
+   */
   getCircuitBreaker(): CircuitBreaker | null {
     return this.breaker;
   }
 
+  /**
+   * Returns the price-feed adapter used for token-to-fiat conversions, if one was configured.
+   * @returns The active `PriceFeedAdapter`, or `null` if none was configured.
+   */
   getPriceFeed(): PriceFeedAdapter | null {
     return this.priceFeed;
   }
