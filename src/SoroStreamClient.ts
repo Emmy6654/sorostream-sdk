@@ -586,13 +586,13 @@ export class SoroStreamClient {
    * Validates the recipient address, token address, and sender account before
    * submitting. Enforces that `amount > 0` and `durationSeconds >= 1`.
    *
-   * @param params - Stream creation parameters.
+   * @param params - Stream creation parameters. See [Stream Parameter Ranges](../docs/parameters.md) for detailed limits and ranges.
    * @param params.recipient - Beneficiary Stellar address.
    * @param params.token - SAC token contract address.
-   * @param params.amount - Total amount to stream in stroops (must be > 0).
-   * @param params.durationSeconds - Stream duration in seconds (must be >= 1).
+   * @param params.amount - Total amount to stream in stroops (must be > 0). See [Stream Parameter Ranges](../docs/parameters.md#createstreamparams) for min/max limits.
+   * @param params.durationSeconds - Stream duration in seconds (must be >= 1). See [Stream Parameter Ranges](../docs/parameters.md#createstreamparams) for min/max limits.
    * @param params.autoRenew - Whether the stream auto-renews on completion.
-   * @param params.cliffSeconds - Optional cliff duration in seconds (default 0).
+   * @param params.cliffSeconds - Optional cliff duration in seconds (default 0). See [Stream Parameter Ranges](../docs/parameters.md#createstreamparams) for min/max limits.
    * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
    * @param options - Optional write options (e.g. `simulateOnly`, `feeBump`).
    * @returns `{ streamId, txHash }` — the new stream ID and confirming transaction hash.
