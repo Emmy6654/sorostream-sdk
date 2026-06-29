@@ -74,17 +74,17 @@ export interface Stream {
   deposit: bigint;
   /** Tokens released per second in stroops. */
   flowRate: bigint;
-  /** Unix timestamp when the stream started. */
+  /** Unix timestamp (seconds) when the stream started. */
   startTime: number;
-  /** Unix timestamp when the stream ends. */
+  /** Unix timestamp (seconds) when the stream ends. */
   endTime: number;
-  /** Unix timestamp of the last withdrawal. */
+  /** Unix timestamp (seconds) of the last withdrawal. */
   lastWithdrawTime: number;
   /** Current stream status. */
   status: StreamStatus;
   /** Whether the stream auto-renews on completion. */
   autoRenew: boolean;
-  /** Unix timestamp when the stream was paused (undefined if not paused). */
+  /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
 }
 
@@ -108,6 +108,12 @@ export interface CreateStreamParams {
    * the transaction is submitted. Defaults to 0 (no cliff).
    */
   cliffSeconds?: number;
+  /**
+   * Skip the token allowance pre-flight check (issue #165).
+   * Set to true when you have already approved the contract or the token
+   * does not expose an allowance view (e.g. native XLM).
+   */
+  skipAllowanceCheck?: boolean;
 }
 
 /** Alias for a single stream creation params object. */
@@ -471,6 +477,41 @@ export interface StreamFilterCriteria {
   recipient?: string;
   token?: string;
   status?: StreamStatus;
+}
+
+// ── Issue #166: Stream activity log ─────────────────────────────────────────
+
+/** The type of activity recorded in a stream's activity log. */
+export type StreamActivityType =
+  | "StreamCreated"
+  | "StreamWithdrawn"
+  | "StreamCancelled"
+  | "StreamToppedUp";
+
+/** A single entry in a stream's on-chain activity log. */
+export interface StreamActivityEntry {
+  /** Type of on-chain event. */
+  type: StreamActivityType;
+  /** Unix timestamp (ms) of the ledger close. */
+  timestamp: number;
+  /** Token amount involved, in stroops. `0n` for events with no amount. */
+  amount: bigint;
+  /** Transaction hash that emitted this event. */
+  txHash: string;
+  /** Raw ledger number. */
+  ledger: number;
+}
+
+/** Options for {@link SoroStreamClient.getActivityLog}. */
+export interface GetActivityLogOptions {
+  /** Only return entries at or after this Unix timestamp (ms). */
+  from?: number;
+  /** Only return entries at or before this Unix timestamp (ms). */
+  to?: number;
+  /** Max number of entries to return per page (default 100). */
+  limit?: number;
+  /** Cursor from a previous page for continuation. */
+  cursor?: string;
 }
 
 // ── Issue #73: Stream snapshot export/import ─────────────────────────────────

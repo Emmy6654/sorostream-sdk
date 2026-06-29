@@ -151,6 +151,47 @@ const { batches } = await client.bulkCreateStreams(rows, {
 console.log(`Created ${batches.length} batch(es)`);
 ```
 
+## Architecture
+
+```
+┌─────────────────────────────────┐
+│          Your App / UI          │
+└──────────────┬──────────────────┘
+               │ imports
+               ▼
+┌─────────────────────────────────┐
+│        @sorostream/sdk          │
+│                                 │
+│  SoroStreamClient               │
+│    ├─ WalletAdapter (sign txs)  │
+│    ├─ Cache (optimistic reads)  │
+│    └─ CircuitBreaker / Retry    │
+│                                 │
+│  Utils (pure helpers)           │
+│    ├─ toStroops / formatUSDC    │
+│    ├─ claimableNow / isExpired  │
+│    └─ calculateVestingSchedule  │
+└──────────────┬──────────────────┘
+               │ Stellar RPC (simulateTransaction / sendTransaction)
+               ▼
+┌─────────────────────────────────┐
+│   SoroStream Contract (Soroban) │
+│   github.com/SoroStream/contract│
+└─────────────────────────────────┘
+```
+
+**SoroStreamClient** is the primary entry point. It handles transaction building, signing, submission, polling, and retry logic. It exposes both mutation methods (`createStream`, `withdraw`, `topUp`, …) and read methods (`getStream`, `getClaimable`, …).
+
+**WalletAdapters** decouple signing from the client. Three are built-in — `createFreighterAdapter` (browser extension), `createKeypairAdapter` (server-side secret key), and `createLedgerAdapter` (hardware wallet). Implement `WalletAdapter` to add any custom signer.
+
+**Utils** are pure functions with no network dependency. Use them for client-side estimates (`claimableNow`, `isExpired`), display formatting (`formatUSDC`, `toStroops`), and display-only vesting schedules (`calculateVestingSchedule`). They can run in any JS/TS environment including Deno and Bun.
+
+Contract source: [github.com/SoroStream/contract](https://github.com/SoroStream/contract) · Example app: [github.com/SoroStream/app](https://github.com/SoroStream/app)
+
+## Migrating from v0.x
+
+See [docs/migration-v1.md](./docs/migration-v1.md) for a full list of breaking changes with before/after examples.
+
 ## Local Setup
 
 ```bash
