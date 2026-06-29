@@ -36,6 +36,7 @@ export {
   isStreamExpiring,
   isStreamStalled,
   isStreamUnderfunded,
+  isExpired,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -55,6 +56,7 @@ export {
   InvalidAddressError,
   AccountNotFoundError,
   InsufficientBalanceError,
+  InsufficientAllowanceError,
 } from "./errors.js";
 export type {
   Stream,
@@ -110,4 +112,7 @@ export type {
   SnapshotVestingPoint,
   SoroStreamPlugin,
   MiddlewareContext,
+  StreamActivityEntry,
+  StreamActivityType,
+  GetActivityLogOptions,
 } from "./types.js";
