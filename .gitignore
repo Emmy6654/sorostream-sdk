@@ -9,9 +9,13 @@ dist/
 
 # test artefacts
 coverage/
-# snapshots are intentionally committed (issue #100)
-# __snapshots__/
-# *.snap
+
+# test snapshots — auto-generated, not tracked
+test/__snapshots__/
+**/*.snap
+
+# generated API docs (produced by `npm run docs`)
+docs/api/
 
 # editor & OS
 .DS_Store
@@ -24,3 +28,7 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# environment files
+.env
+.env.*
