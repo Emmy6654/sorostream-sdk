@@ -596,4 +596,37 @@ export class MockSoroStreamClient {
   use(_plugin: SoroStreamPlugin): this {
     return this;
   }
+
+  // ── Issue #148: Recipient change notification ─────────────────────────────
+
+  onRecipientChanged(
+    streamId: string,
+    callback: (event: { streamId: string; oldRecipient: string; newRecipient: string; timestamp: number }) => void,
+    options?: { intervalMs?: number }
+  ): () => void {
+    const intervalMs = options?.intervalMs ?? 5_000;
+    let stopped = false;
+    let lastRecipient: string | null = null;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const stream = await this.getStream(streamId);
+        if (lastRecipient !== null && stream.recipient !== lastRecipient) {
+          callback({ streamId, oldRecipient: lastRecipient, newRecipient: stream.recipient, timestamp: Math.floor(Date.now() / 1000) });
+        }
+        lastRecipient = stream.recipient;
+      } catch { /* swallow */ }
+    };
+
+    void poll();
+    const timer = setInterval(poll, intervalMs);
+    return () => { stopped = true; clearInterval(timer); };
+  }
+
+  // ── Issue #149: Connection pooling ────────────────────────────────────────
+
+  getConnectionStats(): { maxConnections: number; active: number; idle: number; reused: number } {
+    return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
+  }
 }

@@ -207,6 +207,22 @@ export interface VestingScheduleResult {
   milestones: VestingSchedulePoint[];
 }
 
+// ── Issue #148: Recipient change notification ────────────────────────────────
+
+/** Payload delivered to an {@link onRecipientChanged} callback. */
+export interface RecipientChangedEvent {
+  streamId: string;
+  oldRecipient: string;
+  newRecipient: string;
+  timestamp: number;
+}
+
+/** Options for {@link SoroStreamClient.onRecipientChanged}. */
+export interface OnRecipientChangedOptions {
+  /** Polling interval in ms (default: 5000). */
+  intervalMs?: number;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */

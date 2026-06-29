@@ -110,4 +110,6 @@ export type {
   SnapshotVestingPoint,
   SoroStreamPlugin,
   MiddlewareContext,
+  RecipientChangedEvent,
+  OnRecipientChangedOptions,
 } from "./types.js";
