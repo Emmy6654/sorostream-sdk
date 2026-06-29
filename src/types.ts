@@ -108,6 +108,12 @@ export interface CreateStreamParams {
    * the transaction is submitted. Defaults to 0 (no cliff).
    */
   cliffSeconds?: number;
+  /**
+   * Skip the token allowance pre-flight check (issue #165).
+   * Set to true when you have already approved the contract or the token
+   * does not expose an allowance view (e.g. native XLM).
+   */
+  skipAllowanceCheck?: boolean;
 }
 
 /** Alias for a single stream creation params object. */

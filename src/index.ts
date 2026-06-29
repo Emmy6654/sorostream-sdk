@@ -56,6 +56,7 @@ export {
   InvalidAddressError,
   AccountNotFoundError,
   InsufficientBalanceError,
+  InsufficientAllowanceError,
 } from "./errors.js";
 export type {
   Stream,
