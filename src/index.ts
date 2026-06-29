@@ -36,6 +36,7 @@ export {
   isStreamExpiring,
   isStreamStalled,
   isStreamUnderfunded,
+  isExpired,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -55,7 +56,11 @@ export {
   InvalidAddressError,
   AccountNotFoundError,
   InsufficientBalanceError,
+  ZeroDurationError,
+  BulkCreatePartialError,
+  InsufficientAllowanceError,
 } from "./errors.js";
+export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
   Stream,
   StreamStatus,
@@ -112,4 +117,8 @@ export type {
   MiddlewareContext,
   RecipientChangedEvent,
   OnRecipientChangedOptions,
+} from "./types.js";
+  StreamActivityEntry,
+  StreamActivityType,
+  GetActivityLogOptions,
 } from "./types.js";

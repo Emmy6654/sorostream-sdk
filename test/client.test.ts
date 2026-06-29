@@ -36,6 +36,7 @@ import {
   SoroStreamError,
   InvalidAddressError,
   AccountNotFoundError,
+  ZeroDurationError,
 } from "../src/errors.js";
 import { withRetry } from "../src/retry.js";
 import { NoopLogger } from "../src/logger.js";
@@ -744,7 +745,7 @@ describe("SoroStreamClient input validation", () => {
         durationSeconds: 0,
         autoRenew: false,
       })
-    ).rejects.toThrow("Duration must be > 0");
+    ).rejects.toThrow(ZeroDurationError);
   });
 
   it("rejects topUp with zero amount (InsufficientAmountError)", async () => {

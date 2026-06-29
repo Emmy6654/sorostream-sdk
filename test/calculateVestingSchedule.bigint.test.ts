@@ -189,3 +189,152 @@ describe("calculateVestingSchedule — BigInt safety (totalAmount > MAX_SAFE_INT
     expect(cliffMs!.vested).toBe(flowRate * BigInt(cliff));
   });
 });
+
+// Regression tests for the off-by-one bug:
+// "When a stream is created with startTime set to an arbitrary Unix
+//  timestamp (not epoch-aligned), cliffEndTime is calculated incorrectly
+//  by an off-by-one in ledger sequence math."
+//
+// Stellar ledgers close roughly every 5 seconds, so any code path that
+// rounds cliffEndTime to a ledger boundary would shift it by up to one
+// ledger (~5s) whenever startTime is not a multiple of 5. Pinning it
+// down here: cliffEndTime must be `startTime + cliffSeconds` bit-exact,
+// regardless of startTime alignment, with no ledger-boundary rounding.
+const STELLAR_LEDGER_SECONDS = 5; // ~5 s ledger-close cadence on mainnet/testnet
+const ONE_YEAR_SECONDS = 365 * 24 * 3600;
+const ALL_LEDGER_OFFSETS = Array.from({ length: STELLAR_LEDGER_SECONDS }, (_, i) => i);
+
+describe("calculateVestingSchedule — cliffEndTime exactness (non-epoch-aligned startTime)", () => {
+  it("startTime not aligned to a Stellar ledger boundary preserves bit-exact cliffEndTime", () => {
+    // 1_700_000_003 mod 5 === 3 → not aligned with any ~5 s ledger close.
+    // If the implementation ever rounds to a ledger boundary
+    // (e.g. Math.ceil(x / 5) * 5), cliffEndTime will drift by ≥ 2 s and
+    // this test fails.
+    const startTime = 1_700_000_003;
+    const cliffSeconds = ONE_YEAR_SECONDS;
+    const totalSeconds = 4 * ONE_YEAR_SECONDS;
+    const flowRate = 100n;
+
+    const stream = makeStream({
+      flowRate,
+      startTime,
+      endTime: startTime + totalSeconds,
+      deposit: flowRate * BigInt(totalSeconds),
+    });
+
+    const result = calculateVestingSchedule(
+      stream,
+      cliffSeconds,
+      startTime + cliffSeconds / 2
+    );
+    expect(result.cliffEndTime).toBe(startTime + cliffSeconds);
+    // Cliff milestone must sit at the same bit-exact instant.
+    expect(result.milestones[0]!.time).toBe(startTime + cliffSeconds);
+  });
+
+  it("cliffEndTime is exact for every Stellar-ledger offset", () => {
+    // Sweep all ledger-offsets (0..4 relative to a 5 s ledger close).
+    // A rounding bug would manifest in at least one of these classes.
+    const cliffSeconds = ONE_YEAR_SECONDS;
+    const totalSeconds = 4 * ONE_YEAR_SECONDS;
+    const flowRate = 100n;
+
+    for (const mod of ALL_LEDGER_OFFSETS) {
+      const startTime = 1_700_000_000 + mod;
+      const stream = makeStream({
+        flowRate,
+        startTime,
+        endTime: startTime + totalSeconds,
+        deposit: flowRate * BigInt(totalSeconds),
+      });
+      const result = calculateVestingSchedule(stream, cliffSeconds, startTime);
+      expect(result.cliffEndTime, `mod=${mod}`).toBe(startTime + cliffSeconds);
+      expect(result.milestones[0]!.time, `mod=${mod}`).toBe(
+        startTime + cliffSeconds
+      );
+    }
+  });
+
+  it("cliffEndTime is exact across minute-and-second grid alignments", () => {
+    // Sanity sweep across the time grid most consumers slice on (UTC
+    // minutes). Any rounding scheme would manifest here.
+    const cliffSeconds = 7 * 24 * 3600;
+    const totalSeconds = 30 * 24 * 3600;
+    const flowRate = 12_345n;
+
+    // Step by the ledger cadence to keep the sweep tight while still
+    // covering non-aligned values across the full minute.
+    for (let mod = 0; mod < 60; mod += STELLAR_LEDGER_SECONDS) {
+      const startTime = 1_700_000_000 + mod;
+      const stream = makeStream({
+        flowRate,
+        startTime,
+        endTime: startTime + totalSeconds,
+        deposit: flowRate * BigInt(totalSeconds),
+      });
+      const result = calculateVestingSchedule(
+        stream,
+        cliffSeconds,
+        startTime + cliffSeconds
+      );
+      expect(result.cliffEndTime, `mod=${mod}`).toBe(startTime + cliffSeconds);
+    }
+  });
+
+  it("inCliff flips on the exact cliffEndTime instant — no 1-ledger drift", () => {
+    // startTime is intentionally not aligned to any ledger or minute
+    // boundary. A ledger-rounded cliffEndTime would either swallow the
+    // last second of cliff (inCliff still true past the true boundary)
+    // or cut it short (inCliff false before the true boundary).
+    const startTime = 1_700_000_003;
+    const cliffSeconds = ONE_YEAR_SECONDS;
+    const stream = makeStream({
+      flowRate: 7n,
+      startTime,
+      endTime: startTime + 4 * ONE_YEAR_SECONDS,
+      deposit: 7n * BigInt(4 * ONE_YEAR_SECONDS),
+    });
+
+    // exactly at cliffEndTime → inCliff must be false
+    const atCliff = calculateVestingSchedule(
+      stream,
+      cliffSeconds,
+      startTime + cliffSeconds
+    );
+    expect(atCliff.cliffEndTime).toBe(startTime + cliffSeconds);
+    expect(atCliff.inCliff).toBe(false);
+
+    // 1 second before cliffEndTime → inCliff must be true
+    const justInside = calculateVestingSchedule(
+      stream,
+      cliffSeconds,
+      startTime + cliffSeconds - 1
+    );
+    expect(justInside.cliffEndTime).toBe(startTime + cliffSeconds);
+    expect(justInside.inCliff).toBe(true);
+  });
+
+  it("small cliffs preserve exactness across every ledger offset", () => {
+    // Catches any floor/ceil introduced for "short" cliff paths. Uses
+    // small cliff values that are deliberately non-aligned with the 5 s
+    // ledger cadence to maximise sensitivity to rounding.
+    const totalSeconds = 3600;
+    const cliffSeconds = 13; // not aligned with STELLAR_LEDGER_SECONDS
+
+    for (const mod of ALL_LEDGER_OFFSETS) {
+      const startTime = 1_700_000_000 + mod;
+      const stream = makeStream({
+        flowRate: 1n,
+        startTime,
+        endTime: startTime + totalSeconds,
+        deposit: BigInt(totalSeconds),
+      });
+      const result = calculateVestingSchedule(
+        stream,
+        cliffSeconds,
+        startTime + cliffSeconds
+      );
+      expect(result.cliffEndTime, `mod=${mod}`).toBe(startTime + cliffSeconds);
+    }
+  });
+});
