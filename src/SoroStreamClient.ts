@@ -26,6 +26,7 @@ import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
 import type { CircuitBreakerOptions } from "./circuitBreaker.js";
+import { Cache } from "./cache.js";
 import {
   TransactionFailedError,
   StreamNotFoundError,
@@ -34,6 +35,7 @@ import {
   AccountNotFoundError,
   ZeroDurationError,
   BulkCreatePartialError,
+  InsufficientAllowanceError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -72,6 +74,8 @@ import type {
   FeeBumpOptions,
   SoroStreamPlugin,
   MiddlewareContext,
+  StreamActivityEntry,
+  GetActivityLogOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import { calculateVestingSchedule } from "./utils.js";
@@ -175,6 +179,8 @@ export class SoroStreamClient {
   private readonly defaultFeeBump: FeeBumpOptions | null = null;
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
+  /** Short-lived cache for stream objects. Used for optimistic updates. */
+  private readonly streamCache = new Cache<string, Stream>(10_000);
   /** Per-stream read cache, keyed by `${network}:${streamId}`. */
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
@@ -515,6 +521,41 @@ export class SoroStreamClient {
     }
   }
 
+  /**
+   * Checks the sender's token allowance for the contract via the SAC allowance view.
+   * Throws {@link InsufficientAllowanceError} if the current allowance is less than required.
+   * Silently passes when the allowance RPC call fails (non-SAC token, RPC outage, etc.).
+   */
+  private async checkAllowance(token: string, required: bigint): Promise<void> {
+    try {
+      const sender = await this.walletAdapter.getPublicKey();
+      const contractAddress = this.contract.contractId();
+
+      const tokenContract = new Contract(token);
+      const op = tokenContract
+        .call(
+          "allowance",
+          nativeToScVal(sender, { type: "address" }),
+          nativeToScVal(contractAddress, { type: "address" })
+        )
+        .build();
+
+      const result = await this.simulateOp(op);
+      if (rpc.Api.isSimulationError(result)) return; // non-SAC token — skip
+
+      const retval = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!retval) return;
+
+      const current = BigInt(scValToNative(retval) as number);
+      if (current < required) {
+        throw new InsufficientAllowanceError(token, required, current);
+      }
+    } catch (err) {
+      if (err instanceof InsufficientAllowanceError) throw err;
+      // RPC / parse failures — don't block stream creation
+    }
+  }
+
   // ── Stream mutations ──────────────────────────────────────────────────────
 
   /**
@@ -561,6 +602,10 @@ export class SoroStreamClient {
       if (params.amount <= 0n) throw new InsufficientAmountError();
       await this.validateCliff(params.cliffSeconds ?? 0);
       await this.validateStreamParams(params);
+
+      if (!params.skipAllowanceCheck) {
+        await this.checkAllowance(params.token, params.amount);
+      }
 
       const sender = await this.walletAdapter.getPublicKey();
       const operation = this.encoder.createStream(sender, params);
@@ -755,6 +800,13 @@ export class SoroStreamClient {
    * });
    * console.log("Stream extended until:", newEndTime.toISOString());
    * ```
+   * After the transaction confirms, the local stream cache is updated optimistically
+   * so that the next `getStream` call reflects the new balance without waiting for
+   * the next RPC poll.
+   * @param params - Top-up parameters.
+   * @param signal - Optional abort signal.
+   * @param options - Optional write options.
+   * @returns The transaction hash and new end time, or simulation result.
    */
   async topUp(
     params: TopUpParams,
@@ -770,6 +822,10 @@ export class SoroStreamClient {
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+
+    // Fetch fresh on-chain state and cache it so immediate getStream() calls
+    // reflect the topped-up balance without stale data.
+    this.streamCache.delete(params.streamId);
     const stream = await this.getStream(params.streamId);
     return { txHash, newEndTime: new Date(stream.endTime * 1000) };
   }
@@ -1279,12 +1335,17 @@ export class SoroStreamClient {
 
   /**
    * Returns the full stream data for a given stream ID.
+   * Returns a cached value when one is present (populated by optimistic updates).
    * Automatically retries on transient RPC errors.
    * @param streamId - The stream ID to look up.
    * @returns The `Stream` record.
    * @throws {StreamNotFoundError} If no stream exists with the given ID.
    */
   async getStream(streamId: string): Promise<Stream> {
+   */
+  async getStream(streamId: string): Promise<Stream> {
+    const cached = this.streamCache.get(streamId);
+   */  async getStream(streamId: string): Promise<Stream> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
@@ -1311,6 +1372,7 @@ export class SoroStreamClient {
     ).result?.retval;
     if (!returnVal) throw new Error("No return value from contract");
     const stream = scValToStream(returnVal);
+    this.streamCache.set(streamId, stream);
 
     // Only cache the result if the network hasn't changed during the RPC.
     // This guard maintains the cache contract keyed by the *current*
@@ -1659,6 +1721,128 @@ export class SoroStreamClient {
    */
   getPriceFeed(): PriceFeedAdapter | null {
     return this.priceFeed;
+  }
+
+  // ── Issue #167: Stream expiration hooks ──────────────────────────────────
+
+  private readonly _expiryHandlers = new Map<string, Set<(stream: Stream) => void>>();
+  private readonly _expiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Registers a callback that fires once when a stream reaches its `end_time`.
+   * Multiple handlers per stream are supported. The handler receives the stream
+   * snapshot fetched at expiry time.
+   *
+   * @param streamId - The stream to watch for expiry.
+   * @param callback - Invoked with the final stream snapshot at expiry.
+   * @returns An unsubscribe function. Call it to cancel the hook before it fires.
+   *
+   * @example
+   * ```ts
+   * const unsubscribe = client.onExpiry("42", (stream) => {
+   *   console.log("Stream expired:", stream.id);
+   * });
+   * // later: unsubscribe();
+   * ```
+   */
+  onExpiry(streamId: string, callback: (stream: Stream) => void): () => void {
+    if (!this._expiryHandlers.has(streamId)) {
+      this._expiryHandlers.set(streamId, new Set());
+    }
+    const handlers = this._expiryHandlers.get(streamId)!;
+    handlers.add(callback);
+
+    if (!this._expiryTimers.has(streamId)) {
+      void this._scheduleExpiry(streamId);
+    }
+
+    return () => {
+      handlers.delete(callback);
+      if (handlers.size === 0) {
+        this._cancelExpiryTimer(streamId);
+        this._expiryHandlers.delete(streamId);
+      }
+    };
+  }
+
+  private async _scheduleExpiry(streamId: string): Promise<void> {
+    try {
+      const stream = await this.getStream(streamId);
+      const delayMs = Math.max(0, stream.endTime * 1000 - Date.now());
+
+      const handle = setTimeout(async () => {
+        this._expiryTimers.delete(streamId);
+        try {
+          const finalStream = await this.getStream(streamId);
+          const handlers = this._expiryHandlers.get(streamId);
+          if (handlers) {
+            for (const cb of [...handlers]) cb(finalStream);
+          }
+        } catch { /* stream may no longer exist */ }
+      }, delayMs);
+
+      this._expiryTimers.set(streamId, handle);
+    } catch { /* stream not found — skip */ }
+  }
+
+  private _cancelExpiryTimer(streamId: string): void {
+    const handle = this._expiryTimers.get(streamId);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      this._expiryTimers.delete(streamId);
+    }
+  // ── Issue #166: Stream activity log ──────────────────────────────────────
+
+  /**
+   * Returns a time-ordered list of on-chain events for a stream.
+   *
+   * Supported event types: StreamCreated, StreamWithdrawn, StreamCancelled.
+   * Results are sorted oldest-first and filtered by optional timestamp range.
+   *
+   * @param streamId - The stream to query.
+   * @param options - Optional timestamp filters (`from`/`to` in ms) and pagination.
+   * @returns `StreamActivityEntry[]` sorted oldest-first. Empty array when no events exist.
+   *
+   * @example
+   * ```ts
+   * const log = await client.getActivityLog("42");
+   * const withdrawals = log.filter((e) => e.type === "StreamWithdrawn");
+   * ```
+   */
+  async getActivityLog(
+    streamId: string,
+    options?: GetActivityLogOptions
+  ): Promise<StreamActivityEntry[]> {
+    const { StreamIndexer } = await import("./indexer.js");
+    const indexer = new StreamIndexer(this.server, this.contract.contractId());
+
+    const { events } = await indexer.getStreamHistory(streamId, {
+      limit: options?.limit ?? 100,
+      cursor: options?.cursor,
+    });
+
+    return events
+      .map((e): StreamActivityEntry => {
+        let amount = 0n;
+        if (e.type === "StreamWithdrawn") {
+          amount = e.data.amount;
+        } else if (e.type === "StreamCreated") {
+          amount = e.data.deposit;
+        }
+        return {
+          type: e.type as StreamActivityEntry["type"],
+          timestamp: new Date(e.ledgerClosedAt).getTime(),
+          amount,
+          txHash: e.txHash,
+          ledger: e.ledger,
+        };
+      })
+      .filter((entry) => {
+        if (options?.from != null && entry.timestamp < options.from) return false;
+        if (options?.to != null && entry.timestamp > options.to) return false;
+        return true;
+      })
+      .sort((a, b) => a.timestamp - b.timestamp);
   }
 }
 

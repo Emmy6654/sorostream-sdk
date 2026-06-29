@@ -122,16 +122,40 @@ export function isValidStellarAddress(address: string): boolean {
 }
 
 /**
- * Calculates the per-second flow rate in stroops.
- * @param amount - Total amount in stroops.
- * @param durationSeconds - Duration in seconds.
+ * Calculates the largest per-second flow rate such that `flowRate * durationSeconds <= totalAmount`.
+ *
+ * @param totalAmount - Total amount to stream in stroops. Must be > 0.
+ * @param durationSeconds - Stream duration in seconds. Must be > 0.
+ * @returns The per-second flow rate in stroops (integer division).
+ * @throws {SoroStreamError} If totalAmount or durationSeconds is zero or negative.
+ *
+ * @example
+ * ```ts
+ * const rate = calculateFlowRate(toStroops("100"), 30 * 24 * 60 * 60);
+ * // rate * duration <= totalAmount is always satisfied
+ * ```
  */
 export function calculateFlowRate(
-  amount: bigint,
+  totalAmount: bigint,
   durationSeconds: number
 ): bigint {
-  if (durationSeconds <= 0) throw new SoroStreamError("Duration must be > 0");
-  return amount / BigInt(durationSeconds);
+  if (totalAmount <= 0n) throw new SoroStreamError("totalAmount must be > 0");
+  if (durationSeconds <= 0) throw new SoroStreamError("durationSeconds must be > 0");
+  return totalAmount / BigInt(durationSeconds);
+}
+
+/**
+ * Returns true when the stream's end time has passed.
+ *
+ * `stream.endTime` is stored in **Unix seconds** (on-chain value).
+ * `Date.now()` returns milliseconds, so we divide by 1000 before comparing.
+ *
+ * @param stream - The stream object.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ */
+export function isExpired(stream: Stream, now?: number): boolean {
+  const nowSecs = now ?? Date.now() / 1000;
+  return stream.endTime < nowSecs;
 }
 
 /**

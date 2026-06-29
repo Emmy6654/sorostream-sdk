@@ -36,6 +36,7 @@ export {
   isStreamExpiring,
   isStreamStalled,
   isStreamUnderfunded,
+  isExpired,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -57,6 +58,7 @@ export {
   InsufficientBalanceError,
   ZeroDurationError,
   BulkCreatePartialError,
+  InsufficientAllowanceError,
 } from "./errors.js";
 export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
@@ -113,4 +115,7 @@ export type {
   SnapshotVestingPoint,
   SoroStreamPlugin,
   MiddlewareContext,
+  StreamActivityEntry,
+  StreamActivityType,
+  GetActivityLogOptions,
 } from "./types.js";
