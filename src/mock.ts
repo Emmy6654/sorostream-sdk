@@ -43,6 +43,7 @@ import type {
   OperatorTopUpParams,
   WithdrawParams,
 } from "./types.js";
+import { streamToJSON } from "./utils.js";
 
 let nextId = 1;
 
@@ -121,6 +122,9 @@ export class MockSoroStreamClient {
       lastWithdrawTime: now,
       status: "Active",
       autoRenew: params.autoRenew,
+      toJSON() {
+        return streamToJSON(this) as Record<string, unknown>;
+      },
     };
     this.streams.set(id, stream);
     this.emit({
@@ -396,7 +400,6 @@ export class MockSoroStreamClient {
       streamId: params.streamId,
       txHash,
       ledger: 0,
-      timestamp: nowSec(),
       timestamp: now,
       data: {},
     });

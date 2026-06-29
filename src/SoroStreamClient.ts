@@ -26,7 +26,6 @@ import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
 import type { CircuitBreakerOptions } from "./circuitBreaker.js";
-import { Cache } from "./cache.js";
 import {
   TransactionFailedError,
   StreamNotFoundError,
@@ -36,6 +35,7 @@ import {
   ZeroDurationError,
   BulkCreatePartialError,
   InsufficientAllowanceError,
+  DuplicateStreamError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -80,7 +80,7 @@ import type {
   GetActivityLogOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
-import { calculateVestingSchedule } from "./utils.js";
+import { calculateVestingSchedule, streamToJSON } from "./utils.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -141,6 +141,10 @@ export interface SoroStreamClientOptions {
    * Issue #149.
    */
   idleTimeoutMs?: number;
+  /**
+   * Opt-in check for duplicate stream creation.
+   */
+  checkDuplicate?: boolean;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -158,6 +162,9 @@ function scValToStream(val: xdr.ScVal): Stream {
     status: raw["status"] as Stream["status"],
     autoRenew: Boolean(raw["auto_renew"]),
     ...(raw["paused_at"] != null ? { pausedAt: Number(raw["paused_at"]) } : {}),
+    toJSON() {
+      return streamToJSON(this) as Record<string, unknown>;
+    },
   };
 }
 
@@ -191,12 +198,11 @@ export class SoroStreamClient {
   private readonly defaultFeeBump: FeeBumpOptions | null = null;
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
-  /** Short-lived cache for stream objects. Used for optimistic updates. */
-  private readonly streamCache = new Cache<string, Stream>(10_000);
   /** Per-stream read cache, keyed by `${network}:${streamId}`. */
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
+  private readonly checkDuplicate: boolean;
   // Issue #149: connection pool stats
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
 
@@ -221,6 +227,7 @@ export class SoroStreamClient {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
     this.plugins = options.plugins ?? [];
+    this.checkDuplicate = options.checkDuplicate ?? false;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -559,8 +566,7 @@ export class SoroStreamClient {
           "allowance",
           nativeToScVal(sender, { type: "address" }),
           nativeToScVal(contractAddress, { type: "address" })
-        )
-        .build();
+        );
 
       const result = await this.simulateOp(op);
       if (rpc.Api.isSimulationError(result)) return; // non-SAC token — skip
@@ -623,13 +629,26 @@ export class SoroStreamClient {
     return this.runWithMiddleware("createStream", [params], async () => {
       if (params.amount <= 0n) throw new InsufficientAmountError();
       await this.validateCliff(params.cliffSeconds ?? 0);
+
+      const sender = await this.walletAdapter.getPublicKey();
+
+      if (this.checkDuplicate) {
+        const existingResult = await this.getStreamsBySender(sender);
+        const existingStreams = Array.isArray(existingResult) ? existingResult : existingResult.streams;
+        const isDup = existingStreams.some(
+          (s) => s.recipient === params.recipient && s.token === params.token && s.status === "Active"
+        );
+        if (isDup) {
+          throw new DuplicateStreamError();
+        }
+      }
+
       await this.validateStreamParams(params);
 
       if (!params.skipAllowanceCheck) {
         await this.checkAllowance(params.token, params.amount);
       }
 
-      const sender = await this.walletAdapter.getPublicKey();
       const operation = this.encoder.createStream(sender, params);
       const feeBump = this.resolveFeeBump(options?.feeBump);
       const txHash = await this.buildAndSubmit(operation, signal, feeBump);
@@ -847,7 +866,7 @@ export class SoroStreamClient {
 
     // Fetch fresh on-chain state and cache it so immediate getStream() calls
     // reflect the topped-up balance without stale data.
-    this.streamCache.delete(params.streamId);
+    this.clearStreamCache(params.streamId);
     const stream = await this.getStream(params.streamId);
     return { txHash, newEndTime: new Date(stream.endTime * 1000) };
   }
@@ -1364,10 +1383,6 @@ export class SoroStreamClient {
    * @throws {StreamNotFoundError} If no stream exists with the given ID.
    */
   async getStream(streamId: string): Promise<Stream> {
-   */
-  async getStream(streamId: string): Promise<Stream> {
-    const cached = this.streamCache.get(streamId);
-   */  async getStream(streamId: string): Promise<Stream> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
@@ -1394,7 +1409,6 @@ export class SoroStreamClient {
     ).result?.retval;
     if (!returnVal) throw new Error("No return value from contract");
     const stream = scValToStream(returnVal);
-    this.streamCache.set(streamId, stream);
 
     // Only cache the result if the network hasn't changed during the RPC.
     // This guard maintains the cache contract keyed by the *current*
@@ -1809,6 +1823,7 @@ export class SoroStreamClient {
       idle: this.connectionPool.idle,
       reused: this.connectionPool.reused,
     };
+  }
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
   private readonly _expiryHandlers = new Map<string, Set<(stream: Stream) => void>>();
@@ -1877,6 +1892,7 @@ export class SoroStreamClient {
       clearTimeout(handle);
       this._expiryTimers.delete(streamId);
     }
+  }
   // ── Issue #166: Stream activity log ──────────────────────────────────────
 
   /**

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, nativeToScVal } from "@stellar/stellar-sdk";
 
 // Pre-generated valid Stellar addresses for tests that pass addresses to contract calls.
 const TEST_KEYPAIR = Keypair.random();
@@ -9,7 +9,7 @@ const TEST_TOKEN = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
 
 import { SoroStreamClient } from "../src/SoroStreamClient.js";
-import { createKeypairAdapter, createPasskeyAdapter } from "../src/wallet.js";
+import { createKeypairAdapter, createPasskeyAdapter, createLedgerAdapter } from "../src/wallet.js";
 import type { Stream, WalletAdapter, BulkStreamRow, PriceFeedAdapter, FeeBumpOptions } from "../src/types.js";
 import {
   toStroops,
@@ -37,6 +37,7 @@ import {
   InvalidAddressError,
   AccountNotFoundError,
   ZeroDurationError,
+  DuplicateStreamError,
 } from "../src/errors.js";
 import { withRetry } from "../src/retry.js";
 import { NoopLogger } from "../src/logger.js";
@@ -553,13 +554,12 @@ describe("watchClaimable", () => {
     };
 
     // First reconcile throws (simulate network down on first poll);
-    // subsequent reconciles return 5000n — the exact same value the
-    // invariant interpolation emits on every tick.
+    // subsequent reconciles return 5002n.
     let reconcileCalls = 0;
     const reconcile = vi.fn().mockImplementation(async () => {
       reconcileCalls++;
       if (reconcileCalls === 1) throw new Error("network down");
-      return 5000n;
+      return 5002n;
     });
 
     const onTick = vi.fn();
@@ -795,7 +795,6 @@ describe("createKeypairAdapter", () => {
     const adapter = createKeypairAdapter(keypair.secret());
     expect(await adapter.isConnected()).toBe(true);
     expect(await adapter.getPublicKey()).toBe(keypair.publicKey());
-    expect(await adapter.getPublicKey()).toBe(kp.publicKey());
   });
 
   it("throws on invalid secret key", () => {

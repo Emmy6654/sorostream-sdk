@@ -96,6 +96,9 @@ export class BulkCreatePartialError extends SoroStreamError {
     this.name = "BulkCreatePartialError";
     this.successfulBatches = successfulBatches;
     this.failedSlots = failedSlots;
+  }
+}
+
 export class InsufficientAllowanceError extends SoroStreamError {
   /** Token contract address that was checked. */
   readonly token: string;
@@ -112,5 +115,12 @@ export class InsufficientAllowanceError extends SoroStreamError {
     this.token = token;
     this.required = required;
     this.current = current;
+  }
+}
+
+export class DuplicateStreamError extends SoroStreamError {
+  constructor(message = "Duplicate stream detected") {
+    super(message);
+    this.name = "DuplicateStreamError";
   }
 }

@@ -37,6 +37,9 @@ export {
   isStreamStalled,
   isStreamUnderfunded,
   isExpired,
+  streamToJSON,
+  jsonStringifyStream,
+  jsonStringify,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -117,7 +120,6 @@ export type {
   MiddlewareContext,
   RecipientChangedEvent,
   OnRecipientChangedOptions,
-} from "./types.js";
   StreamActivityEntry,
   StreamActivityType,
   GetActivityLogOptions,
