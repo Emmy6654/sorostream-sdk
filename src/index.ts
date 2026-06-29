@@ -112,4 +112,7 @@ export type {
   SnapshotVestingPoint,
   SoroStreamPlugin,
   MiddlewareContext,
+  StreamActivityEntry,
+  StreamActivityType,
+  GetActivityLogOptions,
 } from "./types.js";
