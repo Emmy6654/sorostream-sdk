@@ -135,6 +135,20 @@ export function calculateFlowRate(
 }
 
 /**
+ * Returns true when the stream's end time has passed.
+ *
+ * `stream.endTime` is stored in **Unix seconds** (on-chain value).
+ * `Date.now()` returns milliseconds, so we divide by 1000 before comparing.
+ *
+ * @param stream - The stream object.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ */
+export function isExpired(stream: Stream, now?: number): boolean {
+  const nowSecs = now ?? Date.now() / 1000;
+  return stream.endTime < nowSecs;
+}
+
+/**
  * Returns the number of seconds remaining until the stream ends.
  * Returns 0 if the stream has already ended.
  * @param stream - The stream object.

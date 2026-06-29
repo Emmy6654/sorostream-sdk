@@ -36,6 +36,7 @@ export {
   isStreamExpiring,
   isStreamStalled,
   isStreamUnderfunded,
+  isExpired,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
