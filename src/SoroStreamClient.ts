@@ -1410,6 +1410,74 @@ export class SoroStreamClient {
     return this.priceFeed;
   }
 
+  // ── Issue #167: Stream expiration hooks ──────────────────────────────────
+
+  private readonly _expiryHandlers = new Map<string, Set<(stream: Stream) => void>>();
+  private readonly _expiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Registers a callback that fires once when a stream reaches its `end_time`.
+   * Multiple handlers per stream are supported. The handler receives the stream
+   * snapshot fetched at expiry time.
+   *
+   * @param streamId - The stream to watch for expiry.
+   * @param callback - Invoked with the final stream snapshot at expiry.
+   * @returns An unsubscribe function. Call it to cancel the hook before it fires.
+   *
+   * @example
+   * ```ts
+   * const unsubscribe = client.onExpiry("42", (stream) => {
+   *   console.log("Stream expired:", stream.id);
+   * });
+   * // later: unsubscribe();
+   * ```
+   */
+  onExpiry(streamId: string, callback: (stream: Stream) => void): () => void {
+    if (!this._expiryHandlers.has(streamId)) {
+      this._expiryHandlers.set(streamId, new Set());
+    }
+    const handlers = this._expiryHandlers.get(streamId)!;
+    handlers.add(callback);
+
+    if (!this._expiryTimers.has(streamId)) {
+      void this._scheduleExpiry(streamId);
+    }
+
+    return () => {
+      handlers.delete(callback);
+      if (handlers.size === 0) {
+        this._cancelExpiryTimer(streamId);
+        this._expiryHandlers.delete(streamId);
+      }
+    };
+  }
+
+  private async _scheduleExpiry(streamId: string): Promise<void> {
+    try {
+      const stream = await this.getStream(streamId);
+      const delayMs = Math.max(0, stream.endTime * 1000 - Date.now());
+
+      const handle = setTimeout(async () => {
+        this._expiryTimers.delete(streamId);
+        try {
+          const finalStream = await this.getStream(streamId);
+          const handlers = this._expiryHandlers.get(streamId);
+          if (handlers) {
+            for (const cb of [...handlers]) cb(finalStream);
+          }
+        } catch { /* stream may no longer exist */ }
+      }, delayMs);
+
+      this._expiryTimers.set(streamId, handle);
+    } catch { /* stream not found — skip */ }
+  }
+
+  private _cancelExpiryTimer(streamId: string): void {
+    const handle = this._expiryTimers.get(streamId);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      this._expiryTimers.delete(streamId);
+    }
   // ── Issue #166: Stream activity log ──────────────────────────────────────
 
   /**
