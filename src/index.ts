@@ -56,8 +56,11 @@ export {
   InvalidAddressError,
   AccountNotFoundError,
   InsufficientBalanceError,
+  ZeroDurationError,
+  BulkCreatePartialError,
   InsufficientAllowanceError,
 } from "./errors.js";
+export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
   Stream,
   StreamStatus,
