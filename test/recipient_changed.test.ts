@@ -45,7 +45,7 @@ describe("#148 onRecipientChanged", () => {
     mock.onRecipientChanged(streamId, cb, { intervalMs: 1000 });
 
     // Let the initial poll run (seeds lastRecipient)
-    await vi.runAllTilesAsync();
+    await vi.advanceTimersByTimeAsync(0);
 
     // Change the recipient
     await mock.transferStream({ streamId, newRecipient: RECIPIENT_B });
@@ -75,7 +75,7 @@ describe("#148 onRecipientChanged", () => {
     const cb = vi.fn();
     mock.onRecipientChanged(streamId, cb, { intervalMs: 1000 });
 
-    await vi.runAllTilesAsync();
+    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(3000);
 
     expect(cb).not.toHaveBeenCalled();
@@ -93,7 +93,7 @@ describe("#148 onRecipientChanged", () => {
     const cb = vi.fn();
     const unsub = mock.onRecipientChanged(streamId, cb, { intervalMs: 1000 });
 
-    await vi.runAllTilesAsync();
+    await vi.advanceTimersByTimeAsync(0);
     unsub();
 
     await mock.transferStream({ streamId, newRecipient: RECIPIENT_B });

@@ -86,6 +86,8 @@ export interface Stream {
   autoRenew: boolean;
   /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
+  /** Optional helper method for JSON serialization of BigInt fields. */
+  toJSON?(): Record<string, unknown>;
 }
 
 /** Parameters for creating a new stream. */
