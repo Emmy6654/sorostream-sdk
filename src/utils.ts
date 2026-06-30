@@ -43,7 +43,7 @@ export function toStroops(amount: string, decimals: number = 7): bigint {
  *
  * When `options` is provided, the result is locale-aware (grouping separators,
  * configurable decimal places). Without options, the existing precise
- * fixed-decimal string is returned unchanged — safe for calculations.
+ * fixed-decimal string is returned unchanged â€” safe for calculations.
  *
  * @param stroops - Amount in the smallest token unit.
  * @param decimals - Number of decimal places the token uses (default 7 for SAC).
@@ -170,7 +170,7 @@ export function timeUntilStreamEnd(stream: Stream): number {
 
 /**
  * Calculates the currently claimable amount in stroops based on local time.
- * This is an estimate — the contract is the source of truth.
+ * This is an estimate â€” the contract is the source of truth.
  * @param stream - The stream object.
  */
 export function claimableNow(stream: Stream): bigint {
@@ -186,11 +186,11 @@ export function claimableNow(stream: Stream): bigint {
  *
  * The contract streams linearly from `startTime` with no cliff concept.
  * A "4-year vesting with 1-year cliff" can only be approximated by adjusting
- * the displayed schedule — **this is NOT enforced on-chain**.
+ * the displayed schedule â€” **this is NOT enforced on-chain**.
  *
  * All duration / elapsed / milestone arithmetic is performed in BigInt so that
- * streams whose `flowRate × duration` exceeds `Number.MAX_SAFE_INTEGER`
- * (≈9.007e15) do not lose precision through implicit Number coercions.
+ * streams whose `flowRate Ã— duration` exceeds `Number.MAX_SAFE_INTEGER`
+ * (â‰ˆ9.007e15) do not lose precision through implicit Number coercions.
  * The `time` field of each milestone is the only place we round back to Number
  * since Unix timestamps must be representable as Numbers.
  *
@@ -209,7 +209,7 @@ export function calculateVestingSchedule(
 
   // Promote all duration / elapsed arithmetic to BigInt so we never round
   // intermediate counts through Number. This keeps totalAmount, vested
-  // amounts, and effectiveClaimable exact when stream.flowRate × duration
+  // amounts, and effectiveClaimable exact when stream.flowRate Ã— duration
   // exceeds Number.MAX_SAFE_INTEGER.
   const totalSecondsBig = BigInt(stream.endTime - stream.startTime);
   const cliffSecondsBig = BigInt(cliffSeconds);
@@ -219,7 +219,12 @@ export function calculateVestingSchedule(
   if (inCliff) {
     effectiveClaimable = 0n;
   } else if (currentTime >= stream.endTime) {
-    effectiveClaimable = totalAmount;
+    // Post-cliff portion of the schedule (clamp at 0 if no real cliff applies).
+    const postCliffSeconds =
+      cliffSecondsBig < totalSecondsBig
+        ? totalSecondsBig - cliffSecondsBig
+        : 0n;
+    effectiveClaimable = stream.flowRate * postCliffSeconds;
   } else {
     // Elapsed seconds from end-of-cliff (or from startTime when no cliff)
     // up to min(now, endTime).
@@ -227,7 +232,7 @@ export function calculateVestingSchedule(
     const vestingStartBig = BigInt(Math.max(cliffEndTime, stream.startTime));
     const elapsedBig =
       minNowBig > vestingStartBig ? minNowBig - vestingStartBig : 0n;
-    effectiveClaimable = stream.flowRate * (cliffSecondsBig + elapsedBig);
+    effectiveClaimable = stream.flowRate * elapsedBig;
   }
 
   const milestones: Array<{ time: number; vested: bigint }> = [];
@@ -240,7 +245,7 @@ export function calculateVestingSchedule(
   }
 
   // Use integer percentage literals (25n, 50n, 75n, 100n) and divide in
-  // BigInt — this avoids `Math.floor(totalSeconds × decimalPct)` losing
+  // BigInt â€” this avoids `Math.floor(totalSeconds Ã— decimalPct)` losing
   // precision when totalSeconds is large. The final `Number()` cast below
   // is for the `time` Unix-timestamp field and is the only intentional
   // Number conversion.
@@ -315,7 +320,7 @@ export function watchClaimableWs(
     };
 
     ws.onerror = () => {
-      // Connection failed — silently no-op; caller should provide fallback
+      // Connection failed â€” silently no-op; caller should provide fallback
     };
   } catch {
     // WebSocket not supported in this environment
@@ -393,13 +398,13 @@ export function watchClaimable(
     // Deduplicate emissions across all three emit sources (tickTimer,
     // reconcile, and the optional WebSocket subscription). Without dedup,
     // reconcile (or WS) returning the same bigint that the most recent
-    // tick already interpolated to would call onTick twice — once from the
+    // tick already interpolated to would call onTick twice â€” once from the
     // last cached tick, once from the fresh fetch. The most common path
     // is a network blip: ticks keep interpolating from a stale baseValue,
     // then reconcile recovers and immediately calls emit() with a value
     // that matches the last cached value. The same dedup also (correctly)
     // keeps sub-stroop ticks quiet when Math.floor(perMs * elapsedMs)
-    // rounds to zero between stroop increments — so it is always-on, not
+    // rounds to zero between stroop increments â€” so it is always-on, not
     // a network-recovery-specific hack.
     if (interpolated === lastEmitted) return;
     lastEmitted = interpolated;
@@ -423,7 +428,7 @@ export function watchClaimable(
       baseTime = Date.now();
       emit();
     } catch {
-      // swallow — keep interpolating from last known value
+      // swallow â€” keep interpolating from last known value
     }
   }, reconcileMs);
 
@@ -445,7 +450,7 @@ export function watchClaimable(
   };
 }
 
-// ── Issue #47: Cache reconciliation / drift detection ────────────────────────
+// â”€â”€ Issue #47: Cache reconciliation / drift detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const DRIFT_FIELDS: ReadonlyArray<keyof Stream> = [
   "status",
@@ -523,7 +528,7 @@ export function watchStreamDrift(
         onDrift(diffs, fresh);
       }
     } catch {
-      // swallow errors — keep watching from last known value
+      // swallow errors â€” keep watching from last known value
     }
   }
 
@@ -561,7 +566,7 @@ export function isStreamStalled(stream: Stream, staleThresholdSeconds: number = 
 }
 
 /**
- * Checks whether a stream is under-funded — the remaining deposit is
+ * Checks whether a stream is under-funded â€” the remaining deposit is
  * insufficient to sustain the flow rate until the current end time.
  * This can happen when deposit rounding leaves a shortfall or when
  * top-up amounts were too small to meaningfully extend the stream.
@@ -575,7 +580,7 @@ export function isStreamUnderfunded(stream: Stream): boolean {
   return remainingDeposit < expectedRemaining;
 }
 
-// ── Token aggregation ─────────────────────────────────────────────────────────
+// â”€â”€ Token aggregation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 /**
@@ -618,7 +623,7 @@ export function aggregateStreamsByToken(streams: Stream[]): TokenAggregate[] {
   });
 }
 
-// ── Dashboard / reporting aggregators ─────────────────────────────────────────
+// â”€â”€ Dashboard / reporting aggregators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Aggregates total deposited, claimable, claimed, and remaining amounts
@@ -839,7 +844,7 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
  * payloads), or a higher value only after profiling against your specific
  * workload.
  *
- * @param custom - Optional override. Must be a positive integer ≤ 25.
+ * @param custom - Optional override. Must be a positive integer â‰¤ 25.
  * @returns The resolved safe batch size.
  *
  * @example
@@ -863,55 +868,8 @@ export function batchSize(custom?: number): number {
   if (custom === undefined) return DEFAULT;
   if (!Number.isInteger(custom) || custom <= 0 || custom > MAX) {
     throw new SoroStreamError(
-      `batchSize must be a positive integer ≤ ${MAX}, got ${custom}`
+      `batchSize must be a positive integer â‰¤ ${MAX}, got ${custom}`
     );
   }
   return custom;
 }
-
-/**
- * Recursively converts BigInt properties in an object to strings,
- * allowing safe serialization with JSON.stringify.
- *
- * Useful for logging or exporting stream objects, vesting schedules,
- * and aggregate totals that include BigInt fields like flowRate,
- * totalAmount, or claimableAmount.
- *
- * @param obj - The object containing BigInt fields.
- * @returns A plain object with all BigInt fields converted to string.
- */
-export function streamToJSON(obj: unknown): unknown {
-  if (typeof obj === "bigint") {
-    return obj.toString();
-  }
-  if (Array.isArray(obj)) {
-    return obj.map(streamToJSON);
-  }
-  if (obj !== null && typeof obj === "object") {
-    const res: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === "toJSON") continue;
-      res[key] = streamToJSON(value);
-    }
-    return res;
-  }
-  return obj;
-}
-
-/**
- * Helper function to serialize objects containing BigInt fields to JSON strings.
- * Automatically converts BigInt fields (like flowRate, totalAmount, claimableAmount) to strings.
- *
- * @param obj - The object to serialize.
- * @param space - Optional indentation space for pretty-printing.
- * @returns The JSON string representation.
- */
-export function jsonStringifyStream(obj: unknown, space?: string | number): string {
-  return JSON.stringify(
-    obj,
-    (_, value) => (typeof value === "bigint" ? value.toString() : value),
-    space
-  );
-}
-
-export const jsonStringify = jsonStringifyStream;
