@@ -42,6 +42,7 @@ import {
   FederationResolutionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
+import { NetworkUnavailableError } from "./errors.js";
 import type {
   BatchCancelResult,
   BatchWithdrawResult,
