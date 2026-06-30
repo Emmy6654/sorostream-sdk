@@ -1,7 +1,7 @@
 /** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
 
-// ── Event types (#1) ─────────────────────────────────────────────────────────
+// â”€â”€ Event types (#1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type StreamEventType =
   | "StreamCreated"
@@ -32,7 +32,7 @@ export interface StreamEventFilter {
   recipient?: string;
 }
 
-// ── Pagination types (#3) ────────────────────────────────────────────────────
+// â”€â”€ Pagination types (#3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface PaginationParams {
   limit?: number;
@@ -45,13 +45,13 @@ export interface PaginatedStreams {
   hasMore: boolean;
 }
 
-// ── Multisig types (#16) ─────────────────────────────────────────────────────
+// â”€â”€ Multisig types (#16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface MultisigSigner {
   signTransaction(xdr: string, network: Network): Promise<string>;
 }
 
-// ── Webhook types (#22) ──────────────────────────────────────────────────────
+// â”€â”€ Webhook types (#22) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface WebhookConfig {
   url: string;
@@ -86,8 +86,6 @@ export interface Stream {
   autoRenew: boolean;
   /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
-  /** Optional helper method for JSON serialization of BigInt fields. */
-  toJSON?(): Record<string, unknown>;
 }
 
 /** Parameters for creating a new stream. */
@@ -215,7 +213,7 @@ export interface VestingScheduleResult {
   milestones: VestingSchedulePoint[];
 }
 
-// ── Issue #148: Recipient change notification ────────────────────────────────
+// â”€â”€ Issue #148: Recipient change notification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Payload delivered to an {@link onRecipientChanged} callback. */
 export interface RecipientChangedEvent {
@@ -251,7 +249,34 @@ export interface WatchClaimableOptions {
 }
 
 
-/** Wallet adapter interface. Implement this to support custom signing backends. */
+/**
+ * Wallet adapter interface. Implement this to support custom signing backends.
+ *
+ * @example
+ * ```ts
+ * import { Keypair, TransactionBuilder, Networks } from "@stellar/stellar-sdk";
+ * import type { WalletAdapter, Network } from "@sorostream/sdk";
+ *
+ * const serverKeypairAdapter: WalletAdapter = {
+ *   async isConnected() {
+ *     return true;
+ *   },
+ *   async getPublicKey() {
+ *     return Keypair.fromSecret(process.env.STELLAR_SECRET!).publicKey();
+ *   },
+ *   async signTransaction(xdr, network) {
+ *     const passphrase = network === "testnet"
+ *       ? Networks.TESTNET
+ *       : network === "futurenet"
+ *         ? Networks.FUTURENET
+ *         : Networks.PUBLIC;
+ *     const tx = TransactionBuilder.fromXDR(xdr, passphrase);
+ *     tx.sign(Keypair.fromSecret(process.env.STELLAR_SECRET!));
+ *     return tx.toEnvelope().toXDR("base64");
+ *   },
+ * };
+ * ```
+ */
 export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
@@ -307,7 +332,7 @@ export interface TokenAggregate {
   claimedSoFar: bigint;
 }
 
-// ── Issue #44: Locale-aware formatUSDC ───────────────────────────────────────
+// â”€â”€ Issue #44: Locale-aware formatUSDC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Options for locale-aware {@link formatUSDC} formatting. */
 export interface FormatUSDCOptions {
@@ -321,7 +346,7 @@ export interface FormatUSDCOptions {
   useGrouping?: boolean;
 }
 
-// ── Issue #47: Cache reconciliation / drift detection ────────────────────────
+// â”€â”€ Issue #47: Cache reconciliation / drift detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** A single field that differs between cached and on-chain stream state. */
 export interface StreamDrift {
@@ -336,7 +361,7 @@ export interface ReconcileStreamOptions {
   intervalMs?: number;
 }
 
-// ── Issue #46: WebAuthn passkey adapter ─────────────────────────────────────
+// â”€â”€ Issue #46: WebAuthn passkey adapter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Configuration for a WebAuthn/passkey-based Soroban smart wallet adapter. */
 export interface PasskeyAdapterConfig {
@@ -346,12 +371,12 @@ export interface PasskeyAdapterConfig {
   rpId: string;
   /**
    * The credential ID of the registered passkey (ArrayBuffer from credential.rawId).
-   * Required — without it the browser may select the wrong passkey silently.
+   * Required â€” without it the browser may select the wrong passkey silently.
    */
   credentialId: ArrayBuffer;
 }
 
-// ── Price feed adapter (#Issue 1) ────────────────────────────────────────────
+// â”€â”€ Price feed adapter (#Issue 1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Pluggable adapter for converting token amounts to fiat display values.
@@ -367,7 +392,7 @@ export interface PriceFeedAdapter {
   getPrice(tokenAddress: string, displayCurrency?: string): Promise<number>;
 }
 
-// ── Split stream types ───────────────────────────────────────────────────────
+// â”€â”€ Split stream types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Parameters for splitting an active stream into two streams. */
 export interface SplitStreamParams {
@@ -393,7 +418,7 @@ export interface SplitStreamResult {
   streamIdB: string;
 }
 
-// ── Fee bump types (#Issue 3) ────────────────────────────────────────────────
+// â”€â”€ Fee bump types (#Issue 3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Options for wrapping a transaction in a Stellar fee-bump.
@@ -408,7 +433,7 @@ export interface FeeBumpOptions {
   maxFee?: number;
 }
 
-// ── Write options ────────────────────────────────────────────────────────────
+// â”€â”€ Write options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Options for write operations (create, withdraw, cancel, top-up). */
 export interface WriteOptions {
@@ -418,12 +443,12 @@ export interface WriteOptions {
   feeBump?: FeeBumpOptions;
 }
 
-// ── Contract versioning (#Issue 4) ───────────────────────────────────────────
+// â”€â”€ Contract versioning (#Issue 4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Supported contract versions for call encoding. */
 export type ContractVersion = "v1" | "v2";
 
-// ── Dashboard / reporting aggregate types ────────────────────────────────────
+// â”€â”€ Dashboard / reporting aggregate types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Aggregate totals across a set of streams. */
 export interface StreamTotals {
@@ -487,7 +512,7 @@ export interface RecipientAggregate {
   claimedSoFar: bigint;
 }
 
-// ── Stream filtering ────────────────────────────────────────────────────────
+// â”€â”€ Stream filtering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Criteria for filtering streams. */
 export interface StreamFilterCriteria {
@@ -497,7 +522,7 @@ export interface StreamFilterCriteria {
   status?: StreamStatus;
 }
 
-// ── Issue #166: Stream activity log ─────────────────────────────────────────
+// â”€â”€ Issue #166: Stream activity log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** The type of activity recorded in a stream's activity log. */
 export type StreamActivityType =
@@ -532,7 +557,7 @@ export interface GetActivityLogOptions {
   cursor?: string;
 }
 
-// ── Issue #73: Stream snapshot export/import ─────────────────────────────────
+// â”€â”€ Issue #73: Stream snapshot export/import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** A history entry recording a past event on a stream. */
 export interface StreamHistoryEntry {
@@ -567,7 +592,7 @@ export interface StreamSnapshot {
   history: StreamHistoryEntry[];
 }
 
-// ── Issue #50: Middleware / plugin system ────────────────────────────────────
+// â”€â”€ Issue #50: Middleware / plugin system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Context passed to every middleware hook. */
 export interface MiddlewareContext {

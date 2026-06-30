@@ -81,9 +81,9 @@ await client.withdraw({ streamId });
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `network` | — | Stellar network (`"mainnet"`, `"testnet"`, `"futurenet"`) |
-| `contractId` | — | Deployed stream contract address |
-| `walletAdapter` | — | Wallet adapter for signing |
+| `network` | â€” | Stellar network (`"mainnet"`, `"testnet"`, `"futurenet"`) |
+| `contractId` | â€” | Deployed stream contract address |
+| `walletAdapter` | â€” | Wallet adapter for signing |
 | `rpcUrl?` | Default per network | Custom RPC URL override |
 | `txTimeoutMs?` | `120000` | Max time (ms) to wait for transaction confirmation |
 | `checkDuplicate?` | `false` | Heuristic check to warn/block duplicate stream creation |
@@ -105,7 +105,76 @@ All mutation methods (`createStream`, `withdraw`, `cancelStream`, `topUp`) accep
 | `createLedgerAdapter({ transport, path? })` | Creates a WalletAdapter backed by a Ledger device |
 | `connectWallet()` | Prompts Freighter connection, returns public key |
 
-The `WalletAdapter` interface (see `src/types.ts`) is the official extension point for custom signing backends. Implement `getPublicKey`, `signTransaction`, and `isConnected` to support any wallet or signing service.
+The `WalletAdapter` interface (see `src/types.ts`) is the official extension point for custom signing backends. Implement `getPublicKey`, `signTransaction`, and `isConnected` to support any wallet or signing service. See the [wallet adapter examples](#wallet-adapter-examples) below for copy-pasteable testnet patterns.
+
+### Wallet adapter examples
+
+#### Freighter adapter
+
+```ts
+import { SoroStreamClient, createFreighterAdapter } from "@sorostream/sdk";
+
+const freighterAdapter = await createFreighterAdapter();
+const client = new SoroStreamClient({
+  network: "testnet",
+  contractId: "YOUR_CONTRACT_ID",
+  walletAdapter: freighterAdapter,
+});
+```
+
+#### Ledger adapter
+
+```ts
+import { TransactionBuilder, Networks } from "@stellar/stellar-sdk";
+import TransportWebUSB from "@ledgerhq/hw-transport-webusb";
+import AppStr from "@ledgerhq/hw-app-str";
+import type { WalletAdapter, Network } from "@sorostream/sdk";
+
+async function signWithLedger(xdr: string, network: Network) {
+  const transport = await TransportWebUSB.create();
+  const app = new AppStr(transport);
+  const path = "m/44'/148'/0'/0/0";
+  const tx = TransactionBuilder.fromXDR(
+    xdr,
+    network === "testnet" ? Networks.TESTNET : network === "futurenet" ? Networks.FUTURENET : Networks.PUBLIC,
+  );
+
+  const signature = await app.signTransaction(path, tx.hash());
+  await transport.close();
+
+  return signature;
+}
+
+const ledgerAdapter: WalletAdapter = {
+  async isConnected() {
+    return true;
+  },
+  async getPublicKey() {
+    const transport = await TransportWebUSB.create();
+    const app = new AppStr(transport);
+    const result = await app.getAddress("m/44'/148'/0'/0/0");
+    await transport.close();
+    return result.address;
+  },
+  async signTransaction(xdr, network) {
+    const signature = await signWithLedger(xdr, network);
+    return signature;
+  },
+};
+```
+
+#### Server-side keypair adapter
+
+```ts
+import { SoroStreamClient, createKeypairAdapter } from "@sorostream/sdk";
+
+const serverKeypairAdapter = createKeypairAdapter(process.env.STELLAR_SECRET!);
+const client = new SoroStreamClient({
+  network: "testnet",
+  contractId: "YOUR_CONTRACT_ID",
+  walletAdapter: serverKeypairAdapter,
+});
+```
 
 ### Deno and Bun Compatibility
 
@@ -163,39 +232,39 @@ console.log(`Created ${batches.length} batch(es)`);
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│          Your App / UI          │
-└──────────────┬──────────────────┘
-               │ imports
-               ▼
-┌─────────────────────────────────┐
-│        @sorostream/sdk          │
-│                                 │
-│  SoroStreamClient               │
-│    ├─ WalletAdapter (sign txs)  │
-│    ├─ Cache (optimistic reads)  │
-│    └─ CircuitBreaker / Retry    │
-│                                 │
-│  Utils (pure helpers)           │
-│    ├─ toStroops / formatUSDC    │
-│    ├─ claimableNow / isExpired  │
-│    └─ calculateVestingSchedule  │
-└──────────────┬──────────────────┘
-               │ Stellar RPC (simulateTransaction / sendTransaction)
-               ▼
-┌─────────────────────────────────┐
-│   SoroStream Contract (Soroban) │
-│   github.com/SoroStream/contract│
-└─────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚          Your App / UI          â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+               â”‚ imports
+               â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚        @sorostream/sdk          â”‚
+â”‚                                 â”‚
+â”‚  SoroStreamClient               â”‚
+â”‚    â”œâ”€ WalletAdapter (sign txs)  â”‚
+â”‚    â”œâ”€ Cache (optimistic reads)  â”‚
+â”‚    â””â”€ CircuitBreaker / Retry    â”‚
+â”‚                                 â”‚
+â”‚  Utils (pure helpers)           â”‚
+â”‚    â”œâ”€ toStroops / formatUSDC    â”‚
+â”‚    â”œâ”€ claimableNow / isExpired  â”‚
+â”‚    â””â”€ calculateVestingSchedule  â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+               â”‚ Stellar RPC (simulateTransaction / sendTransaction)
+               â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚   SoroStream Contract (Soroban) â”‚
+â”‚   github.com/SoroStream/contractâ”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
-**SoroStreamClient** is the primary entry point. It handles transaction building, signing, submission, polling, and retry logic. It exposes both mutation methods (`createStream`, `withdraw`, `topUp`, …) and read methods (`getStream`, `getClaimable`, …).
+**SoroStreamClient** is the primary entry point. It handles transaction building, signing, submission, polling, and retry logic. It exposes both mutation methods (`createStream`, `withdraw`, `topUp`, â€¦) and read methods (`getStream`, `getClaimable`, â€¦).
 
-**WalletAdapters** decouple signing from the client. Three are built-in — `createFreighterAdapter` (browser extension), `createKeypairAdapter` (server-side secret key), and `createLedgerAdapter` (hardware wallet). Implement `WalletAdapter` to add any custom signer.
+**WalletAdapters** decouple signing from the client. Three are built-in â€” `createFreighterAdapter` (browser extension), `createKeypairAdapter` (server-side secret key), and `createLedgerAdapter` (hardware wallet). Implement `WalletAdapter` to add any custom signer.
 
 **Utils** are pure functions with no network dependency. Use them for client-side estimates (`claimableNow`, `isExpired`), display formatting (`formatUSDC`, `toStroops`), and display-only vesting schedules (`calculateVestingSchedule`). They can run in any JS/TS environment including Deno and Bun.
 
-Contract source: [github.com/SoroStream/contract](https://github.com/SoroStream/contract) · Example app: [github.com/SoroStream/app](https://github.com/SoroStream/app)
+Contract source: [github.com/SoroStream/contract](https://github.com/SoroStream/contract) Â· Example app: [github.com/SoroStream/app](https://github.com/SoroStream/app)
 
 ## Migrating from v0.x
 
