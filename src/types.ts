@@ -231,6 +231,25 @@ export interface OnRecipientChangedOptions {
   intervalMs?: number;
 }
 
+// ── Issue #188: WebSocket compression ───────────────────────────────────────
+
+/**
+ * Options for permessage-deflate compression on WebSocket connections.
+ * Disabled by default to avoid breaking existing deployments.
+ */
+export interface CompressionOptions {
+  /**
+   * zlib compression level (1 = fastest, 9 = best compression).
+   * Default: 6 (zlib default).
+   */
+  level?: number;
+  /**
+   * Minimum payload size in bytes to compress (default: 128).
+   * Payloads below this threshold are sent uncompressed to avoid overhead.
+   */
+  threshold?: number;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -248,6 +267,12 @@ export interface WatchClaimableOptions {
    * Required when `wsUrl` is set.
    */
   wsStreamId?: string;
+  /**
+   * Opt-in permessage-deflate compression for the WebSocket connection.
+   * Disabled by default. Requires server-side support; falls back gracefully.
+   * Issue #188.
+   */
+  compression?: boolean | CompressionOptions;
 }
 
 
