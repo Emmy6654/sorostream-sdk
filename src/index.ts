@@ -18,6 +18,8 @@ export {
   formatToken,
   toFiatDisplay,
   isValidStellarAddress,
+  isFederationAddress,
+  resolveFederationAddress,
   calculateFlowRate,
   timeUntilStreamEnd,
   claimableNow,
@@ -62,12 +64,15 @@ export {
   ZeroDurationError,
   BulkCreatePartialError,
   InsufficientAllowanceError,
+  FederationResolutionError,
 } from "./errors.js";
 export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
   Stream,
   StreamStatus,
   CreateStreamParams,
+  CloneStreamOverrides,
+  EventHandler,
   WithdrawParams,
   CancelStreamParams,
   TopUpParams,

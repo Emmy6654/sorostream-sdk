@@ -12,7 +12,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
-import { isValidStellarAddress } from "./utils.js";
+import { isValidStellarAddress, isFederationAddress, resolveFederationAddress } from "./utils.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -36,6 +36,7 @@ import {
   BulkCreatePartialError,
   InsufficientAllowanceError,
   DuplicateStreamError,
+  FederationResolutionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -44,6 +45,7 @@ import type {
   BulkCreateOptions,
   BulkCreateResult,
   CancelStreamParams,
+  CloneStreamOverrides,
   CreateStreamParams,
   FeeEstimate,
   Network,
@@ -162,6 +164,7 @@ function scValToStream(val: xdr.ScVal): Stream {
     status: raw["status"] as Stream["status"],
     autoRenew: Boolean(raw["auto_renew"]),
     ...(raw["paused_at"] != null ? { pausedAt: Number(raw["paused_at"]) } : {}),
+    ...(raw["lock_until"] != null ? { lockUntil: Number(raw["lock_until"]) } : {}),
     toJSON() {
       return streamToJSON(this) as Record<string, unknown>;
     },
@@ -185,7 +188,7 @@ export type SimulateOnlyResult = {
  * const { streamId } = await client.createStream({ recipient, token, amount, durationSeconds, autoRenew });
  * ```
  */
-export class SoroStreamClient {
+export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private server: rpc.Server;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
@@ -200,6 +203,8 @@ export class SoroStreamClient {
   private eventPoller: EventPoller | null = null;
   /** Per-stream read cache, keyed by `${network}:${streamId}`. */
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
+  /** Federation address resolution cache (5 min TTL). */
+  private readonly federationCache = new Cache<string, string>(300_000);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
   private readonly checkDuplicate: boolean;
@@ -534,6 +539,14 @@ export class SoroStreamClient {
       );
     }
 
+    if (params.lockUntil !== undefined) {
+      if (params.lockUntil < startTime || params.lockUntil > endTime) {
+        throw new Error(
+          `lockUntil (${params.lockUntil}) must be between startTime (${startTime}) and endTime (${endTime})`
+        );
+      }
+    }
+
     try {
       await this.withBreaker(() =>
         this.server.getAccount(params.recipient)
@@ -629,6 +642,18 @@ export class SoroStreamClient {
     return this.runWithMiddleware("createStream", [params], async () => {
       if (params.amount <= 0n) throw new InsufficientAmountError();
       await this.validateCliff(params.cliffSeconds ?? 0);
+
+      // Resolve federation address if needed, with caching
+      if (isFederationAddress(params.recipient)) {
+        const cached = this.federationCache.get(params.recipient);
+        if (cached) {
+          params = { ...params, recipient: cached };
+        } else {
+          const resolved = await resolveFederationAddress(params.recipient);
+          this.federationCache.set(params.recipient, resolved);
+          params = { ...params, recipient: resolved };
+        }
+      }
 
       const sender = await this.walletAdapter.getPublicKey();
 
@@ -1258,7 +1283,7 @@ export class SoroStreamClient {
    */
   subscribeEvents(
     filter: StreamEventFilter,
-    callback: (event: StreamEvent) => void
+    callback: (event: StreamEvent<TEventData>) => void
   ): StreamSubscription {
     const poller = this.getEventPoller();
     const key = `${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
@@ -1271,7 +1296,7 @@ export class SoroStreamClient {
           return false;
         return true;
       },
-      callback,
+      callback: (event) => callback(event as StreamEvent<TEventData>),
     });
   }
 
@@ -1292,7 +1317,7 @@ export class SoroStreamClient {
    */
   on(
     eventType: StreamEventType,
-    callback: (event: StreamEvent) => void
+    callback: (event: StreamEvent<TEventData>) => void
   ): StreamSubscription {
     return this.subscribeEvents({}, (event) => {
       if (event.type === eventType) {
@@ -1307,7 +1332,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamCreated(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamCreated(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamCreated", callback);
   }
 
@@ -1317,7 +1342,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamWithdrawn(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamWithdrawn(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamWithdrawn", callback);
   }
 
@@ -1327,7 +1352,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamToppedUp(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamToppedUp(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamToppedUp", callback);
   }
 
@@ -1337,7 +1362,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamCancelled(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamCancelled(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamCancelled", callback);
   }
 
@@ -1347,7 +1372,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamTransferred(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamTransferred(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamTransferred", callback);
   }
 
@@ -1357,7 +1382,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamPaused(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamPaused(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamPaused", callback);
   }
 
@@ -1367,7 +1392,7 @@ export class SoroStreamClient {
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamResumed(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamResumed(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamResumed", callback);
   }
 
@@ -1616,6 +1641,39 @@ export class SoroStreamClient {
       deposit: BigInt(snapshot.stream.deposit),
       flowRate: BigInt(snapshot.stream.flowRate),
     };
+  }
+
+  /**
+   * Creates a new stream with the same parameters as an existing one.
+   * The new stream gets a fresh `startTime = now`. Any field can be
+   * overridden before submission via `overrides`.
+   *
+   * @param streamId - ID of the source stream to clone.
+   * @param overrides - Optional field overrides applied before submission.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ streamId, txHash }` for the newly created stream.
+   * @throws {StreamNotFoundError} If the source stream does not exist.
+   */
+  async cloneStream(
+    streamId: string,
+    overrides?: CloneStreamOverrides,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ streamId: string; txHash: string }> {
+    const source = await this.getStream(streamId);
+    const durationSeconds = source.endTime - source.startTime;
+
+    const params: CreateStreamParams = {
+      recipient: source.recipient,
+      token: source.token,
+      amount: source.deposit,
+      durationSeconds,
+      autoRenew: source.autoRenew,
+      ...overrides,
+    };
+
+    return this.createStream(params, signal, options);
   }
 
   // ── Bulk operations ───────────────────────────────────────────────────────
