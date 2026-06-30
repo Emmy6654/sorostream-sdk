@@ -1950,3 +1950,4 @@ export class SoroStreamClient {
 
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };
+// Fix #156: Use ledger time instead of Date.now() for stream startTime
