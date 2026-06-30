@@ -13,6 +13,8 @@ import {
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress } from "./utils.js";
+import { ConnectionPool } from "./connectionPool.js";
+import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -142,6 +144,18 @@ export interface SoroStreamClientOptions {
    */
   idleTimeoutMs?: number;
   /**
+   * Opt-in connection pool size for high-throughput stream scenarios.
+   * When set, subscriptions are distributed across `poolSize` connections.
+   * Issue #179.
+   */
+  poolSize?: number;
+  /**
+   * Maximum concurrent subscriptions per pooled connection (default: 10).
+   * Emits a `pool:full` event when a slot exceeds this limit.
+   * Issue #179.
+   */
+  maxSubscriptionsPerConnection?: number;
+  /**
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
@@ -203,8 +217,11 @@ export class SoroStreamClient {
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
   private readonly checkDuplicate: boolean;
-  // Issue #149: connection pool stats
+  // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
+  // Issue #179: opt-in high-throughput connection pool
+  private pool: ConnectionPool | null = null;
+  private readonly poolReleases = new Map<string, () => void>();
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -236,6 +253,16 @@ export class SoroStreamClient {
       reused: 0,
       idle: 0,
     };
+    // Issue #179: opt-in connection pool for high-throughput scenarios
+    if (options.poolSize && options.poolSize > 1) {
+      this.pool = new ConnectionPool({
+        poolSize: options.poolSize,
+        maxSubscriptionsPerConnection: options.maxSubscriptionsPerConnection,
+        idleTimeoutMs: options.idleTimeoutMs,
+        rpcUrl: options.rpcUrl ?? RPC_URLS[options.network],
+        contractId: options.contractId,
+      } satisfies ConnectionPoolOptions);
+    }
   }
 
   /**
@@ -1260,19 +1287,30 @@ export class SoroStreamClient {
     filter: StreamEventFilter,
     callback: (event: StreamEvent) => void
   ): StreamSubscription {
-    const poller = this.getEventPoller();
     const key = `${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
+    const matchFn = (event: StreamEvent): boolean => {
+      if (filter.streamId && event.streamId !== filter.streamId) return false;
+      if (filter.sender && event.data.sender !== filter.sender) return false;
+      if (filter.recipient && event.data.recipient !== filter.recipient) return false;
+      return true;
+    };
 
-    return poller.subscribe(key, {
-      filter: (event) => {
-        if (filter.streamId && event.streamId !== filter.streamId) return false;
-        if (filter.sender && event.data.sender !== filter.sender) return false;
-        if (filter.recipient && event.data.recipient !== filter.recipient)
-          return false;
-        return true;
-      },
-      callback,
-    });
+    if (this.pool) {
+      const { poller, release } = this.pool.acquirePoller();
+      this.poolReleases.set(key, release);
+      const sub = poller.subscribe(key, { filter: matchFn, callback });
+      return {
+        unsubscribe: () => {
+          sub.unsubscribe();
+          const rel = this.poolReleases.get(key);
+          rel?.();
+          this.poolReleases.delete(key);
+        },
+      };
+    }
+
+    const poller = this.getEventPoller();
+    return poller.subscribe(key, { filter: matchFn, callback });
   }
 
   /**
@@ -1810,6 +1848,7 @@ export class SoroStreamClient {
 
   /**
    * Returns current connection pool statistics.
+   * When a pool is configured via `poolSize`, returns live slot counts.
    */
   getConnectionStats(): {
     maxConnections: number;
@@ -1817,12 +1856,31 @@ export class SoroStreamClient {
     idle: number;
     reused: number;
   } {
+    if (this.pool) {
+      const stats = this.pool.getStats();
+      return {
+        maxConnections: stats.total,
+        active: stats.active,
+        idle: stats.idle,
+        reused: 0,
+      };
+    }
     return {
       maxConnections: this.connectionPool.maxConnections,
       active: this.connectionPool.active,
       idle: this.connectionPool.idle,
       reused: this.connectionPool.reused,
     };
+  }
+
+  /**
+   * Registers a listener for pool-level events (pool:full, pool:reconnect, pool:drain).
+   * Only fires when `poolSize` is configured. Returns an unsubscribe function.
+   * Issue #179.
+   */
+  onPoolEvent(listener: (event: PoolEvent) => void): () => void {
+    if (!this.pool) return () => {};
+    return this.pool.on(listener);
   }
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
