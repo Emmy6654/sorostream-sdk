@@ -124,3 +124,10 @@ export class DuplicateStreamError extends SoroStreamError {
     this.name = "DuplicateStreamError";
   }
 }
+
+export class FederationResolutionError extends SoroStreamError {
+  constructor(address: string, reason?: string) {
+    super(`Failed to resolve federation address "${address}"${reason ? `: ${reason}` : ""}`);
+    this.name = "FederationResolutionError";
+  }
+}
