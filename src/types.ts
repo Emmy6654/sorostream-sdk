@@ -595,3 +595,25 @@ export interface SoroStreamPlugin {
    */
   onError?(ctx: MiddlewareContext, error: unknown): void | Promise<void>;
 }
+
+// ── Issue #187: Event batching ───────────────────────────────────────────────
+
+/** Configuration for event batching on high-frequency streams. */
+export interface BatchingOptions {
+  /** Max events per batch before flushing (default: 50). */
+  maxBatchSize?: number;
+  /** Max delay in ms before a non-full batch is flushed (default: 10). */
+  maxBatchDelayMs?: number;
+}
+
+/** Running metrics for the event batch buffer. */
+export interface BatchMetrics {
+  /** Total number of batches flushed since the poller started. */
+  totalBatches: number;
+  /** Total number of events delivered across all batches. */
+  totalEvents: number;
+  /** Average batch size (0 when no batches have been flushed yet). */
+  averageBatchSize: number;
+  /** Unix timestamp (ms) of the most recent flush, or null if none. */
+  lastFlushAt: number | null;
+}

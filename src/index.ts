@@ -49,6 +49,7 @@ export type { CircuitState, CircuitBreakerOptions } from "./circuitBreaker.js";
 export { ConnectionPool } from "./connectionPool.js";
 export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from "./connectionPool.js";
 export type { StreamRetryPolicy, EventPollerOptions } from "./events.js";
+export type { BatchingOptions, BatchMetrics } from "./types.js";
 export { createContractEncoder } from "./contractEncoders.js";
 export type { ContractCallEncoder } from "./contractEncoders.js";
 export { createSimplePriceFeed } from "./priceFeed.js";

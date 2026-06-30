@@ -1,5 +1,5 @@
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
-import type { StreamEvent, StreamEventType, StreamSubscription } from "./types.js";
+import type { StreamEvent, StreamEventType, StreamSubscription, BatchingOptions, BatchMetrics } from "./types.js";
 
 /**
  * Retry policy for automatic event poller reconnection on unexpected failures.
@@ -19,6 +19,13 @@ export interface EventPollerOptions {
   onReconnecting?: (attempt: number, delayMs: number) => void;
   onReconnected?: () => void;
   onDisconnected?: (error: unknown) => void;
+  /** Issue #187: opt-in event batching configuration. */
+  batchingOptions?: BatchingOptions;
+}
+
+interface BatchEntry {
+  filter: EventFilterFn;
+  callback: (events: StreamEvent[]) => void;
 }
 
 const STREAM_EVENT_NAMES = new Set([
@@ -88,6 +95,19 @@ export class EventPoller {
   private consecutiveFailures = 0;
   private reconnecting = false;
 
+  // Issue #187: event batching
+  private readonly batchEntries: Map<string, BatchEntry> = new Map();
+  private readonly maxBatchSize: number;
+  private readonly maxBatchDelayMs: number;
+  private batchBuffer: StreamEvent[] = [];
+  private batchFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly batchMetrics: BatchMetrics = {
+    totalBatches: 0,
+    totalEvents: 0,
+    averageBatchSize: 0,
+    lastFlushAt: null,
+  };
+
   constructor(server: rpc.Server, contractId: string, options?: EventPollerOptions) {
     this.server = server;
     this.contractId = contractId;
@@ -98,6 +118,8 @@ export class EventPoller {
     this.onReconnecting = options?.onReconnecting;
     this.onReconnected = options?.onReconnected;
     this.onDisconnected = options?.onDisconnected;
+    this.maxBatchSize = options?.batchingOptions?.maxBatchSize ?? 50;
+    this.maxBatchDelayMs = options?.batchingOptions?.maxBatchDelayMs ?? 10;
   }
 
   subscribe(
@@ -150,9 +172,19 @@ export class EventPoller {
         for (const raw of response.events) {
           const event = parseStreamEvent(raw);
           if (!event) continue;
+          // Dispatch to immediate subscribers
           for (const [, entry] of this.entries) {
             if (entry.filter(event)) {
               entry.callback(event);
+            }
+          }
+          // Buffer for batch subscribers
+          if (this.batchEntries.size > 0) {
+            this.batchBuffer.push(event);
+            if (this.batchBuffer.length >= this.maxBatchSize) {
+              this._flushBatch();
+            } else if (this.batchFlushTimer === null) {
+              this.batchFlushTimer = setTimeout(() => this._flushBatch(), this.maxBatchDelayMs);
             }
           }
         }
@@ -198,8 +230,62 @@ export class EventPoller {
     }
   }
 
+  /**
+   * Subscribes to batched stream events. The callback receives an array of events
+   * flushed when either `maxBatchSize` is reached or `maxBatchDelayMs` elapses.
+   * Issue #187.
+   */
+  subscribeBatch(key: string, entry: BatchEntry): StreamSubscription {
+    this.batchEntries.set(key, entry);
+    if (!this.intervalId) {
+      this.startPolling();
+    }
+    return {
+      unsubscribe: () => {
+        this.batchEntries.delete(key);
+        if (this.entries.size === 0 && this.batchEntries.size === 0) {
+          this.stopPolling();
+        }
+      },
+    };
+  }
+
+  /** Returns a snapshot of current batch metrics. Issue #187. */
+  getBatchMetrics(): BatchMetrics {
+    return { ...this.batchMetrics };
+  }
+
+  private _flushBatch(): void {
+    if (this.batchFlushTimer !== null) {
+      clearTimeout(this.batchFlushTimer);
+      this.batchFlushTimer = null;
+    }
+    const batch = this.batchBuffer;
+    if (batch.length === 0) return;
+    this.batchBuffer = [];
+
+    this.batchMetrics.totalBatches++;
+    this.batchMetrics.totalEvents += batch.length;
+    this.batchMetrics.averageBatchSize =
+      this.batchMetrics.totalEvents / this.batchMetrics.totalBatches;
+    this.batchMetrics.lastFlushAt = Date.now();
+
+    for (const [, entry] of this.batchEntries) {
+      const matching = batch.filter((e) => entry.filter(e));
+      if (matching.length > 0) {
+        entry.callback(matching);
+      }
+    }
+  }
+
   destroy(): void {
     this.stopPolling();
     this.entries.clear();
+    this.batchEntries.clear();
+    if (this.batchFlushTimer !== null) {
+      clearTimeout(this.batchFlushTimer);
+      this.batchFlushTimer = null;
+    }
+    this.batchBuffer = [];
   }
 }

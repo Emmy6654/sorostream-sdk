@@ -163,6 +163,12 @@ export interface SoroStreamClientOptions {
    */
   retryPolicy?: StreamRetryPolicy;
   /**
+   * Opt-in event batching configuration for high-frequency streams.
+   * When set, events are buffered and delivered in batches via `subscribeBatchEvents`.
+   * Issue #187.
+   */
+  batchingOptions?: import("./types.js").BatchingOptions;
+  /**
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
@@ -234,6 +240,8 @@ export class SoroStreamClient {
   private readonly reconnectingCbs = new Set<(attempt: number, delayMs: number) => void>();
   private readonly reconnectedCbs = new Set<() => void>();
   private readonly disconnectedCbs = new Set<(error: unknown) => void>();
+  // Issue #187: event batching options
+  private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -258,6 +266,7 @@ export class SoroStreamClient {
     this.plugins = options.plugins ?? [];
     this.checkDuplicate = options.checkDuplicate ?? false;
     this.retryPolicy = options.retryPolicy;
+    this.batchingOptions = options.batchingOptions;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -1283,6 +1292,7 @@ export class SoroStreamClient {
         onDisconnected: (err) => {
           for (const cb of this.disconnectedCbs) cb(err);
         },
+        batchingOptions: this.batchingOptions,
       };
       this.eventPoller = new EventPoller(
         this.server,
@@ -1937,6 +1947,49 @@ export class SoroStreamClient {
   onDisconnected(cb: (error: unknown) => void): () => void {
     this.disconnectedCbs.add(cb);
     return () => this.disconnectedCbs.delete(cb);
+  }
+
+  // ── Issue #187: Event batching ────────────────────────────────────────────
+
+  /**
+   * Subscribes to batched stream events. The callback receives an array of matching
+   * events flushed when `batchingOptions.maxBatchSize` is reached or
+   * `batchingOptions.maxBatchDelayMs` elapses — whichever comes first.
+   *
+   * @param filter - Same filter criteria as `subscribeEvents`.
+   * @param callback - Called with a non-empty array of matching events per flush.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
+   *
+   * @example
+   * ```ts
+   * const sub = client.subscribeBatchEvents({ streamId: "42" }, (events) => {
+   *   console.log(`Received batch of ${events.length} events`);
+   * });
+   * ```
+   */
+  subscribeBatchEvents(
+    filter: StreamEventFilter,
+    callback: (events: StreamEvent[]) => void
+  ): StreamSubscription {
+    const poller = this.getEventPoller();
+    const key = `batch:${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
+    return poller.subscribeBatch(key, {
+      filter: (event) => {
+        if (filter.streamId && event.streamId !== filter.streamId) return false;
+        if (filter.sender && event.data.sender !== filter.sender) return false;
+        if (filter.recipient && event.data.recipient !== filter.recipient) return false;
+        return true;
+      },
+      callback,
+    });
+  }
+
+  /**
+   * Live SDK metrics. Currently exposes batch-delivery statistics.
+   * Issue #187.
+   */
+  get metrics(): { batch: import("./types.js").BatchMetrics } {
+    return { batch: this.getEventPoller().getBatchMetrics() };
   }
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
