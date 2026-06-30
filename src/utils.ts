@@ -236,6 +236,7 @@ export function calculateVestingSchedule(
     const elapsed =
       Math.min(currentTime, stream.endTime) -
       Math.max(cliffEndTime, stream.startTime);
+ if (elapsed < 0n) return 0n;
     effectiveClaimable = stream.flowRate * BigInt(cliffSeconds + Math.max(0, elapsed));
     effectiveClaimable = stream.flowRate * BigInt(Math.max(0, elapsed));
   }
