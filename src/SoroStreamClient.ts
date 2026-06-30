@@ -82,6 +82,7 @@ import type {
   GetActivityLogOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
+import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON } from "./utils.js";
 
 const RPC_URLS: Record<Network, string> = {
@@ -156,6 +157,12 @@ export interface SoroStreamClientOptions {
    */
   maxSubscriptionsPerConnection?: number;
   /**
+   * Retry policy for automatic event-stream reconnection on unexpected failures.
+   * Set `maxAttempts: 0` to disable retries (preserves existing behaviour).
+   * Issue #186.
+   */
+  retryPolicy?: StreamRetryPolicy;
+  /**
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
@@ -222,6 +229,11 @@ export class SoroStreamClient {
   // Issue #179: opt-in high-throughput connection pool
   private pool: ConnectionPool | null = null;
   private readonly poolReleases = new Map<string, () => void>();
+  // Issue #186: event-stream retry policy and reconnect callbacks
+  private readonly retryPolicy: StreamRetryPolicy | undefined;
+  private readonly reconnectingCbs = new Set<(attempt: number, delayMs: number) => void>();
+  private readonly reconnectedCbs = new Set<() => void>();
+  private readonly disconnectedCbs = new Set<(error: unknown) => void>();
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -245,6 +257,7 @@ export class SoroStreamClient {
     });
     this.plugins = options.plugins ?? [];
     this.checkDuplicate = options.checkDuplicate ?? false;
+    this.retryPolicy = options.retryPolicy;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -1259,9 +1272,22 @@ export class SoroStreamClient {
 
   private getEventPoller(): EventPoller {
     if (!this.eventPoller) {
+      const opts: EventPollerOptions = {
+        retryPolicy: this.retryPolicy,
+        onReconnecting: (attempt, delayMs) => {
+          for (const cb of this.reconnectingCbs) cb(attempt, delayMs);
+        },
+        onReconnected: () => {
+          for (const cb of this.reconnectedCbs) cb();
+        },
+        onDisconnected: (err) => {
+          for (const cb of this.disconnectedCbs) cb(err);
+        },
+      };
       this.eventPoller = new EventPoller(
         this.server,
-        this.contract.contractId()
+        this.contract.contractId(),
+        opts
       );
     }
     return this.eventPoller;
@@ -1881,6 +1907,36 @@ export class SoroStreamClient {
   onPoolEvent(listener: (event: PoolEvent) => void): () => void {
     if (!this.pool) return () => {};
     return this.pool.on(listener);
+  }
+
+  /**
+   * Registers a callback that fires before each reconnect attempt, with the attempt
+   * number and computed backoff delay. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onReconnecting(cb: (attempt: number, delayMs: number) => void): () => void {
+    this.reconnectingCbs.add(cb);
+    return () => this.reconnectingCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires once the event poller successfully reconnects
+   * after one or more failures. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onReconnected(cb: () => void): () => void {
+    this.reconnectedCbs.add(cb);
+    return () => this.reconnectedCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires when the event poller exhausts all retry
+   * attempts. Polling stops at this point. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onDisconnected(cb: (error: unknown) => void): () => void {
+    this.disconnectedCbs.add(cb);
+    return () => this.disconnectedCbs.delete(cb);
   }
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
