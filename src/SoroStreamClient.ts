@@ -13,6 +13,8 @@ import {
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress } from "./utils.js";
+import { ConnectionPool } from "./connectionPool.js";
+import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -80,6 +82,7 @@ import type {
   GetActivityLogOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
+import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON } from "./utils.js";
 
 const RPC_URLS: Record<Network, string> = {
@@ -142,6 +145,30 @@ export interface SoroStreamClientOptions {
    */
   idleTimeoutMs?: number;
   /**
+   * Opt-in connection pool size for high-throughput stream scenarios.
+   * When set, subscriptions are distributed across `poolSize` connections.
+   * Issue #179.
+   */
+  poolSize?: number;
+  /**
+   * Maximum concurrent subscriptions per pooled connection (default: 10).
+   * Emits a `pool:full` event when a slot exceeds this limit.
+   * Issue #179.
+   */
+  maxSubscriptionsPerConnection?: number;
+  /**
+   * Retry policy for automatic event-stream reconnection on unexpected failures.
+   * Set `maxAttempts: 0` to disable retries (preserves existing behaviour).
+   * Issue #186.
+   */
+  retryPolicy?: StreamRetryPolicy;
+  /**
+   * Opt-in event batching configuration for high-frequency streams.
+   * When set, events are buffered and delivered in batches via `subscribeBatchEvents`.
+   * Issue #187.
+   */
+  batchingOptions?: import("./types.js").BatchingOptions;
+  /**
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
@@ -203,8 +230,18 @@ export class SoroStreamClient {
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
   private readonly checkDuplicate: boolean;
-  // Issue #149: connection pool stats
+  // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
+  // Issue #179: opt-in high-throughput connection pool
+  private pool: ConnectionPool | null = null;
+  private readonly poolReleases = new Map<string, () => void>();
+  // Issue #186: event-stream retry policy and reconnect callbacks
+  private readonly retryPolicy: StreamRetryPolicy | undefined;
+  private readonly reconnectingCbs = new Set<(attempt: number, delayMs: number) => void>();
+  private readonly reconnectedCbs = new Set<() => void>();
+  private readonly disconnectedCbs = new Set<(error: unknown) => void>();
+  // Issue #187: event batching options
+  private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -228,6 +265,8 @@ export class SoroStreamClient {
     });
     this.plugins = options.plugins ?? [];
     this.checkDuplicate = options.checkDuplicate ?? false;
+    this.retryPolicy = options.retryPolicy;
+    this.batchingOptions = options.batchingOptions;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -236,6 +275,16 @@ export class SoroStreamClient {
       reused: 0,
       idle: 0,
     };
+    // Issue #179: opt-in connection pool for high-throughput scenarios
+    if (options.poolSize && options.poolSize > 1) {
+      this.pool = new ConnectionPool({
+        poolSize: options.poolSize,
+        maxSubscriptionsPerConnection: options.maxSubscriptionsPerConnection,
+        idleTimeoutMs: options.idleTimeoutMs,
+        rpcUrl: options.rpcUrl ?? RPC_URLS[options.network],
+        contractId: options.contractId,
+      } satisfies ConnectionPoolOptions);
+    }
   }
 
   /**
@@ -1232,9 +1281,23 @@ export class SoroStreamClient {
 
   private getEventPoller(): EventPoller {
     if (!this.eventPoller) {
+      const opts: EventPollerOptions = {
+        retryPolicy: this.retryPolicy,
+        onReconnecting: (attempt, delayMs) => {
+          for (const cb of this.reconnectingCbs) cb(attempt, delayMs);
+        },
+        onReconnected: () => {
+          for (const cb of this.reconnectedCbs) cb();
+        },
+        onDisconnected: (err) => {
+          for (const cb of this.disconnectedCbs) cb(err);
+        },
+        batchingOptions: this.batchingOptions,
+      };
       this.eventPoller = new EventPoller(
         this.server,
-        this.contract.contractId()
+        this.contract.contractId(),
+        opts
       );
     }
     return this.eventPoller;
@@ -1260,19 +1323,30 @@ export class SoroStreamClient {
     filter: StreamEventFilter,
     callback: (event: StreamEvent) => void
   ): StreamSubscription {
-    const poller = this.getEventPoller();
     const key = `${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
+    const matchFn = (event: StreamEvent): boolean => {
+      if (filter.streamId && event.streamId !== filter.streamId) return false;
+      if (filter.sender && event.data.sender !== filter.sender) return false;
+      if (filter.recipient && event.data.recipient !== filter.recipient) return false;
+      return true;
+    };
 
-    return poller.subscribe(key, {
-      filter: (event) => {
-        if (filter.streamId && event.streamId !== filter.streamId) return false;
-        if (filter.sender && event.data.sender !== filter.sender) return false;
-        if (filter.recipient && event.data.recipient !== filter.recipient)
-          return false;
-        return true;
-      },
-      callback,
-    });
+    if (this.pool) {
+      const { poller, release } = this.pool.acquirePoller();
+      this.poolReleases.set(key, release);
+      const sub = poller.subscribe(key, { filter: matchFn, callback });
+      return {
+        unsubscribe: () => {
+          sub.unsubscribe();
+          const rel = this.poolReleases.get(key);
+          rel?.();
+          this.poolReleases.delete(key);
+        },
+      };
+    }
+
+    const poller = this.getEventPoller();
+    return poller.subscribe(key, { filter: matchFn, callback });
   }
 
   /**
@@ -1811,6 +1885,7 @@ export class SoroStreamClient {
 
   /**
    * Returns current connection pool statistics.
+   * When a pool is configured via `poolSize`, returns live slot counts.
    */
   getConnectionStats(): {
     maxConnections: number;
@@ -1818,12 +1893,104 @@ export class SoroStreamClient {
     idle: number;
     reused: number;
   } {
+    if (this.pool) {
+      const stats = this.pool.getStats();
+      return {
+        maxConnections: stats.total,
+        active: stats.active,
+        idle: stats.idle,
+        reused: 0,
+      };
+    }
     return {
       maxConnections: this.connectionPool.maxConnections,
       active: this.connectionPool.active,
       idle: this.connectionPool.idle,
       reused: this.connectionPool.reused,
     };
+  }
+
+  /**
+   * Registers a listener for pool-level events (pool:full, pool:reconnect, pool:drain).
+   * Only fires when `poolSize` is configured. Returns an unsubscribe function.
+   * Issue #179.
+   */
+  onPoolEvent(listener: (event: PoolEvent) => void): () => void {
+    if (!this.pool) return () => {};
+    return this.pool.on(listener);
+  }
+
+  /**
+   * Registers a callback that fires before each reconnect attempt, with the attempt
+   * number and computed backoff delay. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onReconnecting(cb: (attempt: number, delayMs: number) => void): () => void {
+    this.reconnectingCbs.add(cb);
+    return () => this.reconnectingCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires once the event poller successfully reconnects
+   * after one or more failures. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onReconnected(cb: () => void): () => void {
+    this.reconnectedCbs.add(cb);
+    return () => this.reconnectedCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires when the event poller exhausts all retry
+   * attempts. Polling stops at this point. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onDisconnected(cb: (error: unknown) => void): () => void {
+    this.disconnectedCbs.add(cb);
+    return () => this.disconnectedCbs.delete(cb);
+  }
+
+  // ── Issue #187: Event batching ────────────────────────────────────────────
+
+  /**
+   * Subscribes to batched stream events. The callback receives an array of matching
+   * events flushed when `batchingOptions.maxBatchSize` is reached or
+   * `batchingOptions.maxBatchDelayMs` elapses — whichever comes first.
+   *
+   * @param filter - Same filter criteria as `subscribeEvents`.
+   * @param callback - Called with a non-empty array of matching events per flush.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
+   *
+   * @example
+   * ```ts
+   * const sub = client.subscribeBatchEvents({ streamId: "42" }, (events) => {
+   *   console.log(`Received batch of ${events.length} events`);
+   * });
+   * ```
+   */
+  subscribeBatchEvents(
+    filter: StreamEventFilter,
+    callback: (events: StreamEvent[]) => void
+  ): StreamSubscription {
+    const poller = this.getEventPoller();
+    const key = `batch:${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
+    return poller.subscribeBatch(key, {
+      filter: (event) => {
+        if (filter.streamId && event.streamId !== filter.streamId) return false;
+        if (filter.sender && event.data.sender !== filter.sender) return false;
+        if (filter.recipient && event.data.recipient !== filter.recipient) return false;
+        return true;
+      },
+      callback,
+    });
+  }
+
+  /**
+   * Live SDK metrics. Currently exposes batch-delivery statistics.
+   * Issue #187.
+   */
+  get metrics(): { batch: import("./types.js").BatchMetrics } {
+    return { batch: this.getEventPoller().getBatchMetrics() };
   }
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
