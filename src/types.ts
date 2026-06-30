@@ -13,14 +13,17 @@ export type StreamEventType =
   | "StreamResumed"
   | "StreamTransferred";
 
-export interface StreamEvent {
+export interface StreamEvent<TData = Record<string, unknown>> {
   type: StreamEventType;
   streamId: string;
   txHash: string;
   ledger: number;
   timestamp: number;
-  data: Record<string, unknown>;
+  data: TData;
 }
+
+/** Typed event handler utility type. */
+export type EventHandler<TData = Record<string, unknown>> = (event: StreamEvent<TData>) => void;
 
 export interface StreamSubscription {
   unsubscribe(): void;
@@ -86,6 +89,8 @@ export interface Stream {
   autoRenew: boolean;
   /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
+  /** Unix timestamp (seconds) before which no withdrawals are permitted. */
+  lockUntil?: number;
   /** Optional helper method for JSON serialization of BigInt fields. */
   toJSON?(): Record<string, unknown>;
 }
@@ -116,7 +121,16 @@ export interface CreateStreamParams {
    * does not expose an allowance view (e.g. native XLM).
    */
   skipAllowanceCheck?: boolean;
+  /**
+   * Unix timestamp (seconds) before which no withdrawals are allowed.
+   * Must be between startTime and endTime when provided.
+   * Enforced at contract level; the SDK validates this before submission.
+   */
+  lockUntil?: number;
 }
+
+/** Overrides for cloneStream. Any CreateStreamParams field may be changed before submission. */
+export type CloneStreamOverrides = Partial<CreateStreamParams>;
 
 /** Alias for a single stream creation params object. */
 export type CreateStreamsParams = CreateStreamParams;

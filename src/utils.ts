@@ -1,4 +1,4 @@
-import { SoroStreamError } from "./errors.js";
+import { SoroStreamError, FederationResolutionError } from "./errors.js";
 import type {
   PriceFeedAdapter,
   Stream,
@@ -120,6 +120,62 @@ export function isValidStellarAddress(address: string): boolean {
   return (
     typeof address === "string" && /^[GC][A-Z2-7]{55}$/.test(address)
   );
+}
+
+/**
+ * Returns true when the string is a Stellar federation address (user*domain.com format).
+ */
+export function isFederationAddress(address: string): boolean {
+  return typeof address === "string" && /^[^*\s]+\*[^*\s]+\.[^*\s]+$/.test(address);
+}
+
+/**
+ * Resolves a Stellar federation address (user*domain.com) to a raw Stellar public key.
+ * Fetches the domain's stellar.toml to discover the federation server, then queries it.
+ * Throws {@link FederationResolutionError} if the server is unreachable or the address is unknown.
+ */
+export async function resolveFederationAddress(federationAddress: string): Promise<string> {
+  const starIdx = federationAddress.indexOf("*");
+  if (starIdx === -1) {
+    throw new FederationResolutionError(federationAddress, "invalid federation address format");
+  }
+  const domain = federationAddress.slice(starIdx + 1);
+  if (!domain) {
+    throw new FederationResolutionError(federationAddress, "missing domain");
+  }
+
+  let federationServer: string;
+  try {
+    const tomlRes = await fetch(`https://${domain}/.well-known/stellar.toml`);
+    if (!tomlRes.ok) throw new Error(`HTTP ${tomlRes.status}`);
+    const tomlText = await tomlRes.text();
+    const match = /FEDERATION_SERVER\s*=\s*"([^"]+)"/.exec(tomlText);
+    if (!match?.[1]) throw new Error("FEDERATION_SERVER not found in stellar.toml");
+    federationServer = match[1];
+  } catch (err) {
+    throw new FederationResolutionError(
+      federationAddress,
+      `stellar.toml unreachable: ${String(err)}`
+    );
+  }
+
+  try {
+    const fedRes = await fetch(
+      `${federationServer}?q=${encodeURIComponent(federationAddress)}&type=name`
+    );
+    if (!fedRes.ok) throw new Error(`HTTP ${fedRes.status}`);
+    const json = (await fedRes.json()) as { account_id?: string };
+    const resolved = json.account_id;
+    if (!resolved || !isValidStellarAddress(resolved)) {
+      throw new Error("no valid account_id in federation response");
+    }
+    return resolved;
+  } catch (err) {
+    throw new FederationResolutionError(
+      federationAddress,
+      `federation server query failed: ${String(err)}`
+    );
+  }
 }
 
 /**
