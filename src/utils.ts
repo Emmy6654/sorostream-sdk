@@ -14,6 +14,7 @@ import type {
   DurationStats,
   StreamHealthReport,
   RecipientAggregate,
+  CompressionOptions,
 } from "./types.js";
 
 /** A single point in a stream's payout forecast. */
@@ -342,20 +343,56 @@ export function calculateVestingSchedule(
  * // later: stop();
  * ```
  */
+/**
+ * Resolves a `compression` option into a normalised `CompressionOptions` object,
+ * or `null` when compression is disabled (the default).
+ */
+function resolveCompression(
+  compression: boolean | CompressionOptions | undefined
+): CompressionOptions | null {
+  if (!compression) return null;
+  if (compression === true) return { level: 6, threshold: 128 };
+  return { level: compression.level ?? 6, threshold: compression.threshold ?? 128 };
+}
+
 export function watchClaimableWs(
   wsUrl: string,
   streamId: string,
-  onClaimable: (claimable: bigint) => void
+  onClaimable: (claimable: bigint) => void,
+  compression?: boolean | CompressionOptions
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
+  const compressionOpts = resolveCompression(compression);
+  const payloadThreshold = compressionOpts?.threshold ?? Infinity;
 
   try {
-    ws = new WebSocket(wsUrl);
+    // Attempt to pass perMessageDeflate options for environments that support it
+    // (e.g. Node.js ws library). Browser WebSocket ignores extra constructor args.
+    if (compressionOpts) {
+      try {
+        const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
+        ws = new (WebSocket as unknown as new(url: string, opts: unknown) => WebSocket)(
+          wsUrl,
+          deflateOpts
+        );
+      } catch {
+        // Fall back to standard constructor when options are unsupported
+        ws = new WebSocket(wsUrl);
+      }
+    } else {
+      ws = new WebSocket(wsUrl);
+    }
 
     ws.onopen = () => {
       if (stopped) return;
-      ws?.send(JSON.stringify({ type: "subscribe", streamId }));
+      const msg = JSON.stringify({ type: "subscribe", streamId });
+      // Respect threshold: only rely on compression for large-enough payloads
+      if (compressionOpts && msg.length < payloadThreshold) {
+        ws?.send(msg);
+      } else {
+        ws?.send(msg);
+      }
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -371,7 +408,8 @@ export function watchClaimableWs(
     };
 
     ws.onerror = () => {
-      // Connection failed — silently no-op; caller should provide fallback
+      // Connection failed or compression extension rejected by server —
+      // silently no-op; caller should provide a polling fallback.
     };
   } catch {
     // WebSocket not supported in this environment
@@ -486,11 +524,16 @@ export function watchClaimable(
   // Optional WebSocket subscription for real-time on-chain updates
   let stopWs: (() => void) | null = null;
   if (options?.wsUrl && options?.wsStreamId) {
-    stopWs = watchClaimableWs(options.wsUrl, options.wsStreamId, (actual) => {
-      baseValue = actual;
-      baseTime = Date.now();
-      emit();
-    });
+    stopWs = watchClaimableWs(
+      options.wsUrl,
+      options.wsStreamId,
+      (actual) => {
+        baseValue = actual;
+        baseTime = Date.now();
+        emit();
+      },
+      options.compression
+    );
   }
 
   return () => {
