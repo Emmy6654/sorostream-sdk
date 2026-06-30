@@ -96,6 +96,9 @@ export class BulkCreatePartialError extends SoroStreamError {
     this.name = "BulkCreatePartialError";
     this.successfulBatches = successfulBatches;
     this.failedSlots = failedSlots;
+  }
+}
+
 export class InsufficientAllowanceError extends SoroStreamError {
   /** Token contract address that was checked. */
   readonly token: string;
@@ -115,15 +118,9 @@ export class InsufficientAllowanceError extends SoroStreamError {
   }
 }
 
-export class NetworkUnavailableError extends SoroStreamError {
-readonly endpoint: string;
-
-constructor(endpoint: string) {
-super(
-`Network unavailable: unable to reach RPC endpoint "${endpoint}". ` +
-`Check your internet connection or try again later.`
-);
-this.name = "NetworkUnavailableError";
-this.endpoint = endpoint;
-}
+export class DuplicateStreamError extends SoroStreamError {
+  constructor(message = "Duplicate stream detected") {
+    super(message);
+    this.name = "DuplicateStreamError";
+  }
 }

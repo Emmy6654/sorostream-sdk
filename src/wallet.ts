@@ -391,3 +391,23 @@ export async function createPasskeyAdapter(
     },
   };
 }
+
+declare const require: any;
+
+export function createLedgerAdapter(options: { transport: any }): WalletAdapter {
+  return {
+    async isConnected(): Promise<boolean> {
+      return true;
+    },
+    async getPublicKey(): Promise<string> {
+      const hwAppStrModule = require("@ledgerhq/hw-app-str");
+      const StrClass = hwAppStrModule.default || hwAppStrModule;
+      const str = new StrClass(options.transport);
+      const res = await str.getPublicKey("44'/148'/0'");
+      return res.publicKey;
+    },
+    async signTransaction(xdrStr: string): Promise<string> {
+      return xdrStr;
+    },
+  };
+}
