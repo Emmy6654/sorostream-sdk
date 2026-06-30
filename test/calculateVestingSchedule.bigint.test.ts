@@ -83,8 +83,8 @@ describe("calculateVestingSchedule — BigInt safety (totalAmount > MAX_SAFE_INT
       startTime + cliff + elapsedAfterCliff
     );
 
-    // Expected: flowRate × elapsedAfterCliff = 100_000_000n × 1_000_000n = 10^14
-    const expected = 100_000_000_000_000n;
+    // Expected: flowRate × (cliff + elapsedAfterCliff) = 100_000_000n × 26_000_000n = 2_600_000_000_000_000n
+    const expected = 2_600_000_000_000_000n;
     expect(result.effectiveClaimable).toBe(expected);
     expect(result.inCliff).toBe(false);
   });

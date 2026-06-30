@@ -219,12 +219,7 @@ export function calculateVestingSchedule(
   if (inCliff) {
     effectiveClaimable = 0n;
   } else if (currentTime >= stream.endTime) {
-    // Post-cliff portion of the schedule (clamp at 0 if no real cliff applies).
-    const postCliffSeconds =
-      cliffSecondsBig < totalSecondsBig
-        ? totalSecondsBig - cliffSecondsBig
-        : 0n;
-    effectiveClaimable = stream.flowRate * postCliffSeconds;
+    effectiveClaimable = totalAmount;
   } else {
     // Elapsed seconds from end-of-cliff (or from startTime when no cliff)
     // up to min(now, endTime).
@@ -232,13 +227,7 @@ export function calculateVestingSchedule(
     const vestingStartBig = BigInt(Math.max(cliffEndTime, stream.startTime));
     const elapsedBig =
       minNowBig > vestingStartBig ? minNowBig - vestingStartBig : 0n;
-    effectiveClaimable = stream.flowRate * elapsedBig;
-    const elapsed =
-      Math.min(currentTime, stream.endTime) -
-      Math.max(cliffEndTime, stream.startTime);
- if (elapsed < 0n) return 0n;
-    effectiveClaimable = stream.flowRate * BigInt(cliffSeconds + Math.max(0, elapsed));
-    effectiveClaimable = stream.flowRate * BigInt(Math.max(0, elapsed));
+    effectiveClaimable = stream.flowRate * (cliffSecondsBig + elapsedBig);
   }
 
   const milestones: Array<{ time: number; vested: bigint }> = [];
@@ -879,3 +868,50 @@ export function batchSize(custom?: number): number {
   }
   return custom;
 }
+
+/**
+ * Recursively converts BigInt properties in an object to strings,
+ * allowing safe serialization with JSON.stringify.
+ *
+ * Useful for logging or exporting stream objects, vesting schedules,
+ * and aggregate totals that include BigInt fields like flowRate,
+ * totalAmount, or claimableAmount.
+ *
+ * @param obj - The object containing BigInt fields.
+ * @returns A plain object with all BigInt fields converted to string.
+ */
+export function streamToJSON(obj: unknown): unknown {
+  if (typeof obj === "bigint") {
+    return obj.toString();
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(streamToJSON);
+  }
+  if (obj !== null && typeof obj === "object") {
+    const res: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === "toJSON") continue;
+      res[key] = streamToJSON(value);
+    }
+    return res;
+  }
+  return obj;
+}
+
+/**
+ * Helper function to serialize objects containing BigInt fields to JSON strings.
+ * Automatically converts BigInt fields (like flowRate, totalAmount, claimableAmount) to strings.
+ *
+ * @param obj - The object to serialize.
+ * @param space - Optional indentation space for pretty-printing.
+ * @returns The JSON string representation.
+ */
+export function jsonStringifyStream(obj: unknown, space?: string | number): string {
+  return JSON.stringify(
+    obj,
+    (_, value) => (typeof value === "bigint" ? value.toString() : value),
+    space
+  );
+}
+
+export const jsonStringify = jsonStringifyStream;
