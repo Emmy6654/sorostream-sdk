@@ -25,7 +25,9 @@ jobs:
         if: matrix.runtime == 'node'
         run: |
           npm ci
+          git fetch --no-tags --depth=1 origin main
           npm run lint
+          npm run check:changelog -- --base origin/main
           npm test
 
       - name: Setup Bun

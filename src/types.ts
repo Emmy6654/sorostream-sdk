@@ -1,7 +1,7 @@
 /** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
 
-// â”€â”€ Event types (#1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Event types (#1) ─────────────────────────────────────────────────────────
 
 export type StreamEventType =
   | "StreamCreated"
@@ -13,14 +13,17 @@ export type StreamEventType =
   | "StreamResumed"
   | "StreamTransferred";
 
-export interface StreamEvent {
+export interface StreamEvent<TData = Record<string, unknown>> {
   type: StreamEventType;
   streamId: string;
   txHash: string;
   ledger: number;
   timestamp: number;
-  data: Record<string, unknown>;
+  data: TData;
 }
+
+/** Typed event handler utility type. */
+export type EventHandler<TData = Record<string, unknown>> = (event: StreamEvent<TData>) => void;
 
 export interface StreamSubscription {
   unsubscribe(): void;
@@ -32,7 +35,7 @@ export interface StreamEventFilter {
   recipient?: string;
 }
 
-// â”€â”€ Pagination types (#3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Pagination types (#3) ────────────────────────────────────────────────────
 
 export interface PaginationParams {
   limit?: number;
@@ -45,13 +48,13 @@ export interface PaginatedStreams {
   hasMore: boolean;
 }
 
-// â”€â”€ Multisig types (#16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Multisig types (#16) ─────────────────────────────────────────────────────
 
 export interface MultisigSigner {
   signTransaction(xdr: string, network: Network): Promise<string>;
 }
 
-// â”€â”€ Webhook types (#22) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Webhook types (#22) ──────────────────────────────────────────────────────
 
 export interface WebhookConfig {
   url: string;
@@ -86,6 +89,10 @@ export interface Stream {
   autoRenew: boolean;
   /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
+  /** Unix timestamp (seconds) before which no withdrawals are permitted. */
+  lockUntil?: number;
+  /** Optional helper method for JSON serialization of BigInt fields. */
+  toJSON?(): Record<string, unknown>;
 }
 
 /** Parameters for creating a new stream. */
@@ -114,7 +121,16 @@ export interface CreateStreamParams {
    * does not expose an allowance view (e.g. native XLM).
    */
   skipAllowanceCheck?: boolean;
+  /**
+   * Unix timestamp (seconds) before which no withdrawals are allowed.
+   * Must be between startTime and endTime when provided.
+   * Enforced at contract level; the SDK validates this before submission.
+   */
+  lockUntil?: number;
 }
+
+/** Overrides for cloneStream. Any CreateStreamParams field may be changed before submission. */
+export type CloneStreamOverrides = Partial<CreateStreamParams>;
 
 /** Alias for a single stream creation params object. */
 export type CreateStreamsParams = CreateStreamParams;
@@ -213,7 +229,7 @@ export interface VestingScheduleResult {
   milestones: VestingSchedulePoint[];
 }
 
-// â”€â”€ Issue #148: Recipient change notification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #148: Recipient change notification ────────────────────────────────
 
 /** Payload delivered to an {@link onRecipientChanged} callback. */
 export interface RecipientChangedEvent {
@@ -227,6 +243,25 @@ export interface RecipientChangedEvent {
 export interface OnRecipientChangedOptions {
   /** Polling interval in ms (default: 5000). */
   intervalMs?: number;
+}
+
+// ── Issue #188: WebSocket compression ───────────────────────────────────────
+
+/**
+ * Options for permessage-deflate compression on WebSocket connections.
+ * Disabled by default to avoid breaking existing deployments.
+ */
+export interface CompressionOptions {
+  /**
+   * zlib compression level (1 = fastest, 9 = best compression).
+   * Default: 6 (zlib default).
+   */
+  level?: number;
+  /**
+   * Minimum payload size in bytes to compress (default: 128).
+   * Payloads below this threshold are sent uncompressed to avoid overhead.
+   */
+  threshold?: number;
 }
 
 /** Options for {@link watchClaimable}. */
@@ -246,37 +281,16 @@ export interface WatchClaimableOptions {
    * Required when `wsUrl` is set.
    */
   wsStreamId?: string;
+  /**
+   * Opt-in permessage-deflate compression for the WebSocket connection.
+   * Disabled by default. Requires server-side support; falls back gracefully.
+   * Issue #188.
+   */
+  compression?: boolean | CompressionOptions;
 }
 
 
-/**
- * Wallet adapter interface. Implement this to support custom signing backends.
- *
- * @example
- * ```ts
- * import { Keypair, TransactionBuilder, Networks } from "@stellar/stellar-sdk";
- * import type { WalletAdapter, Network } from "@sorostream/sdk";
- *
- * const serverKeypairAdapter: WalletAdapter = {
- *   async isConnected() {
- *     return true;
- *   },
- *   async getPublicKey() {
- *     return Keypair.fromSecret(process.env.STELLAR_SECRET!).publicKey();
- *   },
- *   async signTransaction(xdr, network) {
- *     const passphrase = network === "testnet"
- *       ? Networks.TESTNET
- *       : network === "futurenet"
- *         ? Networks.FUTURENET
- *         : Networks.PUBLIC;
- *     const tx = TransactionBuilder.fromXDR(xdr, passphrase);
- *     tx.sign(Keypair.fromSecret(process.env.STELLAR_SECRET!));
- *     return tx.toEnvelope().toXDR("base64");
- *   },
- * };
- * ```
- */
+/** Wallet adapter interface. Implement this to support custom signing backends. */
 export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
@@ -332,7 +346,7 @@ export interface TokenAggregate {
   claimedSoFar: bigint;
 }
 
-// â”€â”€ Issue #44: Locale-aware formatUSDC â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #44: Locale-aware formatUSDC ───────────────────────────────────────
 
 /** Options for locale-aware {@link formatUSDC} formatting. */
 export interface FormatUSDCOptions {
@@ -346,7 +360,7 @@ export interface FormatUSDCOptions {
   useGrouping?: boolean;
 }
 
-// â”€â”€ Issue #47: Cache reconciliation / drift detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #47: Cache reconciliation / drift detection ────────────────────────
 
 /** A single field that differs between cached and on-chain stream state. */
 export interface StreamDrift {
@@ -361,7 +375,7 @@ export interface ReconcileStreamOptions {
   intervalMs?: number;
 }
 
-// â”€â”€ Issue #46: WebAuthn passkey adapter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #46: WebAuthn passkey adapter ─────────────────────────────────────
 
 /** Configuration for a WebAuthn/passkey-based Soroban smart wallet adapter. */
 export interface PasskeyAdapterConfig {
@@ -371,12 +385,12 @@ export interface PasskeyAdapterConfig {
   rpId: string;
   /**
    * The credential ID of the registered passkey (ArrayBuffer from credential.rawId).
-   * Required â€” without it the browser may select the wrong passkey silently.
+   * Required — without it the browser may select the wrong passkey silently.
    */
   credentialId: ArrayBuffer;
 }
 
-// â”€â”€ Price feed adapter (#Issue 1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Price feed adapter (#Issue 1) ────────────────────────────────────────────
 
 /**
  * Pluggable adapter for converting token amounts to fiat display values.
@@ -392,7 +406,7 @@ export interface PriceFeedAdapter {
   getPrice(tokenAddress: string, displayCurrency?: string): Promise<number>;
 }
 
-// â”€â”€ Split stream types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Split stream types ───────────────────────────────────────────────────────
 
 /** Parameters for splitting an active stream into two streams. */
 export interface SplitStreamParams {
@@ -418,7 +432,7 @@ export interface SplitStreamResult {
   streamIdB: string;
 }
 
-// â”€â”€ Fee bump types (#Issue 3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Fee bump types (#Issue 3) ────────────────────────────────────────────────
 
 /**
  * Options for wrapping a transaction in a Stellar fee-bump.
@@ -433,7 +447,7 @@ export interface FeeBumpOptions {
   maxFee?: number;
 }
 
-// â”€â”€ Write options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Write options ────────────────────────────────────────────────────────────
 
 /** Options for write operations (create, withdraw, cancel, top-up). */
 export interface WriteOptions {
@@ -443,12 +457,12 @@ export interface WriteOptions {
   feeBump?: FeeBumpOptions;
 }
 
-// â”€â”€ Contract versioning (#Issue 4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Contract versioning (#Issue 4) ───────────────────────────────────────────
 
 /** Supported contract versions for call encoding. */
 export type ContractVersion = "v1" | "v2";
 
-// â”€â”€ Dashboard / reporting aggregate types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Dashboard / reporting aggregate types ────────────────────────────────────
 
 /** Aggregate totals across a set of streams. */
 export interface StreamTotals {
@@ -512,7 +526,7 @@ export interface RecipientAggregate {
   claimedSoFar: bigint;
 }
 
-// â”€â”€ Stream filtering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Stream filtering ────────────────────────────────────────────────────────
 
 /** Criteria for filtering streams. */
 export interface StreamFilterCriteria {
@@ -522,7 +536,7 @@ export interface StreamFilterCriteria {
   status?: StreamStatus;
 }
 
-// â”€â”€ Issue #166: Stream activity log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #166: Stream activity log ─────────────────────────────────────────
 
 /** The type of activity recorded in a stream's activity log. */
 export type StreamActivityType =
@@ -557,7 +571,7 @@ export interface GetActivityLogOptions {
   cursor?: string;
 }
 
-// â”€â”€ Issue #73: Stream snapshot export/import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #73: Stream snapshot export/import ─────────────────────────────────
 
 /** A history entry recording a past event on a stream. */
 export interface StreamHistoryEntry {
@@ -592,7 +606,7 @@ export interface StreamSnapshot {
   history: StreamHistoryEntry[];
 }
 
-// â”€â”€ Issue #50: Middleware / plugin system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Issue #50: Middleware / plugin system ────────────────────────────────────
 
 /** Context passed to every middleware hook. */
 export interface MiddlewareContext {
@@ -619,4 +633,26 @@ export interface SoroStreamPlugin {
    * Re-throwing replaces the original error; returning swallows it.
    */
   onError?(ctx: MiddlewareContext, error: unknown): void | Promise<void>;
+}
+
+// ── Issue #187: Event batching ───────────────────────────────────────────────
+
+/** Configuration for event batching on high-frequency streams. */
+export interface BatchingOptions {
+  /** Max events per batch before flushing (default: 50). */
+  maxBatchSize?: number;
+  /** Max delay in ms before a non-full batch is flushed (default: 10). */
+  maxBatchDelayMs?: number;
+}
+
+/** Running metrics for the event batch buffer. */
+export interface BatchMetrics {
+  /** Total number of batches flushed since the poller started. */
+  totalBatches: number;
+  /** Total number of events delivered across all batches. */
+  totalEvents: number;
+  /** Average batch size (0 when no batches have been flushed yet). */
+  averageBatchSize: number;
+  /** Unix timestamp (ms) of the most recent flush, or null if none. */
+  lastFlushAt: number | null;
 }
