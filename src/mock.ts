@@ -23,6 +23,7 @@
 import type {
   BatchCancelResult,
   CancelStreamParams,
+  CloneStreamOverrides,
   CreateStreamParams,
   PaginatedStreams,
   PaginationParams,
@@ -53,6 +54,8 @@ function nowSec(): number {
 
 function claimableAt(stream: Stream, atSec: number): bigint {
   if (stream.status === "Cancelled" || stream.status === "Completed") return 0n;
+  // Enforce lockUntil: no withdrawals until the lock expires
+  if (stream.lockUntil !== undefined && atSec < stream.lockUntil) return 0n;
   if (stream.status === "Paused") {
     const effectiveNow = Math.min(stream.pausedAt ?? atSec, stream.endTime);
     const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
@@ -122,6 +125,7 @@ export class MockSoroStreamClient {
       lastWithdrawTime: now,
       status: "Active",
       autoRenew: params.autoRenew,
+      ...(params.lockUntil !== undefined ? { lockUntil: params.lockUntil } : {}),
       toJSON() {
         return streamToJSON(this) as Record<string, unknown>;
       },
@@ -552,6 +556,23 @@ export class MockSoroStreamClient {
       cursor: last ? last.id : null,
       hasMore: start + limit < all.length,
     };
+  }
+
+  async cloneStream(
+    streamId: string,
+    overrides?: CloneStreamOverrides
+  ): Promise<{ streamId: string; txHash: string }> {
+    const source = await this.getStream(streamId);
+    const durationSeconds = source.endTime - source.startTime;
+
+    return this.createStream({
+      recipient: source.recipient,
+      token: source.token,
+      amount: source.deposit,
+      durationSeconds,
+      autoRenew: source.autoRenew,
+      ...overrides,
+    });
   }
 
   subscribeEvents(

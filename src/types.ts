@@ -13,14 +13,17 @@ export type StreamEventType =
   | "StreamResumed"
   | "StreamTransferred";
 
-export interface StreamEvent {
+export interface StreamEvent<TData = Record<string, unknown>> {
   type: StreamEventType;
   streamId: string;
   txHash: string;
   ledger: number;
   timestamp: number;
-  data: Record<string, unknown>;
+  data: TData;
 }
+
+/** Typed event handler utility type. */
+export type EventHandler<TData = Record<string, unknown>> = (event: StreamEvent<TData>) => void;
 
 export interface StreamSubscription {
   unsubscribe(): void;
@@ -86,6 +89,8 @@ export interface Stream {
   autoRenew: boolean;
   /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
+  /** Unix timestamp (seconds) before which no withdrawals are permitted. */
+  lockUntil?: number;
   /** Optional helper method for JSON serialization of BigInt fields. */
   toJSON?(): Record<string, unknown>;
 }
@@ -116,7 +121,16 @@ export interface CreateStreamParams {
    * does not expose an allowance view (e.g. native XLM).
    */
   skipAllowanceCheck?: boolean;
+  /**
+   * Unix timestamp (seconds) before which no withdrawals are allowed.
+   * Must be between startTime and endTime when provided.
+   * Enforced at contract level; the SDK validates this before submission.
+   */
+  lockUntil?: number;
 }
+
+/** Overrides for cloneStream. Any CreateStreamParams field may be changed before submission. */
+export type CloneStreamOverrides = Partial<CreateStreamParams>;
 
 /** Alias for a single stream creation params object. */
 export type CreateStreamsParams = CreateStreamParams;
@@ -231,6 +245,25 @@ export interface OnRecipientChangedOptions {
   intervalMs?: number;
 }
 
+// ── Issue #188: WebSocket compression ───────────────────────────────────────
+
+/**
+ * Options for permessage-deflate compression on WebSocket connections.
+ * Disabled by default to avoid breaking existing deployments.
+ */
+export interface CompressionOptions {
+  /**
+   * zlib compression level (1 = fastest, 9 = best compression).
+   * Default: 6 (zlib default).
+   */
+  level?: number;
+  /**
+   * Minimum payload size in bytes to compress (default: 128).
+   * Payloads below this threshold are sent uncompressed to avoid overhead.
+   */
+  threshold?: number;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -248,6 +281,12 @@ export interface WatchClaimableOptions {
    * Required when `wsUrl` is set.
    */
   wsStreamId?: string;
+  /**
+   * Opt-in permessage-deflate compression for the WebSocket connection.
+   * Disabled by default. Requires server-side support; falls back gracefully.
+   * Issue #188.
+   */
+  compression?: boolean | CompressionOptions;
 }
 
 
@@ -594,4 +633,26 @@ export interface SoroStreamPlugin {
    * Re-throwing replaces the original error; returning swallows it.
    */
   onError?(ctx: MiddlewareContext, error: unknown): void | Promise<void>;
+}
+
+// ── Issue #187: Event batching ───────────────────────────────────────────────
+
+/** Configuration for event batching on high-frequency streams. */
+export interface BatchingOptions {
+  /** Max events per batch before flushing (default: 50). */
+  maxBatchSize?: number;
+  /** Max delay in ms before a non-full batch is flushed (default: 10). */
+  maxBatchDelayMs?: number;
+}
+
+/** Running metrics for the event batch buffer. */
+export interface BatchMetrics {
+  /** Total number of batches flushed since the poller started. */
+  totalBatches: number;
+  /** Total number of events delivered across all batches. */
+  totalEvents: number;
+  /** Average batch size (0 when no batches have been flushed yet). */
+  averageBatchSize: number;
+  /** Unix timestamp (ms) of the most recent flush, or null if none. */
+  lastFlushAt: number | null;
 }

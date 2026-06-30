@@ -1,4 +1,4 @@
-import { SoroStreamError } from "./errors.js";
+import { SoroStreamError, FederationResolutionError } from "./errors.js";
 import type {
   PriceFeedAdapter,
   Stream,
@@ -14,6 +14,7 @@ import type {
   DurationStats,
   StreamHealthReport,
   RecipientAggregate,
+  CompressionOptions,
 } from "./types.js";
 
 /** A single point in a stream's payout forecast. */
@@ -119,6 +120,62 @@ export function isValidStellarAddress(address: string): boolean {
   return (
     typeof address === "string" && /^[GC][A-Z2-7]{55}$/.test(address)
   );
+}
+
+/**
+ * Returns true when the string is a Stellar federation address (user*domain.com format).
+ */
+export function isFederationAddress(address: string): boolean {
+  return typeof address === "string" && /^[^*\s]+\*[^*\s]+\.[^*\s]+$/.test(address);
+}
+
+/**
+ * Resolves a Stellar federation address (user*domain.com) to a raw Stellar public key.
+ * Fetches the domain's stellar.toml to discover the federation server, then queries it.
+ * Throws {@link FederationResolutionError} if the server is unreachable or the address is unknown.
+ */
+export async function resolveFederationAddress(federationAddress: string): Promise<string> {
+  const starIdx = federationAddress.indexOf("*");
+  if (starIdx === -1) {
+    throw new FederationResolutionError(federationAddress, "invalid federation address format");
+  }
+  const domain = federationAddress.slice(starIdx + 1);
+  if (!domain) {
+    throw new FederationResolutionError(federationAddress, "missing domain");
+  }
+
+  let federationServer: string;
+  try {
+    const tomlRes = await fetch(`https://${domain}/.well-known/stellar.toml`);
+    if (!tomlRes.ok) throw new Error(`HTTP ${tomlRes.status}`);
+    const tomlText = await tomlRes.text();
+    const match = /FEDERATION_SERVER\s*=\s*"([^"]+)"/.exec(tomlText);
+    if (!match?.[1]) throw new Error("FEDERATION_SERVER not found in stellar.toml");
+    federationServer = match[1];
+  } catch (err) {
+    throw new FederationResolutionError(
+      federationAddress,
+      `stellar.toml unreachable: ${String(err)}`
+    );
+  }
+
+  try {
+    const fedRes = await fetch(
+      `${federationServer}?q=${encodeURIComponent(federationAddress)}&type=name`
+    );
+    if (!fedRes.ok) throw new Error(`HTTP ${fedRes.status}`);
+    const json = (await fedRes.json()) as { account_id?: string };
+    const resolved = json.account_id;
+    if (!resolved || !isValidStellarAddress(resolved)) {
+      throw new Error("no valid account_id in federation response");
+    }
+    return resolved;
+  } catch (err) {
+    throw new FederationResolutionError(
+      federationAddress,
+      `federation server query failed: ${String(err)}`
+    );
+  }
 }
 
 /**
@@ -286,20 +343,56 @@ export function calculateVestingSchedule(
  * // later: stop();
  * ```
  */
+/**
+ * Resolves a `compression` option into a normalised `CompressionOptions` object,
+ * or `null` when compression is disabled (the default).
+ */
+function resolveCompression(
+  compression: boolean | CompressionOptions | undefined
+): CompressionOptions | null {
+  if (!compression) return null;
+  if (compression === true) return { level: 6, threshold: 128 };
+  return { level: compression.level ?? 6, threshold: compression.threshold ?? 128 };
+}
+
 export function watchClaimableWs(
   wsUrl: string,
   streamId: string,
-  onClaimable: (claimable: bigint) => void
+  onClaimable: (claimable: bigint) => void,
+  compression?: boolean | CompressionOptions
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
+  const compressionOpts = resolveCompression(compression);
+  const payloadThreshold = compressionOpts?.threshold ?? Infinity;
 
   try {
-    ws = new WebSocket(wsUrl);
+    // Attempt to pass perMessageDeflate options for environments that support it
+    // (e.g. Node.js ws library). Browser WebSocket ignores extra constructor args.
+    if (compressionOpts) {
+      try {
+        const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
+        ws = new (WebSocket as unknown as new(url: string, opts: unknown) => WebSocket)(
+          wsUrl,
+          deflateOpts
+        );
+      } catch {
+        // Fall back to standard constructor when options are unsupported
+        ws = new WebSocket(wsUrl);
+      }
+    } else {
+      ws = new WebSocket(wsUrl);
+    }
 
     ws.onopen = () => {
       if (stopped) return;
-      ws?.send(JSON.stringify({ type: "subscribe", streamId }));
+      const msg = JSON.stringify({ type: "subscribe", streamId });
+      // Respect threshold: only rely on compression for large-enough payloads
+      if (compressionOpts && msg.length < payloadThreshold) {
+        ws?.send(msg);
+      } else {
+        ws?.send(msg);
+      }
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -315,7 +408,8 @@ export function watchClaimableWs(
     };
 
     ws.onerror = () => {
-      // Connection failed — silently no-op; caller should provide fallback
+      // Connection failed or compression extension rejected by server —
+      // silently no-op; caller should provide a polling fallback.
     };
   } catch {
     // WebSocket not supported in this environment
@@ -430,11 +524,16 @@ export function watchClaimable(
   // Optional WebSocket subscription for real-time on-chain updates
   let stopWs: (() => void) | null = null;
   if (options?.wsUrl && options?.wsStreamId) {
-    stopWs = watchClaimableWs(options.wsUrl, options.wsStreamId, (actual) => {
-      baseValue = actual;
-      baseTime = Date.now();
-      emit();
-    });
+    stopWs = watchClaimableWs(
+      options.wsUrl,
+      options.wsStreamId,
+      (actual) => {
+        baseValue = actual;
+        baseTime = Date.now();
+        emit();
+      },
+      options.compression
+    );
   }
 
   return () => {

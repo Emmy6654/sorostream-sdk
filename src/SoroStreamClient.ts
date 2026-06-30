@@ -12,7 +12,10 @@ import {
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
+import { isValidStellarAddress, isFederationAddress, resolveFederationAddress } from "./utils.js";
 import { isValidStellarAddress } from "./utils.js";
+import { ConnectionPool } from "./connectionPool.js";
+import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -36,6 +39,7 @@ import {
   BulkCreatePartialError,
   InsufficientAllowanceError,
   DuplicateStreamError,
+  FederationResolutionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import { NetworkUnavailableError } from "./errors.js";
@@ -45,6 +49,7 @@ import type {
   BulkCreateOptions,
   BulkCreateResult,
   CancelStreamParams,
+  CloneStreamOverrides,
   CreateStreamParams,
   FeeEstimate,
   Network,
@@ -81,6 +86,7 @@ import type {
   GetActivityLogOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
+import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON } from "./utils.js";
 
 const RPC_URLS: Record<Network, string> = {
@@ -143,6 +149,30 @@ export interface SoroStreamClientOptions {
    */
   idleTimeoutMs?: number;
   /**
+   * Opt-in connection pool size for high-throughput stream scenarios.
+   * When set, subscriptions are distributed across `poolSize` connections.
+   * Issue #179.
+   */
+  poolSize?: number;
+  /**
+   * Maximum concurrent subscriptions per pooled connection (default: 10).
+   * Emits a `pool:full` event when a slot exceeds this limit.
+   * Issue #179.
+   */
+  maxSubscriptionsPerConnection?: number;
+  /**
+   * Retry policy for automatic event-stream reconnection on unexpected failures.
+   * Set `maxAttempts: 0` to disable retries (preserves existing behaviour).
+   * Issue #186.
+   */
+  retryPolicy?: StreamRetryPolicy;
+  /**
+   * Opt-in event batching configuration for high-frequency streams.
+   * When set, events are buffered and delivered in batches via `subscribeBatchEvents`.
+   * Issue #187.
+   */
+  batchingOptions?: import("./types.js").BatchingOptions;
+  /**
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
@@ -163,6 +193,7 @@ function scValToStream(val: xdr.ScVal): Stream {
     status: raw["status"] as Stream["status"],
     autoRenew: Boolean(raw["auto_renew"]),
     ...(raw["paused_at"] != null ? { pausedAt: Number(raw["paused_at"]) } : {}),
+    ...(raw["lock_until"] != null ? { lockUntil: Number(raw["lock_until"]) } : {}),
     toJSON() {
       return streamToJSON(this) as Record<string, unknown>;
     },
@@ -186,26 +217,7 @@ export type SimulateOnlyResult = {
  * const { streamId } = await client.createStream({ recipient, token, amount, durationSeconds, autoRenew });
  * ```
  */
-export class SoroStreamClient {
-private _healthCache: { healthy: boolean; ts: number } | null = null;
-
-async checkNetworkHealth(): Promise<boolean> {
-if (this._healthCache && Date.now() - this._healthCache.ts < 10000) {
-return this._healthCache.healthy;
-}
-try {
-const result = await Promise.race([
-this.rpc.getHealth(),
-new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
-]);
-this._healthCache = { healthy: true, ts: Date.now() };
-return true;
-} catch (e) {
-this._healthCache = { healthy: false, ts: Date.now() };
-throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
-}
-}
-
+export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private server: rpc.Server;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
@@ -220,11 +232,23 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
   private eventPoller: EventPoller | null = null;
   /** Per-stream read cache, keyed by `${network}:${streamId}`. */
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
+  /** Federation address resolution cache (5 min TTL). */
+  private readonly federationCache = new Cache<string, string>(300_000);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
   private readonly checkDuplicate: boolean;
-  // Issue #149: connection pool stats
+  // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
+  // Issue #179: opt-in high-throughput connection pool
+  private pool: ConnectionPool | null = null;
+  private readonly poolReleases = new Map<string, () => void>();
+  // Issue #186: event-stream retry policy and reconnect callbacks
+  private readonly retryPolicy: StreamRetryPolicy | undefined;
+  private readonly reconnectingCbs = new Set<(attempt: number, delayMs: number) => void>();
+  private readonly reconnectedCbs = new Set<() => void>();
+  private readonly disconnectedCbs = new Set<(error: unknown) => void>();
+  // Issue #187: event batching options
+  private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -248,6 +272,8 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
     });
     this.plugins = options.plugins ?? [];
     this.checkDuplicate = options.checkDuplicate ?? false;
+    this.retryPolicy = options.retryPolicy;
+    this.batchingOptions = options.batchingOptions;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -256,6 +282,16 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
       reused: 0,
       idle: 0,
     };
+    // Issue #179: opt-in connection pool for high-throughput scenarios
+    if (options.poolSize && options.poolSize > 1) {
+      this.pool = new ConnectionPool({
+        poolSize: options.poolSize,
+        maxSubscriptionsPerConnection: options.maxSubscriptionsPerConnection,
+        idleTimeoutMs: options.idleTimeoutMs,
+        rpcUrl: options.rpcUrl ?? RPC_URLS[options.network],
+        contractId: options.contractId,
+      } satisfies ConnectionPoolOptions);
+    }
   }
 
   /**
@@ -554,6 +590,14 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
       );
     }
 
+    if (params.lockUntil !== undefined) {
+      if (params.lockUntil < startTime || params.lockUntil > endTime) {
+        throw new Error(
+          `lockUntil (${params.lockUntil}) must be between startTime (${startTime}) and endTime (${endTime})`
+        );
+      }
+    }
+
     try {
       await this.withBreaker(() =>
         this.server.getAccount(params.recipient)
@@ -649,6 +693,18 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
     return this.runWithMiddleware("createStream", [params], async () => {
       if (params.amount <= 0n) throw new InsufficientAmountError();
       await this.validateCliff(params.cliffSeconds ?? 0);
+
+      // Resolve federation address if needed, with caching
+      if (isFederationAddress(params.recipient)) {
+        const cached = this.federationCache.get(params.recipient);
+        if (cached) {
+          params = { ...params, recipient: cached };
+        } else {
+          const resolved = await resolveFederationAddress(params.recipient);
+          this.federationCache.set(params.recipient, resolved);
+          params = { ...params, recipient: resolved };
+        }
+      }
 
       const sender = await this.walletAdapter.getPublicKey();
 
@@ -1252,9 +1308,23 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
 
   private getEventPoller(): EventPoller {
     if (!this.eventPoller) {
+      const opts: EventPollerOptions = {
+        retryPolicy: this.retryPolicy,
+        onReconnecting: (attempt, delayMs) => {
+          for (const cb of this.reconnectingCbs) cb(attempt, delayMs);
+        },
+        onReconnected: () => {
+          for (const cb of this.reconnectedCbs) cb();
+        },
+        onDisconnected: (err) => {
+          for (const cb of this.disconnectedCbs) cb(err);
+        },
+        batchingOptions: this.batchingOptions,
+      };
       this.eventPoller = new EventPoller(
         this.server,
-        this.contract.contractId()
+        this.contract.contractId(),
+        opts
       );
     }
     return this.eventPoller;
@@ -1278,10 +1348,15 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    */
   subscribeEvents(
     filter: StreamEventFilter,
-    callback: (event: StreamEvent) => void
+    callback: (event: StreamEvent<TEventData>) => void
   ): StreamSubscription {
-    const poller = this.getEventPoller();
     const key = `${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
+    const matchFn = (event: StreamEvent): boolean => {
+      if (filter.streamId && event.streamId !== filter.streamId) return false;
+      if (filter.sender && event.data.sender !== filter.sender) return false;
+      if (filter.recipient && event.data.recipient !== filter.recipient) return false;
+      return true;
+    };
 
     return poller.subscribe(key, {
       filter: (event) => {
@@ -1291,8 +1366,24 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
           return false;
         return true;
       },
-      callback,
+      callback: (event) => callback(event as StreamEvent<TEventData>),
     });
+    if (this.pool) {
+      const { poller, release } = this.pool.acquirePoller();
+      this.poolReleases.set(key, release);
+      const sub = poller.subscribe(key, { filter: matchFn, callback });
+      return {
+        unsubscribe: () => {
+          sub.unsubscribe();
+          const rel = this.poolReleases.get(key);
+          rel?.();
+          this.poolReleases.delete(key);
+        },
+      };
+    }
+
+    const poller = this.getEventPoller();
+    return poller.subscribe(key, { filter: matchFn, callback });
   }
 
   /**
@@ -1312,7 +1403,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    */
   on(
     eventType: StreamEventType,
-    callback: (event: StreamEvent) => void
+    callback: (event: StreamEvent<TEventData>) => void
   ): StreamSubscription {
     return this.subscribeEvents({}, (event) => {
       if (event.type === eventType) {
@@ -1327,7 +1418,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamCreated(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamCreated(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamCreated", callback);
   }
 
@@ -1337,7 +1428,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamWithdrawn(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamWithdrawn(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamWithdrawn", callback);
   }
 
@@ -1347,7 +1438,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamToppedUp(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamToppedUp(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamToppedUp", callback);
   }
 
@@ -1357,7 +1448,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamCancelled(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamCancelled(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamCancelled", callback);
   }
 
@@ -1367,7 +1458,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamTransferred(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamTransferred(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamTransferred", callback);
   }
 
@@ -1377,7 +1468,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamPaused(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamPaused(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamPaused", callback);
   }
 
@@ -1387,7 +1478,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
    * @param callback - Invoked with each matching event.
    * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
    */
-  onStreamResumed(callback: (event: StreamEvent) => void): StreamSubscription {
+  onStreamResumed(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on("StreamResumed", callback);
   }
 
@@ -1638,6 +1729,39 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
     };
   }
 
+  /**
+   * Creates a new stream with the same parameters as an existing one.
+   * The new stream gets a fresh `startTime = now`. Any field can be
+   * overridden before submission via `overrides`.
+   *
+   * @param streamId - ID of the source stream to clone.
+   * @param overrides - Optional field overrides applied before submission.
+   * @param signal - Optional `AbortSignal` to cancel in-flight transaction polling.
+   * @param options - Optional write options.
+   * @returns `{ streamId, txHash }` for the newly created stream.
+   * @throws {StreamNotFoundError} If the source stream does not exist.
+   */
+  async cloneStream(
+    streamId: string,
+    overrides?: CloneStreamOverrides,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ streamId: string; txHash: string }> {
+    const source = await this.getStream(streamId);
+    const durationSeconds = source.endTime - source.startTime;
+
+    const params: CreateStreamParams = {
+      recipient: source.recipient,
+      token: source.token,
+      amount: source.deposit,
+      durationSeconds,
+      autoRenew: source.autoRenew,
+      ...overrides,
+    };
+
+    return this.createStream(params, signal, options);
+  }
+
   // ── Bulk operations ───────────────────────────────────────────────────────
 
   /**
@@ -1818,11 +1942,12 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
 
     // Seed lastRecipient on first tick
     void poll();
-    const timer = setInterval(poll, intervalMs);
+    let timer: ReturnType<typeof setInterval> | null = null;
+ timer = setInterval(poll, intervalMs);
 
     return () => {
       stopped = true;
-      clearInterval(timer);
+      if (timer) { clearInterval(timer); timer = null; }
     };
   }
 
@@ -1830,6 +1955,7 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
 
   /**
    * Returns current connection pool statistics.
+   * When a pool is configured via `poolSize`, returns live slot counts.
    */
   getConnectionStats(): {
     maxConnections: number;
@@ -1837,12 +1963,104 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
     idle: number;
     reused: number;
   } {
+    if (this.pool) {
+      const stats = this.pool.getStats();
+      return {
+        maxConnections: stats.total,
+        active: stats.active,
+        idle: stats.idle,
+        reused: 0,
+      };
+    }
     return {
       maxConnections: this.connectionPool.maxConnections,
       active: this.connectionPool.active,
       idle: this.connectionPool.idle,
       reused: this.connectionPool.reused,
     };
+  }
+
+  /**
+   * Registers a listener for pool-level events (pool:full, pool:reconnect, pool:drain).
+   * Only fires when `poolSize` is configured. Returns an unsubscribe function.
+   * Issue #179.
+   */
+  onPoolEvent(listener: (event: PoolEvent) => void): () => void {
+    if (!this.pool) return () => {};
+    return this.pool.on(listener);
+  }
+
+  /**
+   * Registers a callback that fires before each reconnect attempt, with the attempt
+   * number and computed backoff delay. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onReconnecting(cb: (attempt: number, delayMs: number) => void): () => void {
+    this.reconnectingCbs.add(cb);
+    return () => this.reconnectingCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires once the event poller successfully reconnects
+   * after one or more failures. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onReconnected(cb: () => void): () => void {
+    this.reconnectedCbs.add(cb);
+    return () => this.reconnectedCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires when the event poller exhausts all retry
+   * attempts. Polling stops at this point. Returns an unsubscribe function.
+   * Issue #186.
+   */
+  onDisconnected(cb: (error: unknown) => void): () => void {
+    this.disconnectedCbs.add(cb);
+    return () => this.disconnectedCbs.delete(cb);
+  }
+
+  // ── Issue #187: Event batching ────────────────────────────────────────────
+
+  /**
+   * Subscribes to batched stream events. The callback receives an array of matching
+   * events flushed when `batchingOptions.maxBatchSize` is reached or
+   * `batchingOptions.maxBatchDelayMs` elapses — whichever comes first.
+   *
+   * @param filter - Same filter criteria as `subscribeEvents`.
+   * @param callback - Called with a non-empty array of matching events per flush.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop listening.
+   *
+   * @example
+   * ```ts
+   * const sub = client.subscribeBatchEvents({ streamId: "42" }, (events) => {
+   *   console.log(`Received batch of ${events.length} events`);
+   * });
+   * ```
+   */
+  subscribeBatchEvents(
+    filter: StreamEventFilter,
+    callback: (events: StreamEvent[]) => void
+  ): StreamSubscription {
+    const poller = this.getEventPoller();
+    const key = `batch:${filter.streamId ?? "*"}:${filter.sender ?? "*"}:${filter.recipient ?? "*"}:${Date.now()}`;
+    return poller.subscribeBatch(key, {
+      filter: (event) => {
+        if (filter.streamId && event.streamId !== filter.streamId) return false;
+        if (filter.sender && event.data.sender !== filter.sender) return false;
+        if (filter.recipient && event.data.recipient !== filter.recipient) return false;
+        return true;
+      },
+      callback,
+    });
+  }
+
+  /**
+   * Live SDK metrics. Currently exposes batch-delivery statistics.
+   * Issue #187.
+   */
+  get metrics(): { batch: import("./types.js").BatchMetrics } {
+    return { batch: this.getEventPoller().getBatchMetrics() };
   }
   // ── Issue #167: Stream expiration hooks ──────────────────────────────────
 
@@ -1970,3 +2188,8 @@ throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
 
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };
+
+// Fix #157: batchWithdraw skipped streams with zero claimable
+// Now returns skipped: true with reason for zero-balance streams
+
+// Fix #157: batchWithdraw now returns skipped entry for zero claimable streams
