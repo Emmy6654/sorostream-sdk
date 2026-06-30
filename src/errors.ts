@@ -114,3 +114,16 @@ export class InsufficientAllowanceError extends SoroStreamError {
     this.current = current;
   }
 }
+
+export class NetworkUnavailableError extends SoroStreamError {
+readonly endpoint: string;
+
+constructor(endpoint: string) {
+super(
+`Network unavailable: unable to reach RPC endpoint "${endpoint}". ` +
+`Check your internet connection or try again later.`
+);
+this.name = "NetworkUnavailableError";
+this.endpoint = endpoint;
+}
+}

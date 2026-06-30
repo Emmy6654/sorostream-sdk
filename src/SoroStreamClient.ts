@@ -38,6 +38,7 @@ import {
   InsufficientAllowanceError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
+import { NetworkUnavailableError } from "./errors.js";
 import type {
   BatchCancelResult,
   BatchWithdrawResult,
@@ -179,6 +180,25 @@ export type SimulateOnlyResult = {
  * ```
  */
 export class SoroStreamClient {
+private _healthCache: { healthy: boolean; ts: number } | null = null;
+
+async checkNetworkHealth(): Promise<boolean> {
+if (this._healthCache && Date.now() - this._healthCache.ts < 10000) {
+return this._healthCache.healthy;
+}
+try {
+const result = await Promise.race([
+this.rpc.getHealth(),
+new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+]);
+this._healthCache = { healthy: true, ts: Date.now() };
+return true;
+} catch (e) {
+this._healthCache = { healthy: false, ts: Date.now() };
+throw new NetworkUnavailableError("Soroban RPC is unavailable or unhealthy");
+}
+}
+
   private server: rpc.Server;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
