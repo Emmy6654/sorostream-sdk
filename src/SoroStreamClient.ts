@@ -1798,11 +1798,12 @@ export class SoroStreamClient {
 
     // Seed lastRecipient on first tick
     void poll();
-    const timer = setInterval(poll, intervalMs);
+    let timer: ReturnType<typeof setInterval> | null = null;
+ timer = setInterval(poll, intervalMs);
 
     return () => {
       stopped = true;
-      clearInterval(timer);
+      if (timer) { clearInterval(timer); timer = null; }
     };
   }
 
