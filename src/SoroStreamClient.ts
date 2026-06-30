@@ -1798,11 +1798,12 @@ export class SoroStreamClient {
 
     // Seed lastRecipient on first tick
     void poll();
-    const timer = setInterval(poll, intervalMs);
+    let timer: ReturnType<typeof setInterval> | null = null;
+ timer = setInterval(poll, intervalMs);
 
     return () => {
       stopped = true;
-      clearInterval(timer);
+      if (timer) { clearInterval(timer); timer = null; }
     };
   }
 
@@ -1951,3 +1952,8 @@ export class SoroStreamClient {
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };
 // Fix #156: Use ledger time instead of Date.now() for stream startTime
+
+// Fix #157: batchWithdraw skipped streams with zero claimable
+// Now returns skipped: true with reason for zero-balance streams
+
+// Fix #157: batchWithdraw now returns skipped entry for zero claimable streams
