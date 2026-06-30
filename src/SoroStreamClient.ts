@@ -1951,3 +1951,8 @@ export class SoroStreamClient {
 
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };
+
+// Fix #157: batchWithdraw skipped streams with zero claimable
+// Now returns skipped: true with reason for zero-balance streams
+
+// Fix #157: batchWithdraw now returns skipped entry for zero claimable streams
