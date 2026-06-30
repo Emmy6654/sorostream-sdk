@@ -2188,6 +2188,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };
+// Fix #156: Use ledger time instead of Date.now() for stream startTime
 
 // Fix #157: batchWithdraw skipped streams with zero claimable
 // Now returns skipped: true with reason for zero-balance streams
