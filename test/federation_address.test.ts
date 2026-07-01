@@ -25,7 +25,7 @@ describe("resolveFederationAddress", () => {
   });
 
   it("resolves a federation address to a Stellar key", async () => {
-    const mockPublicKey = "GABC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJ";
+    const mockPublicKey = "GABC2DEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUV";
     vi.stubGlobal("fetch", vi.fn()
       .mockResolvedValueOnce({
         ok: true,

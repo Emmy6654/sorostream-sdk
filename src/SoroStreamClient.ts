@@ -13,7 +13,6 @@ import {
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress } from "./utils.js";
-import { isValidStellarAddress } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 
@@ -42,7 +41,6 @@ import {
   FederationResolutionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
-import { NetworkUnavailableError } from "./errors.js";
 import type {
   BatchCancelResult,
   BatchWithdrawResult,
@@ -1358,20 +1356,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return true;
     };
 
-    return poller.subscribe(key, {
-      filter: (event) => {
-        if (filter.streamId && event.streamId !== filter.streamId) return false;
-        if (filter.sender && event.data.sender !== filter.sender) return false;
-        if (filter.recipient && event.data.recipient !== filter.recipient)
-          return false;
-        return true;
-      },
-      callback: (event) => callback(event as StreamEvent<TEventData>),
-    });
     if (this.pool) {
       const { poller, release } = this.pool.acquirePoller();
       this.poolReleases.set(key, release);
-      const sub = poller.subscribe(key, { filter: matchFn, callback });
+      const sub = poller.subscribe(key, {
+        filter: matchFn,
+        callback: (event) => callback(event as StreamEvent<TEventData>),
+      });
       return {
         unsubscribe: () => {
           sub.unsubscribe();
@@ -1383,7 +1374,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const poller = this.getEventPoller();
-    return poller.subscribe(key, { filter: matchFn, callback });
+    return poller.subscribe(key, {
+      filter: matchFn,
+      callback: (event) => callback(event as StreamEvent<TEventData>),
+    });
   }
 
   /**

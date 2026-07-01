@@ -83,8 +83,9 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
       startTime + cliff + elapsedAfterCliff
     );
 
-    // Expected: flowRate Ã— elapsedAfterCliff = 100_000_000n Ã— 1_000_000n = 10^14
-    const expected = 100_000_000_000_000n;
+    // Expected: flowRate × (cliff + elapsedAfterCliff) — cliff time is included in the vested amount
+    // because the vesting model counts from startTime, not from cliffEnd.
+    const expected = 100_000_000n * BigInt(cliff + elapsedAfterCliff);
     expect(result.effectiveClaimable).toBe(expected);
     expect(result.inCliff).toBe(false);
   });

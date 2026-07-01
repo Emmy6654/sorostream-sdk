@@ -12,24 +12,24 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js"
     },
     "./wallets": {
+      "types": "./dist/wallets.d.ts",
       "import": "./dist/wallets.mjs",
-      "require": "./dist/wallets.js",
-      "types": "./dist/wallets.d.ts"
+      "require": "./dist/wallets.js"
     },
     "./mock": {
+      "types": "./dist/mock.d.ts",
       "import": "./dist/mock.mjs",
-      "require": "./dist/mock.js",
-      "types": "./dist/mock.d.ts"
+      "require": "./dist/mock.js"
     },
     "./testing": {
+      "types": "./dist/testing.d.ts",
       "import": "./dist/testing.mjs",
-      "require": "./dist/testing.js",
-      "types": "./dist/testing.d.ts"
+      "require": "./dist/testing.js"
     }
   },
   "scripts": {
@@ -62,8 +62,7 @@
     "@types/node": "^22.0.0",
     "fast-check": "^3.22.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.0.0",
-    "typedoc": "^0.27.0",
+    "typedoc": "^0.28.0",
     "typescript": "^5.9.3",
     "vitest": "^2.0.0"
   },

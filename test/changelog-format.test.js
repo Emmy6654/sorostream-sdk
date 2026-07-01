@@ -1,5 +1,7 @@
-const { describe, expect, it } = require('vitest');
+import { describe, expect, it } from 'vitest';
+import { createRequire } from 'node:module';
 
+const require = createRequire(import.meta.url);
 const { collectChangelogValidationErrors, validateChangelogLine } = require('../scripts/check-changelog-format.js');
 
 describe('changelog format validation', () => {

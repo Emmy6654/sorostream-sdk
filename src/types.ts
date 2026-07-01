@@ -290,7 +290,23 @@ export interface WatchClaimableOptions {
 }
 
 
-/** Wallet adapter interface. Implement this to support custom signing backends. */
+/**
+ * Wallet adapter interface. Implement this to support custom signing backends.
+ *
+ * @example
+ * ```ts
+ * const serverKeypairAdapter: WalletAdapter = {
+ *   async getPublicKey() { return Keypair.fromSecret(process.env.SECRET!).publicKey(); },
+ *   async signTransaction(xdr, network) {
+ *     const kp = Keypair.fromSecret(process.env.SECRET!);
+ *     const tx = TransactionBuilder.fromXDR(xdr, Networks[network.toUpperCase()]);
+ *     tx.sign(kp);
+ *     return tx.toEnvelope().toXDR("base64");
+ *   },
+ *   async isConnected() { return true; },
+ * };
+ * ```
+ */
 export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
