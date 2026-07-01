@@ -18,7 +18,7 @@ jobs:
         if: matrix.runtime == 'node'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Run Node Tests
@@ -41,7 +41,7 @@ jobs:
         run: |
           bun install
           bun run lint
-          bun test
+          bun run test
 
       - name: Setup Deno
         if: matrix.runtime == 'deno'

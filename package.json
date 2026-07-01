@@ -58,7 +58,6 @@
     "@stellar/stellar-sdk": "^13.0.0"
   },
   "devDependencies": {
-    "@opentelemetry/api": "^1.9.1",
     "@types/node": "^22.0.0",
     "fast-check": "^3.22.0",
     "tsup": "^8.0.0",
