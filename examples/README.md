@@ -18,6 +18,7 @@ export USDC_TOKEN="G..."            # USDC SAC token address
 | [linear-vesting.ts](./linear-vesting.ts) | Streams tokens at a constant rate from day 0 with no cliff |
 | [cliff-linear-vesting.ts](./cliff-linear-vesting.ts) | Holds tokens for a cliff period then releases them linearly |
 | [milestone-vesting.ts](./milestone-vesting.ts) | Releases fixed tranches at scheduled dates via separate streams |
+| [logging-middleware.ts](./logging-middleware.ts) | Demonstrates the plugin/middleware system with a logging plugin |
 
 ## Running
 
