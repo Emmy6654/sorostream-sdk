@@ -976,6 +976,40 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           failures.push({ id, error: err instanceof Error ? err : new Error(String(err)) });
         }
       }
+      const skipped: SkippedStream[] = [];
+      const activeIds: string[] = [];
+
+      for (const id of chunk) {
+        const claimable = await this.getClaimable(id);
+        if (claimable === 0n) {
+          skipped.push({ id, reason: "zero_claimable" });
+        } else {
+          activeIds.push(id);
+        }
+      }
+
+      if (activeIds.length === 0) {
+        results.push({
+          txHash: "",
+          streamIds: [],
+          amounts: [],
+          skipped,
+        });
+        continue;
+      }
+
+      const operations = activeIds.map((id) =>
+        this.encoder.withdraw(id, recipient)
+      );
+
+      const amounts: string[] = [];
+      for (const id of activeIds) {
+        const claimable = await this.getClaimable(id);
+        amounts.push(claimable.toString());
+      }
+
+      const txHash = await this.executeBatch(operations);
+      results.push({ txHash, streamIds: activeIds, amounts, skipped });
     }
 
     return { successes, failures };
@@ -1671,7 +1705,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
     if (!returnVal) return 0n;
-    return BigInt(scValToNative(returnVal) as number);
+    const raw = BigInt(scValToNative(returnVal) as number);
+    if (raw < 0n) {
+      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+      return 0n;
+    }
+    return raw;
   }
 
   /**
