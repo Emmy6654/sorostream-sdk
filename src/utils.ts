@@ -63,7 +63,7 @@ export function formatUSDC(
   const numericValue = Number(whole) + Number(remainder) / Number(factor);
 
   return new Intl.NumberFormat(options.locale, {
-    minimumFractionDigits: options.minimumFractionDigits,
+    minimumFractionDigits: options.minimumFractionDigits ?? 2,
     maximumFractionDigits: options.maximumFractionDigits ?? decimals,
     useGrouping: options.useGrouping ?? true,
   }).format(numericValue);

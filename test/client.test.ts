@@ -1025,6 +1025,7 @@ describe("formatUSDC locale-aware", () => {
   it("trims to maximumFractionDigits", () => {
     const result = formatUSDC(1_005_000_000n, 7, {
       locale: "en-US",
+      minimumFractionDigits: 0,
       maximumFractionDigits: 2,
     });
     // 100.5000000 → "100.5" (max 2 decimal digits, trailing zeros removed)
@@ -1044,6 +1045,7 @@ describe("formatUSDC locale-aware", () => {
     const result = formatUSDC(12_340_000_000n, 7, {
       locale: "en-US",
       useGrouping: false,
+      minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     });
     expect(result).not.toContain(",");
@@ -1054,10 +1056,47 @@ describe("formatUSDC locale-aware", () => {
     const result = formatUSDC(12_340_000_000n, 7, {
       locale: "de-DE",
       useGrouping: true,
+      minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     });
     // de-DE uses period as thousands separator
     expect(result).toContain(".");
+  });
+
+  it("formats with en-US locale and default fraction digits", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "en-US" });
+    expect(result).toBe("100.00");
+  });
+
+  it("formats with de-DE locale (comma decimal separator)", () => {
+    const result = formatUSDC(10_500_000n, 7, { locale: "de-DE" });
+    expect(result).toBe("1,05");
+  });
+
+  it("formats with ja-JP locale", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "ja-JP" });
+    expect(result).toBe("100.00");
+  });
+
+  it("formats with ar-SA locale (Arabic-Indic digits)", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "ar-SA" });
+    expect(typeof result).toBe("string");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).toMatch(/[\.٫]/);
+  });
+
+  it("defaults minimum fraction digits to 2 with locale", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "en-US" });
+    expect(result).toBe("100.00");
+  });
+
+  it("respects explicit minimumFractionDigits override", () => {
+    const result = formatUSDC(1_000_000_000n, 7, {
+      locale: "en-US",
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 7,
+    });
+    expect(result).toBe("100.0000");
   });
 });
 
