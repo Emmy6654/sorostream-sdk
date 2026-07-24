@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, nativeToScVal } from "@stellar/stellar-sdk";
 
 // Pre-generated valid Stellar addresses for tests that pass addresses to contract calls.
 const TEST_KEYPAIR = Keypair.random();
@@ -401,6 +401,44 @@ describe("watchClaimable", () => {
     vi.advanceTimersByTime(5000);
     expect(onTick).not.toHaveBeenCalled();
   });
+
+  it("does not emit late-arriving reconcile result after unsubscribe", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream: Stream = {
+      id: "0",
+      sender: "GSENDER",
+      recipient: "GRECIPIENT",
+      token: "GTOKEN",
+      deposit: 100_000n,
+      flowRate: 100n,
+      startTime: now - 100,
+      endTime: now + 900,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    let resolveReconcile: (v: bigint) => void = () => {};
+    const reconcile = vi.fn().mockReturnValue(new Promise<bigint>((r) => { resolveReconcile = r; }));
+
+    const onTick = vi.fn();
+    const unsubscribe = watchClaimable(stream, reconcile, onTick, {
+      tickMs: 10000,
+      reconcileMs: 200,
+    });
+
+    onTick.mockClear();
+
+    vi.advanceTimersByTime(200);
+
+    unsubscribe();
+
+    resolveReconcile(9999n);
+
+    await vi.waitFor(() => {});
+
+    expect(onTick).not.toHaveBeenCalled();
+  });
 });
 
 // ── Fee estimation input validation ───────────────────────────────────────────
@@ -696,6 +734,36 @@ describe("SoroStreamClient batchWithdraw", () => {
     expect(results).toHaveLength(4);
     expect(results[0]!.streamIds).toHaveLength(3);
     expect(results[3]!.streamIds).toHaveLength(1);
+  });
+
+  it("skips zero-claimable streams and reports them in results", async () => {
+    vi.spyOn(client, "getClaimable")
+      .mockResolvedValueOnce(0n)
+      .mockResolvedValueOnce(500n)
+      .mockResolvedValueOnce(0n);
+
+    const results = await client.batchWithdraw(["1", "2", "3"], 8);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.streamIds).toEqual(["2"]);
+    expect(results[0]!.amounts).toEqual(["500"]);
+    expect(results[0]!.skipped).toHaveLength(2);
+    expect(results[0]!.skipped).toEqual([
+      { id: "1", reason: "zero_claimable" },
+      { id: "3", reason: "zero_claimable" },
+    ]);
+  });
+
+  it("returns empty batch result when all streams have zero claimable", async () => {
+    vi.spyOn(client, "getClaimable").mockResolvedValue(0n);
+
+    const results = await client.batchWithdraw(["1", "2"], 8);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.txHash).toBe("");
+    expect(results[0]!.streamIds).toEqual([]);
+    expect(results[0]!.amounts).toEqual([]);
+    expect(results[0]!.skipped).toHaveLength(2);
   });
 });
 
@@ -1025,6 +1093,7 @@ describe("formatUSDC locale-aware", () => {
   it("trims to maximumFractionDigits", () => {
     const result = formatUSDC(1_005_000_000n, 7, {
       locale: "en-US",
+      minimumFractionDigits: 0,
       maximumFractionDigits: 2,
     });
     // 100.5000000 → "100.5" (max 2 decimal digits, trailing zeros removed)
@@ -1044,6 +1113,7 @@ describe("formatUSDC locale-aware", () => {
     const result = formatUSDC(12_340_000_000n, 7, {
       locale: "en-US",
       useGrouping: false,
+      minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     });
     expect(result).not.toContain(",");
@@ -1054,10 +1124,47 @@ describe("formatUSDC locale-aware", () => {
     const result = formatUSDC(12_340_000_000n, 7, {
       locale: "de-DE",
       useGrouping: true,
+      minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     });
     // de-DE uses period as thousands separator
     expect(result).toContain(".");
+  });
+
+  it("formats with en-US locale and default fraction digits", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "en-US" });
+    expect(result).toBe("100.00");
+  });
+
+  it("formats with de-DE locale (comma decimal separator)", () => {
+    const result = formatUSDC(10_500_000n, 7, { locale: "de-DE" });
+    expect(result).toBe("1,05");
+  });
+
+  it("formats with ja-JP locale", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "ja-JP" });
+    expect(result).toBe("100.00");
+  });
+
+  it("formats with ar-SA locale (Arabic-Indic digits)", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "ar-SA" });
+    expect(typeof result).toBe("string");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).toMatch(/[\.٫]/);
+  });
+
+  it("defaults minimum fraction digits to 2 with locale", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "en-US" });
+    expect(result).toBe("100.00");
+  });
+
+  it("respects explicit minimumFractionDigits override", () => {
+    const result = formatUSDC(1_000_000_000n, 7, {
+      locale: "en-US",
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 7,
+    });
+    expect(result).toBe("100.0000");
   });
 });
 
@@ -1470,6 +1577,18 @@ describe("getClaimable stream-not-found vs RPC error", () => {
       error: "contract error: stream not found",
       id: "1",
       latestLedger: 100,
+    });
+
+    const result = await client.getClaimable("99");
+    expect(result).toBe(0n);
+  });
+
+  it("clamps negative claimable to 0n", async () => {
+    const retval = nativeToScVal(-1n, { type: "i128" });
+    vi.spyOn(client as any, "simulateOp").mockResolvedValue({
+      result: { retval },
+      id: "1",
+      latestLedger: 200,
     });
 
     const result = await client.getClaimable("99");
