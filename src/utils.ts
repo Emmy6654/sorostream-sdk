@@ -1,4 +1,4 @@
-import { SoroStreamError, FederationResolutionError } from "./errors.js";
+import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from "./errors.js";
 import type {
   PriceFeedAdapter,
   Stream,
@@ -478,6 +478,7 @@ export function watchClaimable(
   let baseTime = Date.now();
   let lastEmitted: bigint | null = null;
   let stopped = false;
+  let lastNetworkVersion = options?.getNetworkVersion?.();
 
   function emit() {
     if (stopped) return;
@@ -507,10 +508,33 @@ export function watchClaimable(
   lastEmitted = baseValue;
   onTick(baseValue);
 
-  const tickTimer = setInterval(emit, tickMs);
+  let tickTimer = setInterval(emit, tickMs);
+  let reconcileTimer: ReturnType<typeof setInterval>;
 
-  const reconcileTimer = setInterval(async () => {
+  function restartPolling() {
+    clearInterval(tickTimer);
+    clearInterval(reconcileTimer);
+    stopWs?.();
+    baseValue = claimableNow(stream);
+    baseTime = Date.now();
+    lastEmitted = null;
+    tickTimer = setInterval(emit, tickMs);
+    reconcileTimer = setInterval(reconcileTick, reconcileMs);
+    emit();
+  }
+
+  async function reconcileTick() {
     if (stopped) return;
+
+    // Issue #228: detect network switch mid-session and restart polling
+    const currentVersion = options?.getNetworkVersion?.();
+    if (options?.getNetworkVersion && currentVersion !== lastNetworkVersion) {
+      lastNetworkVersion = currentVersion;
+      options.onNetworkChanged?.();
+      restartPolling();
+      return;
+    }
+
     try {
       const actual = await reconcile();
       baseValue = actual;
@@ -519,7 +543,9 @@ export function watchClaimable(
     } catch {
       // swallow — keep interpolating from last known value
     }
-  }, reconcileMs);
+  }
+
+  reconcileTimer = setInterval(reconcileTick, reconcileMs);
 
   // Optional WebSocket subscription for real-time on-chain updates
   let stopWs: (() => void) | null = null;
@@ -1014,3 +1040,45 @@ export function jsonStringifyStream(obj: unknown, space?: string | number): stri
 }
 
 export const jsonStringify = jsonStringifyStream;
+
+// ── Issue #226: String field length validation ────────────────────────────────
+
+/**
+ * Maximum byte length limits for string fields passed to the contract.
+ * Keys match the field names used in `CreateStreamParams` and related types.
+ *
+ * @example
+ * ```ts
+ * import { STRING_FIELD_LIMITS } from "@sorostream/sdk";
+ * const limit = STRING_FIELD_LIMITS.recipient; // 64
+ * ```
+ */
+export const STRING_FIELD_LIMITS: Readonly<Record<string, number>> = {
+  recipient: 64,
+  token: 64,
+  metadataUri: 128,
+  description: 256,
+};
+
+/**
+ * Validates that a string field does not exceed its allowed byte length.
+ * Throws {@link SoroStreamValidationError} when the limit is exceeded.
+ *
+ * @param field - Field name (must be a key in `STRING_FIELD_LIMITS`).
+ * @param value - The string value to validate.
+ * @throws {SoroStreamValidationError} When the byte length exceeds the limit.
+ *
+ * @example
+ * ```ts
+ * validateStringLength("recipient", params.recipient);
+ * validateStringLength("metadataUri", metadataUri); // 128 byte limit
+ * ```
+ */
+export function validateStringLength(field: string, value: string): void {
+  const limit = STRING_FIELD_LIMITS[field];
+  if (limit === undefined) return; // no configured limit — pass through
+  const byteLength = new TextEncoder().encode(value).byteLength;
+  if (byteLength > limit) {
+    throw new SoroStreamValidationError(field, byteLength, limit);
+  }
+}

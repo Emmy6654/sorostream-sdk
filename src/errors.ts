@@ -131,3 +131,22 @@ export class FederationResolutionError extends SoroStreamError {
     this.name = "FederationResolutionError";
   }
 }
+
+export class SoroStreamValidationError extends SoroStreamError {
+  /** Name of the field that failed validation. */
+  readonly field: string;
+  /** Actual length of the value in bytes. */
+  readonly actualLength: number;
+  /** Maximum allowed length in bytes. */
+  readonly maxLength: number;
+
+  constructor(field: string, actualLength: number, maxLength: number) {
+    super(
+      `Field "${field}" exceeded maximum length: ${actualLength} bytes (max ${maxLength})`
+    );
+    this.name = "SoroStreamValidationError";
+    this.field = field;
+    this.actualLength = actualLength;
+    this.maxLength = maxLength;
+  }
+}

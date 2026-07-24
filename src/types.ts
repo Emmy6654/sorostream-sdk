@@ -287,6 +287,20 @@ export interface WatchClaimableOptions {
    * Issue #188.
    */
   compression?: boolean | CompressionOptions;
+  /**
+   * Returns a monotonically increasing version number that increments
+   * each time the client switches networks. When the version changes
+   * mid-session, the watcher cancels its current polling interval and
+   * restarts against the new RPC endpoint.
+   */
+  getNetworkVersion?: () => number;
+  /**
+   * Called when a network switch is detected during reconciliation.
+   * The watcher cancels its current polling and restarts with a fresh
+   * base value. The callback receives an `outdatedData` signal so
+   * subscribers know values are being refreshed.
+   */
+  onNetworkChanged?: () => void;
 }
 
 

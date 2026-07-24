@@ -42,6 +42,8 @@ export {
   streamToJSON,
   jsonStringifyStream,
   jsonStringify,
+  validateStringLength,
+  STRING_FIELD_LIMITS,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -69,6 +71,7 @@ export {
   BulkCreatePartialError,
   InsufficientAllowanceError,
   FederationResolutionError,
+  SoroStreamValidationError,
 } from "./errors.js";
 export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
