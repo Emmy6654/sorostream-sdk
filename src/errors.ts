@@ -150,3 +150,41 @@ export class NonceNotSupportedError extends SoroStreamError {
     this.name = "NonceNotSupportedError";
   }
 }
+
+export interface RetryAttempt {
+  attempt: number;
+  timestamp: number;
+  error: unknown;
+}
+
+/**
+ * Thrown by {@link withRetry} when all retry attempts are exhausted.
+ *
+ * Includes the original error from the last attempt, the total number of
+ * attempts made, a timestamped log of every attempt, and (when available)
+ * the final RPC response body for debugging.
+ */
+export class SoroStreamRetryExhaustedError extends SoroStreamError {
+  readonly originalError: unknown;
+  readonly attemptCount: number;
+  readonly attempts: RetryAttempt[];
+  readonly finalResponseBody: string | null;
+
+  constructor(
+    originalError: unknown,
+    attemptCount: number,
+    attempts: RetryAttempt[],
+    finalResponseBody: string | null
+  ) {
+    const lastErrMsg =
+      originalError instanceof Error ? originalError.message : String(originalError);
+    super(
+      `RPC request failed after ${attemptCount} attempt(s): ${lastErrMsg}`
+    );
+    this.name = "SoroStreamRetryExhaustedError";
+    this.originalError = originalError;
+    this.attemptCount = attemptCount;
+    this.attempts = attempts;
+    this.finalResponseBody = finalResponseBody;
+  }
+}
