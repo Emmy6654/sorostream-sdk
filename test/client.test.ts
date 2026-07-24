@@ -697,6 +697,36 @@ describe("SoroStreamClient batchWithdraw", () => {
     expect(results[0]!.streamIds).toHaveLength(3);
     expect(results[3]!.streamIds).toHaveLength(1);
   });
+
+  it("skips zero-claimable streams and reports them in results", async () => {
+    vi.spyOn(client, "getClaimable")
+      .mockResolvedValueOnce(0n)
+      .mockResolvedValueOnce(500n)
+      .mockResolvedValueOnce(0n);
+
+    const results = await client.batchWithdraw(["1", "2", "3"], 8);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.streamIds).toEqual(["2"]);
+    expect(results[0]!.amounts).toEqual(["500"]);
+    expect(results[0]!.skipped).toHaveLength(2);
+    expect(results[0]!.skipped).toEqual([
+      { id: "1", reason: "zero_claimable" },
+      { id: "3", reason: "zero_claimable" },
+    ]);
+  });
+
+  it("returns empty batch result when all streams have zero claimable", async () => {
+    vi.spyOn(client, "getClaimable").mockResolvedValue(0n);
+
+    const results = await client.batchWithdraw(["1", "2"], 8);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.txHash).toBe("");
+    expect(results[0]!.streamIds).toEqual([]);
+    expect(results[0]!.amounts).toEqual([]);
+    expect(results[0]!.skipped).toHaveLength(2);
+  });
 });
 
 // ── bulkCreateStreams validation tests ────────────────────────────────────────

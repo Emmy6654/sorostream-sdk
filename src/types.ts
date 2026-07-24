@@ -246,11 +246,18 @@ export interface BulkCreateResult {
   batches: BulkCreateBatchResult[];
 }
 
+/** A stream that was skipped during a batch operation. */
+export interface SkippedStream {
+  id: string;
+  reason: string;
+}
+
 /** Result of one transaction within a batchWithdraw call. */
 export interface BatchWithdrawResult {
   txHash: string;
   streamIds: string[];
   amounts: string[];
+  skipped?: SkippedStream[];
 }
 
 /** Per-token aggregate of a set of streams. */
