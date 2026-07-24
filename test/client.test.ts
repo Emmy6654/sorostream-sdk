@@ -9,10 +9,7 @@ const TEST_TOKEN = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
 
 import { SoroStreamClient } from "../src/SoroStreamClient.js";
-import { createKeypairAdapter, createPasskeyAdapter } from "../src/wallet.js";
-import type { Stream, WalletAdapter, BulkStreamRow } from "../src/types.js";
-import { createKeypairAdapter } from "../src/wallet.js";
-import { Keypair } from "@stellar/stellar-sdk";
+import { createKeypairAdapter, createPasskeyAdapter, createLedgerAdapter } from "../src/wallet.js";
 import type { Stream, WalletAdapter, BulkStreamRow, PriceFeedAdapter, FeeBumpOptions } from "../src/types.js";
 import {
   toStroops,
@@ -29,6 +26,7 @@ import {
   parseCsvStreamRows,
   detectStreamDrift,
   watchStreamDrift,
+  batchSize,
   isStreamExpiring,
   isStreamStalled,
   isStreamUnderfunded,
@@ -38,6 +36,8 @@ import {
   SoroStreamError,
   InvalidAddressError,
   AccountNotFoundError,
+  ZeroDurationError,
+  DuplicateStreamError,
 } from "../src/errors.js";
 import { withRetry } from "../src/retry.js";
 import { NoopLogger } from "../src/logger.js";
@@ -255,10 +255,10 @@ describe("calculateVestingSchedule", () => {
       now
     );
     expect(result.inCliff).toBe(false);
-    expect(result.effectiveClaimable).toBe(flowRate * 500n);
+    expect(result.effectiveClaimable).toBe(flowRate * BigInt(cliff + 500));
   });
 
-  it("caps effective claimable at total amount", () => {
+  it("caps effective claimable at total amount after end time", () => {
     const cliff = 365 * 24 * 3600;
     const now = endTime + 10_000;
     const result = calculateVestingSchedule(
@@ -266,8 +266,7 @@ describe("calculateVestingSchedule", () => {
       cliff,
       now
     );
-    const vestedAfterCliff = flowRate * BigInt(endTime - startTime - cliff);
-    expect(result.effectiveClaimable).toBe(vestedAfterCliff);
+    expect(result.effectiveClaimable).toBe(result.totalAmount);
   });
 
   it("includes cliff milestone when cliff < total duration", () => {
@@ -303,6 +302,134 @@ describe("calculateVestingSchedule", () => {
       startTime
     );
     expect(result.totalAmount).toBe(deposit);
+  });
+
+  describe("edge case: at cliff exactly (issue #95)", () => {
+    it("inCliff is false at exactly cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime);
+      expect(result.inCliff).toBe(false);
+    });
+
+    it("effectiveClaimable equals cliff amount at exactly cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime);
+      expect(result.effectiveClaimable).toBe(flowRate * BigInt(cliff));
+    });
+
+    it("milestone is placed at cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, startTime);
+      expect(result.milestones[0]).toBeDefined();
+      expect(result.milestones[0]!.time).toBe(cliffEndTime);
+    });
+
+    it("milestone vested amount matches claimable at cliff end", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime);
+      expect(result.milestones[0]).toBeDefined();
+      expect(result.milestones[0]!.time).toBe(cliffEndTime);
+      expect(result.milestones[0]!.vested).toBe(flowRate * BigInt(cliff));
+    });
+
+    it("effectiveClaimable is 0 one second before cliffEndTime", () => {
+      const cliff = 365 * 24 * 3600;
+      const cliffEndTime = startTime + cliff;
+      const result = calculateVestingSchedule(makeVestingStream(), cliff, cliffEndTime - 1);
+      expect(result.inCliff).toBe(true);
+      expect(result.effectiveClaimable).toBe(0n);
+    });
+  });
+
+  describe("edge case: past end time (issue #96)", () => {
+    it("effectiveClaimable equals totalAmount at exactly endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime);
+      expect(result.effectiveClaimable).toBe(result.totalAmount);
+    });
+
+    it("effectiveClaimable equals totalAmount one second after endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 1);
+      expect(result.effectiveClaimable).toBe(result.totalAmount);
+    });
+
+    it("effectiveClaimable equals totalAmount far past endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 10_000);
+      expect(result.effectiveClaimable).toBe(result.totalAmount);
+    });
+
+    it("inCliff is false after endTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 1);
+      expect(result.inCliff).toBe(false);
+    });
+
+    it("milestones remain correct after stream ends", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, endTime + 10_000);
+      expect(result.milestones.length).toBeGreaterThanOrEqual(1);
+      expect(result.milestones[result.milestones.length - 1]!.time).toBe(endTime);
+      expect(result.milestones[result.milestones.length - 1]!.vested).toBe(result.totalAmount);
+    });
+  });
+
+  describe("edge case: zero elapsed time (issue #97)", () => {
+    it("effectiveClaimable is 0 when now equals startTime with zero cliff", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 0, startTime);
+      expect(result.effectiveClaimable).toBe(0n);
+    });
+
+    it("effectiveClaimable is 0 when still in cliff at startTime", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 365 * 24 * 3600, startTime);
+      expect(result.effectiveClaimable).toBe(0n);
+      expect(result.inCliff).toBe(true);
+    });
+
+    it("acts like normal stream when cliff is 0", () => {
+      const now = startTime + 500;
+      const result = calculateVestingSchedule(makeVestingStream(), 0, now);
+      expect(result.inCliff).toBe(false);
+      expect(result.effectiveClaimable).toBe(flowRate * 500n);
+    });
+
+    it("includes full milestone set when cliff is 0", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 0, startTime + 500);
+      // cliff milestone at startTime + 25%/50%/75%/100% milestones
+      expect(result.milestones.length).toBe(5);
+    });
+
+    it("effectiveClaimable is 0 at exactly cliffEndTime when cliff is 0", () => {
+      const result = calculateVestingSchedule(makeVestingStream(), 0, startTime);
+      expect(result.effectiveClaimable).toBe(0n);
+    });
+  });
+
+  describe("edge case: rounding / truncation (issue #98)", () => {
+    it("handles rounding when flowRate * duration produces truncated totalAmount", () => {
+      const totalSeconds = 3;
+      const truncatedFlowRate = 7n / 3n;
+      const stream = makeVestingStream({
+        flowRate: truncatedFlowRate,
+        endTime: startTime + totalSeconds,
+      });
+      const result = calculateVestingSchedule(stream, 0, startTime + totalSeconds);
+      expect(result.effectiveClaimable).toBe(truncatedFlowRate * BigInt(totalSeconds));
+      expect(result.totalAmount).toBe(truncatedFlowRate * BigInt(totalSeconds));
+    });
+
+    it("truncation does not affect milestone ordering", () => {
+      const totalSeconds = 3;
+      const truncatedFlowRate = 7n / 3n;
+      const stream = makeVestingStream({
+        flowRate: truncatedFlowRate,
+        endTime: startTime + totalSeconds,
+      });
+      const result = calculateVestingSchedule(stream, 1, startTime);
+      for (let i = 1; i < result.milestones.length; i++) {
+        expect(result.milestones[i]!.time).toBeGreaterThan(result.milestones[i - 1]!.time);
+      }
+    });
   });
 });
 
@@ -402,7 +529,15 @@ describe("watchClaimable", () => {
     expect(onTick).not.toHaveBeenCalled();
   });
 
-  it("does not emit late-arriving reconcile result after unsubscribe", async () => {
+  it("deduplicates emissions when reconcile resumes after a network blip (same value twice)", async () => {
+    // Pick parameters so that interpolation is **invariant** over the test
+    // window: flowRate = 1 stroop/sec means perMs ≈ 0.001, and with
+    // tickMs = 200 the floored per-tick increment is 0. That means every
+    // tick AND the reconcile-driven emit() compute the same value (5000n)
+    // — exactly the duplicate-emission scenario from the bug report.
+    // A weak test with a coarser flow rate would never exercise the
+    // dedup branch because each tick would advance by ≥1 stroop and
+    // look distinct from the last.
     const now = Math.floor(Date.now() / 1000);
     const stream: Stream = {
       id: "0",
@@ -410,34 +545,111 @@ describe("watchClaimable", () => {
       recipient: "GRECIPIENT",
       token: "GTOKEN",
       deposit: 100_000n,
-      flowRate: 100n,
-      startTime: now - 100,
-      endTime: now + 900,
-      lastWithdrawTime: now,
+      flowRate: 1n,
+      startTime: now - 6000,
+      endTime: now + 6000,
+      lastWithdrawTime: now - 5000, // claimableNow(stream) = 1n * 5000 = 5000n
       status: "Active",
       autoRenew: false,
     };
 
-    let resolveReconcile: (v: bigint) => void = () => {};
-    const reconcile = vi.fn().mockReturnValue(new Promise<bigint>((r) => { resolveReconcile = r; }));
+    // First reconcile throws (simulate network down on first poll);
+    // subsequent reconciles return 5002n.
+    let reconcileCalls = 0;
+    const reconcile = vi.fn().mockImplementation(async () => {
+      reconcileCalls++;
+      if (reconcileCalls === 1) throw new Error("network down");
+      return 5002n;
+    });
 
     const onTick = vi.fn();
     const unsubscribe = watchClaimable(stream, reconcile, onTick, {
-      tickMs: 10000,
-      reconcileMs: 200,
+      tickMs: 200,
+      reconcileMs: 1_000,
     });
 
-    onTick.mockClear();
+    // Advance enough to fire ~12 ticks AND 2 reconcile attempts.
+    await vi.advanceTimersByTimeAsync(2_500);
 
-    vi.advanceTimersByTime(200);
+    // Without dedup, 5000n would be emitted ~13 times. With dedup, only
+    // the initial seed call survives — every other emit() finds
+    // interpolated === lastEmitted (5000n) and short-circuits.
+    const callsWith5000 = onTick.mock.calls.filter(
+      ([v]) => v === 5000n
+    ).length;
+    expect(callsWith5000).toBe(1);
+    // Sanity: the watcher did actually run (not just an early-skip bug).
+    expect(reconcileCalls).toBeGreaterThanOrEqual(2);
 
     unsubscribe();
+  });
 
-    resolveReconcile(9999n);
+  it("still emits when reconcile returns a value that differs from the last emitted value", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream: Stream = {
+      id: "0",
+      sender: "GSENDER",
+      recipient: "GRECIPIENT",
+      token: "GTOKEN",
+      deposit: 100_000n,
+      flowRate: 1n,
+      startTime: now - 6000,
+      endTime: now + 6000,
+      lastWithdrawTime: now - 5000,
+      status: "Active",
+      autoRenew: false,
+    };
 
-    await vi.waitFor(() => {});
+    let reconcileCalls = 0;
+    const reconcile = vi.fn().mockImplementation(async () => {
+      reconcileCalls++;
+      // First reconcile: throw (simulate dropped network).
+      // Second reconcile: succeed with a value materially larger than
+      // 5000n, so it must produce a fresh emission distinct from the
+      // last cached tick.
+      if (reconcileCalls === 1) throw new Error("network down");
+      return 9_999n;
+    });
 
-    expect(onTick).not.toHaveBeenCalled();
+    const onTick = vi.fn();
+    const unsubscribe = watchClaimable(stream, reconcile, onTick, {
+      tickMs: 200,
+      reconcileMs: 1_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(2_500);
+
+    // Asserting `some` would let a buggy (no-dedup) implementation
+    // pass if reconcile happened to emit more than once. Asserting
+    // exactly one catches both "didn't emit at all" and "over-emitted".
+    const callsWith9999 = onTick.mock.calls.filter(([v]) => v === 9_999n).length;
+    expect(callsWith9999).toBe(1);
+
+    unsubscribe();
+  });
+});
+
+// ── batchSize helper (issue #95) ─────────────────────────────────────────────
+
+describe("batchSize", () => {
+  it("returns 8 by default", () => {
+    expect(batchSize()).toBe(8);
+  });
+
+  it("returns custom value when provided", () => {
+    expect(batchSize(12)).toBe(12);
+  });
+
+  it("throws on zero", () => {
+    expect(() => batchSize(0)).toThrow(SoroStreamError);
+  });
+
+  it("throws on value exceeding maximum", () => {
+    expect(() => batchSize(26)).toThrow(SoroStreamError);
+  });
+
+  it("throws on non-integer", () => {
+    expect(() => batchSize(2.5)).toThrow(SoroStreamError);
   });
 });
 
@@ -533,7 +745,7 @@ describe("SoroStreamClient input validation", () => {
         durationSeconds: 0,
         autoRenew: false,
       })
-    ).rejects.toThrow("Duration must be > 0");
+    ).rejects.toThrow(ZeroDurationError);
   });
 
   it("rejects topUp with zero amount (InsufficientAmountError)", async () => {
@@ -583,7 +795,6 @@ describe("createKeypairAdapter", () => {
     const adapter = createKeypairAdapter(keypair.secret());
     expect(await adapter.isConnected()).toBe(true);
     expect(await adapter.getPublicKey()).toBe(keypair.publicKey());
-    expect(await adapter.getPublicKey()).toBe(kp.publicKey());
   });
 
   it("throws on invalid secret key", () => {

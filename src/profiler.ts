@@ -225,7 +225,7 @@ export class GasProfiler {
   private async simulateAndProfile(
     operationType: string,
     params: Record<string, unknown>,
-    buildOp: () => Promise<xdr.Operation>
+    buildOp: () => xdr.Operation | Promise<xdr.Operation>
   ): Promise<SimulationProfile> {
     try {
       const account = await this.server.getAccount(this.publicKey);

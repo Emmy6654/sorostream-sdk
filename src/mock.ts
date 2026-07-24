@@ -23,14 +23,19 @@
 import type {
   BatchCancelResult,
   CancelStreamParams,
+  CloneStreamOverrides,
   CreateStreamParams,
   PaginatedStreams,
   PaginationParams,
   SetOperatorParams,
+  SplitStreamParams,
+  SplitStreamResult,
   Stream,
   StreamEvent,
   StreamEventFilter,
+  StreamSnapshot,
   StreamSubscription,
+  SoroStreamPlugin,
   TopUpParams,
   TransferStreamParams,
   PauseStreamParams,
@@ -39,6 +44,7 @@ import type {
   OperatorTopUpParams,
   WithdrawParams,
 } from "./types.js";
+import { streamToJSON } from "./utils.js";
 
 let nextId = 1;
 
@@ -48,6 +54,8 @@ function nowSec(): number {
 
 function claimableAt(stream: Stream, atSec: number): bigint {
   if (stream.status === "Cancelled" || stream.status === "Completed") return 0n;
+  // Enforce lockUntil: no withdrawals until the lock expires
+  if (stream.lockUntil !== undefined && atSec < stream.lockUntil) return 0n;
   if (stream.status === "Paused") {
     const effectiveNow = Math.min(stream.pausedAt ?? atSec, stream.endTime);
     const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
@@ -117,6 +125,10 @@ export class MockSoroStreamClient {
       lastWithdrawTime: now,
       status: "Active",
       autoRenew: params.autoRenew,
+      ...(params.lockUntil !== undefined ? { lockUntil: params.lockUntil } : {}),
+      toJSON() {
+        return streamToJSON(this) as Record<string, unknown>;
+      },
     };
     this.streams.set(id, stream);
     this.emit({
@@ -322,6 +334,101 @@ export class MockSoroStreamClient {
     return { txHash: `mock-tx-op-topup-${params.streamId}` };
   }
 
+  async splitStream(params: SplitStreamParams): Promise<SplitStreamResult> {
+    const stream = this.streams.get(params.streamId);
+    if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
+    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (params.ratioNumerator <= 0 || params.ratioDenominator <= 0) {
+      throw new Error("Ratio must be positive");
+    }
+    if (params.ratioNumerator >= params.ratioDenominator) {
+      throw new Error("Ratio numerator must be less than denominator");
+    }
+
+    // Cancel the original stream
+    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+
+    const now = nowSec();
+    const remainingDuration = stream.endTime - Math.max(now, stream.lastWithdrawTime);
+    const remainingBalance = stream.flowRate * BigInt(Math.max(0, remainingDuration));
+
+    // Calculate split amounts based on ratio
+    const ratioA = BigInt(params.ratioNumerator);
+    const ratioB = BigInt(params.ratioDenominator - params.ratioNumerator);
+    const totalRatio = BigInt(params.ratioDenominator);
+
+    const amountA = (remainingBalance * ratioA) / totalRatio;
+    const amountB = (remainingBalance * ratioB) / totalRatio;
+
+    const flowRateA = amountA / BigInt(Math.max(1, remainingDuration));
+    const flowRateB = amountB / BigInt(Math.max(1, remainingDuration));
+
+    const idA = String(nextId++);
+    const idB = String(nextId++);
+
+    const streamA: Stream = {
+      id: idA,
+      sender: stream.sender,
+      recipient: params.recipientA,
+      token: stream.token,
+      deposit: amountA,
+      flowRate: flowRateA,
+      startTime: now,
+      endTime: now + remainingDuration,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    const streamB: Stream = {
+      id: idB,
+      sender: stream.sender,
+      recipient: params.recipientB,
+      token: stream.token,
+      deposit: amountB,
+      flowRate: flowRateB,
+      startTime: now,
+      endTime: now + remainingDuration,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    this.streams.set(idA, streamA);
+    this.streams.set(idB, streamB);
+
+    const txHash = `mock-tx-split-${params.streamId}`;
+
+    this.emit({
+      type: "StreamCancelled",
+      streamId: params.streamId,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: {},
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idA,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamA.sender, recipient: streamA.recipient },
+    });
+
+    this.emit({
+      type: "StreamCreated",
+      streamId: idB,
+      txHash,
+      ledger: 0,
+      timestamp: now,
+      data: { sender: streamB.sender, recipient: streamB.recipient },
+    });
+
+    return { txHash, streamIdA: idA, streamIdB: idB };
+  }
+
   async transferStream(
     params: TransferStreamParams
   ): Promise<{ txHash: string }> {
@@ -451,6 +558,23 @@ export class MockSoroStreamClient {
     };
   }
 
+  async cloneStream(
+    streamId: string,
+    overrides?: CloneStreamOverrides
+  ): Promise<{ streamId: string; txHash: string }> {
+    const source = await this.getStream(streamId);
+    const durationSeconds = source.endTime - source.startTime;
+
+    return this.createStream({
+      recipient: source.recipient,
+      token: source.token,
+      amount: source.deposit,
+      durationSeconds,
+      autoRenew: source.autoRenew,
+      ...overrides,
+    });
+  }
+
   subscribeEvents(
     filter: StreamEventFilter,
     callback: (event: StreamEvent) => void
@@ -466,5 +590,67 @@ export class MockSoroStreamClient {
       callback,
     });
     return { unsubscribe: () => this.listeners.delete(key) };
+  }
+
+  // ── Issue #73: Stream snapshot export / import ───────────────────────────
+
+  async exportStream(streamId: string, cliffSeconds = 0): Promise<StreamSnapshot> {
+    const stream = await this.getStream(streamId);
+    const claimable = await this.getClaimable(streamId);
+    return {
+      version: 1,
+      exportedAt: Date.now(),
+      stream: { ...stream, deposit: stream.deposit.toString(), flowRate: stream.flowRate.toString() },
+      claimableAtExport: claimable.toString(),
+      vestingProjection: [],
+      history: [],
+    };
+  }
+
+  importStream(snapshot: StreamSnapshot): Stream {
+    return {
+      ...snapshot.stream,
+      deposit: BigInt(snapshot.stream.deposit),
+      flowRate: BigInt(snapshot.stream.flowRate),
+    };
+  }
+
+  // ── Issue #50: Middleware / plugin system ─────────────────────────────────
+
+  use(_plugin: SoroStreamPlugin): this {
+    return this;
+  }
+
+  // ── Issue #148: Recipient change notification ─────────────────────────────
+
+  onRecipientChanged(
+    streamId: string,
+    callback: (event: { streamId: string; oldRecipient: string; newRecipient: string; timestamp: number }) => void,
+    options?: { intervalMs?: number }
+  ): () => void {
+    const intervalMs = options?.intervalMs ?? 5_000;
+    let stopped = false;
+    let lastRecipient: string | null = null;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const stream = await this.getStream(streamId);
+        if (lastRecipient !== null && stream.recipient !== lastRecipient) {
+          callback({ streamId, oldRecipient: lastRecipient, newRecipient: stream.recipient, timestamp: Math.floor(Date.now() / 1000) });
+        }
+        lastRecipient = stream.recipient;
+      } catch { /* swallow */ }
+    };
+
+    void poll();
+    const timer = setInterval(poll, intervalMs);
+    return () => { stopped = true; clearInterval(timer); };
+  }
+
+  // ── Issue #149: Connection pooling ────────────────────────────────────────
+
+  getConnectionStats(): { maxConnections: number; active: number; idle: number; reused: number } {
+    return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
   }
 }

@@ -18,14 +18,16 @@ jobs:
         if: matrix.runtime == 'node'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Run Node Tests
         if: matrix.runtime == 'node'
         run: |
           npm ci
+          git fetch --no-tags --depth=1 origin main
           npm run lint
+          npm run check:changelog -- --base origin/main
           npm test
 
       - name: Setup Bun
@@ -39,7 +41,7 @@ jobs:
         run: |
           bun install
           bun run lint
-          bun test
+          bun run test
 
       - name: Setup Deno
         if: matrix.runtime == 'deno'

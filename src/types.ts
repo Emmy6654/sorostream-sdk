@@ -13,14 +13,17 @@ export type StreamEventType =
   | "StreamResumed"
   | "StreamTransferred";
 
-export interface StreamEvent {
+export interface StreamEvent<TData = Record<string, unknown>> {
   type: StreamEventType;
   streamId: string;
   txHash: string;
   ledger: number;
   timestamp: number;
-  data: Record<string, unknown>;
+  data: TData;
 }
+
+/** Typed event handler utility type. */
+export type EventHandler<TData = Record<string, unknown>> = (event: StreamEvent<TData>) => void;
 
 export interface StreamSubscription {
   unsubscribe(): void;
@@ -74,18 +77,22 @@ export interface Stream {
   deposit: bigint;
   /** Tokens released per second in stroops. */
   flowRate: bigint;
-  /** Unix timestamp when the stream started. */
+  /** Unix timestamp (seconds) when the stream started. */
   startTime: number;
-  /** Unix timestamp when the stream ends. */
+  /** Unix timestamp (seconds) when the stream ends. */
   endTime: number;
-  /** Unix timestamp of the last withdrawal. */
+  /** Unix timestamp (seconds) of the last withdrawal. */
   lastWithdrawTime: number;
   /** Current stream status. */
   status: StreamStatus;
   /** Whether the stream auto-renews on completion. */
   autoRenew: boolean;
-  /** Unix timestamp when the stream was paused (undefined if not paused). */
+  /** Unix timestamp (seconds) when the stream was paused (undefined if not paused). */
   pausedAt?: number;
+  /** Unix timestamp (seconds) before which no withdrawals are permitted. */
+  lockUntil?: number;
+  /** Optional helper method for JSON serialization of BigInt fields. */
+  toJSON?(): Record<string, unknown>;
 }
 
 /** Parameters for creating a new stream. */
@@ -102,7 +109,28 @@ export interface CreateStreamParams {
   autoRenew: boolean;
   /** Opt-in check for duplicate stream creation. */
   checkDuplicate?: boolean;
+  /**
+   * Cliff duration in seconds (issue #74).
+   * When set, the configured `validateCliff` function is called before
+   * the transaction is submitted. Defaults to 0 (no cliff).
+   */
+  cliffSeconds?: number;
+  /**
+   * Skip the token allowance pre-flight check (issue #165).
+   * Set to true when you have already approved the contract or the token
+   * does not expose an allowance view (e.g. native XLM).
+   */
+  skipAllowanceCheck?: boolean;
+  /**
+   * Unix timestamp (seconds) before which no withdrawals are allowed.
+   * Must be between startTime and endTime when provided.
+   * Enforced at contract level; the SDK validates this before submission.
+   */
+  lockUntil?: number;
 }
+
+/** Overrides for cloneStream. Any CreateStreamParams field may be changed before submission. */
+export type CloneStreamOverrides = Partial<CreateStreamParams>;
 
 /** Alias for a single stream creation params object. */
 export type CreateStreamsParams = CreateStreamParams;
@@ -201,16 +229,84 @@ export interface VestingScheduleResult {
   milestones: VestingSchedulePoint[];
 }
 
+// ── Issue #148: Recipient change notification ────────────────────────────────
+
+/** Payload delivered to an {@link onRecipientChanged} callback. */
+export interface RecipientChangedEvent {
+  streamId: string;
+  oldRecipient: string;
+  newRecipient: string;
+  timestamp: number;
+}
+
+/** Options for {@link SoroStreamClient.onRecipientChanged}. */
+export interface OnRecipientChangedOptions {
+  /** Polling interval in ms (default: 5000). */
+  intervalMs?: number;
+}
+
+// ── Issue #188: WebSocket compression ───────────────────────────────────────
+
+/**
+ * Options for permessage-deflate compression on WebSocket connections.
+ * Disabled by default to avoid breaking existing deployments.
+ */
+export interface CompressionOptions {
+  /**
+   * zlib compression level (1 = fastest, 9 = best compression).
+   * Default: 6 (zlib default).
+   */
+  level?: number;
+  /**
+   * Minimum payload size in bytes to compress (default: 128).
+   * Payloads below this threshold are sent uncompressed to avoid overhead.
+   */
+  threshold?: number;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
   tickMs?: number;
   /** Interval in ms between on-chain reconciliations (default: 5000). */
   reconcileMs?: number;
+  /**
+   * WebSocket URL for real-time claimable updates.
+   * When provided, the watcher will subscribe via WS and fall back to
+   * polling-based interpolation if the WS connection fails.
+   */
+  wsUrl?: string;
+  /**
+   * The stream ID to subscribe to for WS updates.
+   * Required when `wsUrl` is set.
+   */
+  wsStreamId?: string;
+  /**
+   * Opt-in permessage-deflate compression for the WebSocket connection.
+   * Disabled by default. Requires server-side support; falls back gracefully.
+   * Issue #188.
+   */
+  compression?: boolean | CompressionOptions;
 }
 
 
-/** Wallet adapter interface. Implement this to support custom signing backends. */
+/**
+ * Wallet adapter interface. Implement this to support custom signing backends.
+ *
+ * @example
+ * ```ts
+ * const serverKeypairAdapter: WalletAdapter = {
+ *   async getPublicKey() { return Keypair.fromSecret(process.env.SECRET!).publicKey(); },
+ *   async signTransaction(xdr, network) {
+ *     const kp = Keypair.fromSecret(process.env.SECRET!);
+ *     const tx = TransactionBuilder.fromXDR(xdr, Networks[network.toUpperCase()]);
+ *     tx.sign(kp);
+ *     return tx.toEnvelope().toXDR("base64");
+ *   },
+ *   async isConnected() { return true; },
+ * };
+ * ```
+ */
 export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
@@ -222,11 +318,15 @@ export interface BulkStreamRow {
   recipient: string;
   amount: bigint;
   durationSeconds: number;
+  /** Optional per-row token override. Falls back to BulkCreateOptions.token when omitted. */
+  token?: string;
+  /** Optional cliff duration in seconds for this row (issue #74). Defaults to 0. */
+  cliffSeconds?: number;
 }
 
 /** Options for bulkCreateStreams. */
 export interface BulkCreateOptions {
-  /** SAC token contract address applied to every row. */
+  /** SAC token contract address. Applied as default when a row omits `token`. */
   token: string;
   /** Whether auto-renew is enabled (default false). */
   autoRenew?: boolean;
@@ -246,18 +346,11 @@ export interface BulkCreateResult {
   batches: BulkCreateBatchResult[];
 }
 
-/** A stream that was skipped during a batch operation. */
-export interface SkippedStream {
-  id: string;
-  reason: string;
-}
-
 /** Result of one transaction within a batchWithdraw call. */
 export interface BatchWithdrawResult {
   txHash: string;
   streamIds: string[];
   amounts: string[];
-  skipped?: SkippedStream[];
 }
 
 /** Per-token aggregate of a set of streams. */
@@ -329,6 +422,32 @@ export interface PriceFeedAdapter {
   getPrice(tokenAddress: string, displayCurrency?: string): Promise<number>;
 }
 
+// ── Split stream types ───────────────────────────────────────────────────────
+
+/** Parameters for splitting an active stream into two streams. */
+export interface SplitStreamParams {
+  /** Stream ID to split. */
+  streamId: string;
+  /** Numerator of the split ratio (e.g. 70 for a 70/30 split). */
+  ratioNumerator: number;
+  /** Denominator of the split ratio (e.g. 100 for 70/100 = 70%). */
+  ratioDenominator: number;
+  /** First destination address for the split stream. */
+  recipientA: string;
+  /** Second destination address for the split stream. */
+  recipientB: string;
+}
+
+/** Result of splitting a stream. */
+export interface SplitStreamResult {
+  /** Transaction hash of the split operation. */
+  txHash: string;
+  /** Stream ID for the first split stream. */
+  streamIdA: string;
+  /** Stream ID for the second split stream. */
+  streamIdB: string;
+}
+
 // ── Fee bump types (#Issue 3) ────────────────────────────────────────────────
 
 /**
@@ -359,6 +478,70 @@ export interface WriteOptions {
 /** Supported contract versions for call encoding. */
 export type ContractVersion = "v1" | "v2";
 
+// ── Dashboard / reporting aggregate types ────────────────────────────────────
+
+/** Aggregate totals across a set of streams. */
+export interface StreamTotals {
+  /** Total number of streams. */
+  totalStreams: number;
+  /** Sum of all deposits in stroops. */
+  totalDeposited: bigint;
+  /** Sum of all claimable amounts in stroops (estimated). */
+  totalClaimable: bigint;
+  /** Sum of all claimed amounts in stroops. */
+  totalClaimed: bigint;
+  /** Sum of all remaining deposits in stroops. */
+  totalRemaining: bigint;
+}
+
+/** Per-status breakdown of a set of streams. */
+export interface StatusBreakdown {
+  /** Streams with status "Active". */
+  active: number;
+  /** Streams with status "Cancelled". */
+  cancelled: number;
+  /** Streams with status "Completed". */
+  completed: number;
+}
+
+/** Duration statistics for a set of streams. */
+export interface DurationStats {
+  /** Average duration in seconds. */
+  average: number;
+  /** Minimum duration in seconds. */
+  min: number;
+  /** Maximum duration in seconds. */
+  max: number;
+  /** Median duration in seconds. */
+  median: number;
+}
+
+/** Summary of stream health issues. */
+export interface StreamHealthReport {
+  /** Number of active streams expiring within the threshold. */
+  expiring: number;
+  /** Number of active streams that have stalled. */
+  stalled: number;
+  /** Number of active streams that are underfunded. */
+  underfunded: number;
+  /** Total active streams checked. */
+  totalActive: number;
+}
+
+/** Per-recipient aggregate of a set of streams. */
+export interface RecipientAggregate {
+  /** Recipient address. */
+  recipient: string;
+  /** Number of streams targeting this recipient. */
+  streamCount: number;
+  /** Total deposited in stroops. */
+  deposited: bigint;
+  /** Estimated claimable amount in stroops. */
+  claimable: bigint;
+  /** Total claimed so far in stroops. */
+  claimedSoFar: bigint;
+}
+
 // ── Stream filtering ────────────────────────────────────────────────────────
 
 /** Criteria for filtering streams. */
@@ -367,4 +550,125 @@ export interface StreamFilterCriteria {
   recipient?: string;
   token?: string;
   status?: StreamStatus;
+}
+
+// ── Issue #166: Stream activity log ─────────────────────────────────────────
+
+/** The type of activity recorded in a stream's activity log. */
+export type StreamActivityType =
+  | "StreamCreated"
+  | "StreamWithdrawn"
+  | "StreamCancelled"
+  | "StreamToppedUp";
+
+/** A single entry in a stream's on-chain activity log. */
+export interface StreamActivityEntry {
+  /** Type of on-chain event. */
+  type: StreamActivityType;
+  /** Unix timestamp (ms) of the ledger close. */
+  timestamp: number;
+  /** Token amount involved, in stroops. `0n` for events with no amount. */
+  amount: bigint;
+  /** Transaction hash that emitted this event. */
+  txHash: string;
+  /** Raw ledger number. */
+  ledger: number;
+}
+
+/** Options for {@link SoroStreamClient.getActivityLog}. */
+export interface GetActivityLogOptions {
+  /** Only return entries at or after this Unix timestamp (ms). */
+  from?: number;
+  /** Only return entries at or before this Unix timestamp (ms). */
+  to?: number;
+  /** Max number of entries to return per page (default 100). */
+  limit?: number;
+  /** Cursor from a previous page for continuation. */
+  cursor?: string;
+}
+
+// ── Issue #73: Stream snapshot export/import ─────────────────────────────────
+
+/** A history entry recording a past event on a stream. */
+export interface StreamHistoryEntry {
+  type: string;
+  timestamp: number;
+  txHash: string;
+  data?: Record<string, unknown>;
+}
+
+/** A projected vesting milestone used in the snapshot. */
+export interface SnapshotVestingPoint {
+  time: number;
+  vested: string; // serialised as string to survive JSON bigint round-trip
+}
+
+/** A serialisable snapshot of a stream at a point in time. */
+export interface StreamSnapshot {
+  /** Snapshot schema version. */
+  version: 1;
+  /** Unix timestamp (ms) when the snapshot was taken. */
+  exportedAt: number;
+  /** The full stream parameter set. */
+  stream: Omit<Stream, "deposit" | "flowRate"> & {
+    deposit: string;
+    flowRate: string;
+  };
+  /** Current claimable amount at snapshot time, serialised as string. */
+  claimableAtExport: string;
+  /** Projected vesting curve milestones. */
+  vestingProjection: SnapshotVestingPoint[];
+  /** Recorded event history (may be empty when history is unavailable). */
+  history: StreamHistoryEntry[];
+}
+
+// ── Issue #50: Middleware / plugin system ────────────────────────────────────
+
+/** Context passed to every middleware hook. */
+export interface MiddlewareContext {
+  /** Name of the client method being called (e.g. "createStream"). */
+  method: string;
+  /** Arguments passed to the method. */
+  args: unknown[];
+}
+
+/** A middleware plugin that can observe or intercept client calls. */
+export interface SoroStreamPlugin {
+  /**
+   * Called before the client method executes.
+   * Throw to prevent the call from proceeding.
+   */
+  before?(ctx: MiddlewareContext): void | Promise<void>;
+  /**
+   * Called after the client method resolves successfully.
+   * `result` is the return value of the method.
+   */
+  after?(ctx: MiddlewareContext, result: unknown): void | Promise<void>;
+  /**
+   * Called when the client method throws.
+   * Re-throwing replaces the original error; returning swallows it.
+   */
+  onError?(ctx: MiddlewareContext, error: unknown): void | Promise<void>;
+}
+
+// ── Issue #187: Event batching ───────────────────────────────────────────────
+
+/** Configuration for event batching on high-frequency streams. */
+export interface BatchingOptions {
+  /** Max events per batch before flushing (default: 50). */
+  maxBatchSize?: number;
+  /** Max delay in ms before a non-full batch is flushed (default: 10). */
+  maxBatchDelayMs?: number;
+}
+
+/** Running metrics for the event batch buffer. */
+export interface BatchMetrics {
+  /** Total number of batches flushed since the poller started. */
+  totalBatches: number;
+  /** Total number of events delivered across all batches. */
+  totalEvents: number;
+  /** Average batch size (0 when no batches have been flushed yet). */
+  averageBatchSize: number;
+  /** Unix timestamp (ms) of the most recent flush, or null if none. */
+  lastFlushAt: number | null;
 }
