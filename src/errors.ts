@@ -131,3 +131,25 @@ export class FederationResolutionError extends SoroStreamError {
     this.name = "FederationResolutionError";
   }
 }
+
+/**
+ * Thrown when the deployed contract version is incompatible with the SDK (issue #209).
+ * 
+ * The SDK checks the contract's version during initialization and throws this error
+ * if the contract version is below the minimum required version.
+ */
+export class SoroStreamVersionError extends SoroStreamError {
+  /** The contract version that was detected. */
+  readonly contractVersion: string;
+  /** The minimum SDK-compatible contract version. */
+  readonly minCompatibleVersion: string;
+
+  constructor(contractVersion: string, minCompatibleVersion: string) {
+    super(
+      `Contract version ${contractVersion} is incompatible with SDK. Minimum required: ${minCompatibleVersion}`
+    );
+    this.name = "SoroStreamVersionError";
+    this.contractVersion = contractVersion;
+    this.minCompatibleVersion = minCompatibleVersion;
+  }
+}
