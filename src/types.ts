@@ -116,6 +116,15 @@ export interface CreateStreamParams {
    */
   cliffSeconds?: number;
   /**
+   * Optional idempotency nonce for duplicate-safe retries (issue #231).
+   * When provided and the deployed contract supports nonce parameters, the
+   * nonce is included in the `create_stream` call to deduplicate concurrent
+   * retries. If the contract does **not** support nonces, the SDK emits a
+   * `console.warn`. Pass `strict: true` in {@link WriteOptions} to throw an
+   * error instead of warning.
+   */
+  nonce?: string;
+  /**
    * Skip the token allowance pre-flight check (issue #165).
    * Set to true when you have already approved the contract or the token
    * does not expose an allowance view (e.g. native XLM).
@@ -353,6 +362,17 @@ export interface BatchWithdrawResult {
   amounts: string[];
 }
 
+/**
+ * Result of a batchWithdraw call that collects partial results (issue #229).
+ * Streams that succeeded are in `successes`, failures are in `failures`.
+ */
+export interface BatchWithdrawPartialResult {
+  /** Stream IDs successfully withdrawn. */
+  successes: string[];
+  /** Stream IDs that failed, with the thrown error per stream. */
+  failures: { id: string; error: Error }[];
+}
+
 /** Per-token aggregate of a set of streams. */
 export interface TokenAggregate {
   token: string;
@@ -471,6 +491,12 @@ export interface WriteOptions {
   simulateOnly?: boolean;
   /** Override fee-bump for this specific transaction. */
   feeBump?: FeeBumpOptions;
+  /**
+   * If true, throw a `NonceNotSupportedError` when a nonce is provided but
+   * the deployed contract does not support it (issue #231). When false
+   * (default), a `console.warn` is emitted instead.
+   */
+  strict?: boolean;
 }
 
 // ── Contract versioning (#Issue 4) ───────────────────────────────────────────

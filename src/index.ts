@@ -69,6 +69,7 @@ export {
   BulkCreatePartialError,
   InsufficientAllowanceError,
   FederationResolutionError,
+  NonceNotSupportedError,
 } from "./errors.js";
 export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
@@ -98,6 +99,7 @@ export type {
   BulkCreateResult,
   BatchCancelResult,
   BatchWithdrawResult,
+  BatchWithdrawPartialResult,
   TokenAggregate,
   MultisigSigner,
   StreamEvent,
