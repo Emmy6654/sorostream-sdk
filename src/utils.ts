@@ -1014,3 +1014,110 @@ export function jsonStringifyStream(obj: unknown, space?: string | number): stri
 }
 
 export const jsonStringify = jsonStringifyStream;
+
+const BIGINT_SUFFIX = "_bigint";
+
+/**
+ * Custom JSON.stringify replacer that serializes BigInt values as strings
+ * with a `_bigint` suffix, enabling round-trip-safe serialization.
+ *
+ * Use this as the `replacer` argument to `JSON.stringify` when serializing
+ * objects that contain BigInt fields:
+ *
+ * @example
+ * ```ts
+ * const json = JSON.stringify(stream, bigintReplacer);
+ * ```
+ */
+export function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? `${value.toString()}${BIGINT_SUFFIX}` : value;
+}
+
+/**
+ * Custom JSON.parse reviver that restores `_bigint`-suffixed strings back to
+ * BigInt values. Intended to reverse {@link bigintReplacer}.
+ *
+ * @example
+ * ```ts
+ * const obj = JSON.parse(json, bigintReviver);
+ * ```
+ */
+export function bigintReviver(_key: string, value: unknown): unknown {
+  if (typeof value === "string" && value.endsWith(BIGINT_SUFFIX)) {
+    const raw = value.slice(0, -BIGINT_SUFFIX.length);
+    try {
+      return BigInt(raw);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+/**
+ * Serializes a {@link Stream} object to a JSON string, handling BigInt fields
+ * (deposit, flowRate) via the `_bigint` suffix convention for round-trip safety.
+ *
+ * Use {@link deserializeStreamFromJSON} to restore the stream object.
+ *
+ * Plain `JSON.stringify(stream)` throws `TypeError: Do not know how to serialize a BigInt`
+ * because BigInt values are not JSON-serializable by default. Always use this
+ * utility (or {@link bigintReplacer}) when serializing stream objects.
+ *
+ * @param stream - The stream object to serialize.
+ * @param space - Optional indentation for pretty-printing.
+ * @returns A JSON string with BigInt fields serialised as `"<value>_bigint"`.
+ *
+ * @example
+ * ```ts
+ * const json = serializeStreamToJSON(stream);
+ * const restored = deserializeStreamFromJSON(json);
+ * ```
+ */
+export function serializeStreamToJSON(stream: import("./types.js").Stream, space?: string | number): string {
+  return JSON.stringify(stream, bigintReplacer, space);
+}
+
+/**
+ * Deserializes a JSON string (produced by {@link serializeStreamToJSON}) back
+ * into a {@link Stream} object, restoring BigInt fields from their `_bigint`-
+ * suffixed string representation.
+ *
+ * @param json - The JSON string to deserialize.
+ * @returns The restored Stream object.
+ * @throws {Error} If the JSON cannot be parsed or does not contain valid stream fields.
+ *
+ * @example
+ * ```ts
+ * const json = serializeStreamToJSON(stream);
+ * const restored = deserializeStreamFromJSON(json);
+ * console.log(restored.deposit); // BigInt
+ * ```
+ */
+export function deserializeStreamFromJSON(json: string): import("./types.js").Stream {
+  const parsed = JSON.parse(json, bigintReviver) as Record<string, unknown>;
+
+  const id = String(parsed["id"] ?? "");
+  if (!id) throw new Error("deserializeStreamFromJSON: missing 'id' field");
+
+  const deposit = typeof parsed["deposit"] === "bigint" ? parsed["deposit"] as bigint : BigInt(String(parsed["deposit"] ?? "0"));
+  const flowRate = typeof parsed["flowRate"] === "bigint" ? parsed["flowRate"] as bigint : BigInt(String(parsed["flowRate"] ?? "0"));
+
+  const stream: import("./types.js").Stream = {
+    id,
+    sender: String(parsed["sender"] ?? ""),
+    recipient: String(parsed["recipient"] ?? ""),
+    token: String(parsed["token"] ?? ""),
+    deposit,
+    flowRate,
+    startTime: Number(parsed["startTime"] ?? 0),
+    endTime: Number(parsed["endTime"] ?? 0),
+    lastWithdrawTime: Number(parsed["lastWithdrawTime"] ?? 0),
+    status: (parsed["status"] as import("./types.js").Stream["status"]) ?? "Active",
+    autoRenew: Boolean(parsed["autoRenew"]),
+    ...(parsed["pausedAt"] != null ? { pausedAt: Number(parsed["pausedAt"]) } : {}),
+    ...(parsed["lockUntil"] != null ? { lockUntil: Number(parsed["lockUntil"]) } : {}),
+  };
+
+  return stream;
+}

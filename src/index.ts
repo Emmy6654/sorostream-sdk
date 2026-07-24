@@ -42,6 +42,10 @@ export {
   streamToJSON,
   jsonStringifyStream,
   jsonStringify,
+  serializeStreamToJSON,
+  deserializeStreamFromJSON,
+  bigintReplacer,
+  bigintReviver,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -70,8 +74,9 @@ export {
   InsufficientAllowanceError,
   FederationResolutionError,
   NonceNotSupportedError,
+  SoroStreamRetryExhaustedError,
 } from "./errors.js";
-export type { BulkCreateFailedSlot } from "./errors.js";
+export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
 export type {
   Stream,
   StreamStatus,
