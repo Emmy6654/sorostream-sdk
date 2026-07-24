@@ -100,7 +100,6 @@ export type {
   BatchCancelResult,
   BatchWithdrawResult,
   BatchWithdrawPartialResult,
-  SkippedStream,
   TokenAggregate,
   MultisigSigner,
   StreamEvent,

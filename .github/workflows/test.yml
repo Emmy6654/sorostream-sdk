@@ -27,7 +27,8 @@ jobs:
           npm ci
           git fetch --no-tags --depth=1 origin main
           npm run lint
-          npm run check:changelog -- --base origin/main
+          npm run check:changeset -- --base origin/main
+          npm run build
           npm test
 
       - name: Setup Bun
