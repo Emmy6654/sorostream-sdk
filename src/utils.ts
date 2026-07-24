@@ -269,6 +269,7 @@ export function watchClaimable(
     if (stopped) return;
     try {
       const actual = await reconcile();
+      if (stopped) return;
       baseValue = actual;
       baseTime = Date.now();
       emit();

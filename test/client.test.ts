@@ -401,6 +401,44 @@ describe("watchClaimable", () => {
     vi.advanceTimersByTime(5000);
     expect(onTick).not.toHaveBeenCalled();
   });
+
+  it("does not emit late-arriving reconcile result after unsubscribe", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const stream: Stream = {
+      id: "0",
+      sender: "GSENDER",
+      recipient: "GRECIPIENT",
+      token: "GTOKEN",
+      deposit: 100_000n,
+      flowRate: 100n,
+      startTime: now - 100,
+      endTime: now + 900,
+      lastWithdrawTime: now,
+      status: "Active",
+      autoRenew: false,
+    };
+
+    let resolveReconcile: (v: bigint) => void = () => {};
+    const reconcile = vi.fn().mockReturnValue(new Promise<bigint>((r) => { resolveReconcile = r; }));
+
+    const onTick = vi.fn();
+    const unsubscribe = watchClaimable(stream, reconcile, onTick, {
+      tickMs: 10000,
+      reconcileMs: 200,
+    });
+
+    onTick.mockClear();
+
+    vi.advanceTimersByTime(200);
+
+    unsubscribe();
+
+    resolveReconcile(9999n);
+
+    await vi.waitFor(() => {});
+
+    expect(onTick).not.toHaveBeenCalled();
+  });
 });
 
 // ── Fee estimation input validation ───────────────────────────────────────────
