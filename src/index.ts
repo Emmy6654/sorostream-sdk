@@ -18,24 +18,40 @@ export {
   formatToken,
   toFiatDisplay,
   isValidStellarAddress,
+  isFederationAddress,
+  resolveFederationAddress,
   calculateFlowRate,
   timeUntilStreamEnd,
   claimableNow,
   calculateVestingSchedule,
   watchClaimable,
+  watchClaimableWs,
   aggregateStreamsByToken,
+  totalValueStreamed,
+  aggregateStreamsByStatus,
+  averageStreamDuration,
+  streamHealthSummary,
+  aggregateStreamsByRecipient,
   parseCsvStreamRows,
   detectStreamDrift,
   watchStreamDrift,
   isStreamExpiring,
   isStreamStalled,
   isStreamUnderfunded,
+  isExpired,
+  streamToJSON,
+  jsonStringifyStream,
+  jsonStringify,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
 export { withRetry } from "./retry.js";
 export type { RetryOptions } from "./retry.js";
 export type { CircuitState, CircuitBreakerOptions } from "./circuitBreaker.js";
+export { ConnectionPool } from "./connectionPool.js";
+export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from "./connectionPool.js";
+export type { StreamRetryPolicy, EventPollerOptions } from "./events.js";
+export type { BatchingOptions, BatchMetrics, CompressionOptions } from "./types.js";
 export { createContractEncoder } from "./contractEncoders.js";
 export type { ContractCallEncoder } from "./contractEncoders.js";
 export { createSimplePriceFeed } from "./priceFeed.js";
@@ -49,14 +65,25 @@ export {
   InvalidAddressError,
   AccountNotFoundError,
   InsufficientBalanceError,
+  ZeroDurationError,
+  BulkCreatePartialError,
+  InsufficientAllowanceError,
+  FederationResolutionError,
+  NonceNotSupportedError,
 } from "./errors.js";
+export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
   Stream,
   StreamStatus,
   CreateStreamParams,
+  CloneStreamOverrides,
+  EventHandler,
   WithdrawParams,
   CancelStreamParams,
   TopUpParams,
+  TransferStreamParams,
+  PauseStreamParams,
+  ResumeStreamParams,
   UpdateFlowRateParams,
   SetOperatorParams,
   OperatorTopUpParams,
@@ -72,6 +99,8 @@ export type {
   BulkCreateResult,
   BatchCancelResult,
   BatchWithdrawResult,
+  BatchWithdrawPartialResult,
+  SkippedStream,
   TokenAggregate,
   MultisigSigner,
   StreamEvent,
@@ -89,4 +118,21 @@ export type {
   PriceFeedAdapter,
   FeeBumpOptions,
   ContractVersion,
+  SplitStreamParams,
+  SplitStreamResult,
+  StreamTotals,
+  StatusBreakdown,
+  DurationStats,
+  StreamHealthReport,
+  RecipientAggregate,
+  StreamSnapshot,
+  StreamHistoryEntry,
+  SnapshotVestingPoint,
+  SoroStreamPlugin,
+  MiddlewareContext,
+  RecipientChangedEvent,
+  OnRecipientChangedOptions,
+  StreamActivityEntry,
+  StreamActivityType,
+  GetActivityLogOptions,
 } from "./types.js";

@@ -1,5 +1,5 @@
 import { Contract, nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import type { ContractVersion, CreateStreamParams } from "./types.js";
+import type { ContractVersion, CreateStreamParams, SplitStreamParams } from "./types.js";
 
 export interface ContractCallEncoder {
   createStream(sender: string, params: CreateStreamParams): xdr.Operation;
@@ -10,6 +10,10 @@ export interface ContractCallEncoder {
   setOperator(streamId: string, sender: string, operator: string, approved: boolean): xdr.Operation;
   operatorCancelStream(streamId: string, operator: string): xdr.Operation;
   operatorTopUp(streamId: string, operator: string, amount: bigint): xdr.Operation;
+  splitStream(sender: string, params: SplitStreamParams): xdr.Operation;
+  transferStream(streamId: string, sender: string, newRecipient: string): xdr.Operation;
+  pauseStream(streamId: string, sender: string): xdr.Operation;
+  resumeStream(streamId: string, sender: string): xdr.Operation;
 }
 
 class V1Encoder implements ContractCallEncoder {
@@ -85,6 +89,43 @@ class V1Encoder implements ContractCallEncoder {
       nativeToScVal(BigInt(streamId), { type: "u64" }),
       nativeToScVal(operator, { type: "address" }),
       nativeToScVal(amount, { type: "i128" })
+    );
+  }
+
+  splitStream(sender: string, params: SplitStreamParams): xdr.Operation {
+    return this.contract.call(
+      "split_stream",
+      nativeToScVal(BigInt(params.streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(params.ratioNumerator, { type: "u64" }),
+      nativeToScVal(params.ratioDenominator, { type: "u64" }),
+      nativeToScVal(params.recipientA, { type: "address" }),
+      nativeToScVal(params.recipientB, { type: "address" })
+    );
+  }
+
+  transferStream(streamId: string, sender: string, newRecipient: string): xdr.Operation {
+    return this.contract.call(
+      "transfer_stream",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(newRecipient, { type: "address" })
+    );
+  }
+
+  pauseStream(streamId: string, sender: string): xdr.Operation {
+    return this.contract.call(
+      "pause_stream",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" })
+    );
+  }
+
+  resumeStream(streamId: string, sender: string): xdr.Operation {
+    return this.contract.call(
+      "resume_stream",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" })
     );
   }
 }

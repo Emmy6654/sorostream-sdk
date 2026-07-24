@@ -1,0 +1,13 @@
+{
+  "_comment": "Baseline benchmark results (ops/sec). CI fails if any benchmark regresses by more than 20%.",
+  "bulkCreateStreams": {
+    "10 streams": 1000,
+    "50 streams": 250,
+    "100 streams": 120
+  },
+  "batchWithdraw": {
+    "10 withdrawals": 800,
+    "50 withdrawals": 200,
+    "100 withdrawals": 100
+  }
+}

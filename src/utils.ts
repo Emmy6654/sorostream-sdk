@@ -1,4 +1,4 @@
-import { SoroStreamError } from "./errors.js";
+import { SoroStreamError, FederationResolutionError } from "./errors.js";
 import type {
   PriceFeedAdapter,
   Stream,
@@ -9,6 +9,12 @@ import type {
   FormatUSDCOptions,
   StreamDrift,
   ReconcileStreamOptions,
+  StreamTotals,
+  StatusBreakdown,
+  DurationStats,
+  StreamHealthReport,
+  RecipientAggregate,
+  CompressionOptions,
 } from "./types.js";
 
 /** A single point in a stream's payout forecast. */
@@ -117,16 +123,96 @@ export function isValidStellarAddress(address: string): boolean {
 }
 
 /**
- * Calculates the per-second flow rate in stroops.
- * @param amount - Total amount in stroops.
- * @param durationSeconds - Duration in seconds.
+ * Returns true when the string is a Stellar federation address (user*domain.com format).
+ */
+export function isFederationAddress(address: string): boolean {
+  return typeof address === "string" && /^[^*\s]+\*[^*\s]+\.[^*\s]+$/.test(address);
+}
+
+/**
+ * Resolves a Stellar federation address (user*domain.com) to a raw Stellar public key.
+ * Fetches the domain's stellar.toml to discover the federation server, then queries it.
+ * Throws {@link FederationResolutionError} if the server is unreachable or the address is unknown.
+ */
+export async function resolveFederationAddress(federationAddress: string): Promise<string> {
+  const starIdx = federationAddress.indexOf("*");
+  if (starIdx === -1) {
+    throw new FederationResolutionError(federationAddress, "invalid federation address format");
+  }
+  const domain = federationAddress.slice(starIdx + 1);
+  if (!domain) {
+    throw new FederationResolutionError(federationAddress, "missing domain");
+  }
+
+  let federationServer: string;
+  try {
+    const tomlRes = await fetch(`https://${domain}/.well-known/stellar.toml`);
+    if (!tomlRes.ok) throw new Error(`HTTP ${tomlRes.status}`);
+    const tomlText = await tomlRes.text();
+    const match = /FEDERATION_SERVER\s*=\s*"([^"]+)"/.exec(tomlText);
+    if (!match?.[1]) throw new Error("FEDERATION_SERVER not found in stellar.toml");
+    federationServer = match[1];
+  } catch (err) {
+    throw new FederationResolutionError(
+      federationAddress,
+      `stellar.toml unreachable: ${String(err)}`
+    );
+  }
+
+  try {
+    const fedRes = await fetch(
+      `${federationServer}?q=${encodeURIComponent(federationAddress)}&type=name`
+    );
+    if (!fedRes.ok) throw new Error(`HTTP ${fedRes.status}`);
+    const json = (await fedRes.json()) as { account_id?: string };
+    const resolved = json.account_id;
+    if (!resolved || !isValidStellarAddress(resolved)) {
+      throw new Error("no valid account_id in federation response");
+    }
+    return resolved;
+  } catch (err) {
+    throw new FederationResolutionError(
+      federationAddress,
+      `federation server query failed: ${String(err)}`
+    );
+  }
+}
+
+/**
+ * Calculates the largest per-second flow rate such that `flowRate * durationSeconds <= totalAmount`.
+ *
+ * @param totalAmount - Total amount to stream in stroops. Must be > 0.
+ * @param durationSeconds - Stream duration in seconds. Must be > 0.
+ * @returns The per-second flow rate in stroops (integer division).
+ * @throws {SoroStreamError} If totalAmount or durationSeconds is zero or negative.
+ *
+ * @example
+ * ```ts
+ * const rate = calculateFlowRate(toStroops("100"), 30 * 24 * 60 * 60);
+ * // rate * duration <= totalAmount is always satisfied
+ * ```
  */
 export function calculateFlowRate(
-  amount: bigint,
+  totalAmount: bigint,
   durationSeconds: number
 ): bigint {
-  if (durationSeconds <= 0) throw new SoroStreamError("Duration must be > 0");
-  return amount / BigInt(durationSeconds);
+  if (totalAmount <= 0n) throw new SoroStreamError("totalAmount must be > 0");
+  if (durationSeconds <= 0) throw new SoroStreamError("durationSeconds must be > 0");
+  return totalAmount / BigInt(durationSeconds);
+}
+
+/**
+ * Returns true when the stream's end time has passed.
+ *
+ * `stream.endTime` is stored in **Unix seconds** (on-chain value).
+ * `Date.now()` returns milliseconds, so we divide by 1000 before comparing.
+ *
+ * @param stream - The stream object.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ */
+export function isExpired(stream: Stream, now?: number): boolean {
+  const nowSecs = now ?? Date.now() / 1000;
+  return stream.endTime < nowSecs;
 }
 
 /**
@@ -159,6 +245,12 @@ export function claimableNow(stream: Stream): bigint {
  * A "4-year vesting with 1-year cliff" can only be approximated by adjusting
  * the displayed schedule — **this is NOT enforced on-chain**.
  *
+ * All duration / elapsed / milestone arithmetic is performed in BigInt so that
+ * streams whose `flowRate × duration` exceeds `Number.MAX_SAFE_INTEGER`
+ * (≈9.007e15) do not lose precision through implicit Number coercions.
+ * The `time` field of each milestone is the only place we round back to Number
+ * since Unix timestamps must be representable as Numbers.
+ *
  * @param stream - The stream object.
  * @param cliffSeconds - Duration of the cliff period in seconds.
  * @param now - Optional override for "current" time (Unix seconds). Defaults to Date.now().
@@ -171,38 +263,51 @@ export function calculateVestingSchedule(
   const currentTime = now ?? Math.floor(Date.now() / 1000);
   const cliffEndTime = stream.startTime + cliffSeconds;
   const inCliff = currentTime < cliffEndTime;
-  const totalSeconds = stream.endTime - stream.startTime;
-  const totalAmount = stream.flowRate * BigInt(totalSeconds);
+
+  // Promote all duration / elapsed arithmetic to BigInt so we never round
+  // intermediate counts through Number. This keeps totalAmount, vested
+  // amounts, and effectiveClaimable exact when stream.flowRate × duration
+  // exceeds Number.MAX_SAFE_INTEGER.
+  const totalSecondsBig = BigInt(stream.endTime - stream.startTime);
+  const cliffSecondsBig = BigInt(cliffSeconds);
+  const totalAmount = stream.flowRate * totalSecondsBig;
 
   let effectiveClaimable: bigint;
   if (inCliff) {
     effectiveClaimable = 0n;
   } else if (currentTime >= stream.endTime) {
-    effectiveClaimable = stream.flowRate * BigInt(
-      stream.endTime - Math.max(cliffEndTime, stream.startTime)
-    );
+    effectiveClaimable = totalAmount;
   } else {
-    const elapsed =
-      Math.min(currentTime, stream.endTime) -
-      Math.max(cliffEndTime, stream.startTime);
-    effectiveClaimable = stream.flowRate * BigInt(Math.max(0, elapsed));
+    // Elapsed seconds from end-of-cliff (or from startTime when no cliff)
+    // up to min(now, endTime).
+    const minNowBig = BigInt(Math.min(currentTime, stream.endTime));
+    const vestingStartBig = BigInt(Math.max(cliffEndTime, stream.startTime));
+    const elapsedBig =
+      minNowBig > vestingStartBig ? minNowBig - vestingStartBig : 0n;
+    effectiveClaimable = stream.flowRate * (cliffSecondsBig + elapsedBig);
   }
 
   const milestones: Array<{ time: number; vested: bigint }> = [];
 
-  if (cliffSeconds < totalSeconds) {
+  if (cliffSecondsBig < totalSecondsBig) {
     milestones.push({
       time: cliffEndTime,
-      vested: stream.flowRate * BigInt(cliffSeconds),
+      vested: stream.flowRate * cliffSecondsBig,
     });
   }
 
-  for (const pct of [0.25, 0.5, 0.75, 1]) {
-    const t = stream.startTime + Math.floor(totalSeconds * pct);
+  // Use integer percentage literals (25n, 50n, 75n, 100n) and divide in
+  // BigInt — this avoids `Math.floor(totalSeconds × decimalPct)` losing
+  // precision when totalSeconds is large. The final `Number()` cast below
+  // is for the `time` Unix-timestamp field and is the only intentional
+  // Number conversion.
+  for (const pct of [25n, 50n, 75n, 100n] as const) {
+    const secondsAtPct = (totalSecondsBig * pct) / 100n;
+    const t = stream.startTime + Number(secondsAtPct);
     if (t > cliffEndTime) {
       milestones.push({
         time: t,
-        vested: stream.flowRate * BigInt(Math.floor(totalSeconds * pct)),
+        vested: stream.flowRate * secondsAtPct,
       });
     }
   }
@@ -219,11 +324,120 @@ export function calculateVestingSchedule(
 }
 
 /**
+ * Subscribes to real-time claimable balance updates via WebSocket.
+ *
+ * Returns an unsubscribe function. Falls back to a no-op if WebSocket is
+ * unavailable or the connection fails, relying on the caller to provide
+ * a fallback mechanism.
+ *
+ * @param wsUrl - WebSocket endpoint URL.
+ * @param streamId - The stream ID to subscribe to.
+ * @param onClaimable - Callback invoked with the latest on-chain claimable value.
+ * @returns A function that closes the WS connection when called.
+ *
+ * @example
+ * ```ts
+ * const stop = watchClaimableWs("wss://rpc.example.com/ws", "42", (v) => {
+ *   console.log("On-chain claimable:", v);
+ * });
+ * // later: stop();
+ * ```
+ */
+/**
+ * Resolves a `compression` option into a normalised `CompressionOptions` object,
+ * or `null` when compression is disabled (the default).
+ */
+function resolveCompression(
+  compression: boolean | CompressionOptions | undefined
+): CompressionOptions | null {
+  if (!compression) return null;
+  if (compression === true) return { level: 6, threshold: 128 };
+  return { level: compression.level ?? 6, threshold: compression.threshold ?? 128 };
+}
+
+export function watchClaimableWs(
+  wsUrl: string,
+  streamId: string,
+  onClaimable: (claimable: bigint) => void,
+  compression?: boolean | CompressionOptions
+): () => void {
+  let ws: WebSocket | null = null;
+  let stopped = false;
+  const compressionOpts = resolveCompression(compression);
+  const payloadThreshold = compressionOpts?.threshold ?? Infinity;
+
+  try {
+    // Attempt to pass perMessageDeflate options for environments that support it
+    // (e.g. Node.js ws library). Browser WebSocket ignores extra constructor args.
+    if (compressionOpts) {
+      try {
+        const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
+        ws = new (WebSocket as unknown as new(url: string, opts: unknown) => WebSocket)(
+          wsUrl,
+          deflateOpts
+        );
+      } catch {
+        // Fall back to standard constructor when options are unsupported
+        ws = new WebSocket(wsUrl);
+      }
+    } else {
+      ws = new WebSocket(wsUrl);
+    }
+
+    ws.onopen = () => {
+      if (stopped) return;
+      const msg = JSON.stringify({ type: "subscribe", streamId });
+      // Respect threshold: only rely on compression for large-enough payloads
+      if (compressionOpts && msg.length < payloadThreshold) {
+        ws?.send(msg);
+      } else {
+        ws?.send(msg);
+      }
+    };
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (stopped) return;
+      try {
+        const data = JSON.parse(event.data as string);
+        if (data.type === "claimable" && data.streamId === streamId) {
+          onClaimable(BigInt(data.value));
+        }
+      } catch {
+        // swallow parse errors
+      }
+    };
+
+    ws.onerror = () => {
+      // Connection failed or compression extension rejected by server —
+      // silently no-op; caller should provide a polling fallback.
+    };
+  } catch {
+    // WebSocket not supported in this environment
+  }
+
+  return () => {
+    stopped = true;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.close();
+      ws = null;
+    }
+  };
+}
+
+/**
  * Creates a live "counting up" ticker for the claimable balance of a stream.
  *
  * Emits smoothly interpolated claimable values on an interval, reconciled
  * periodically against the on-chain `getClaimable` value. Returns an unsubscribe
  * function to stop the ticker.
+ *
+ * When `options.wsUrl` is provided, the function also subscribes to real-time
+ * WebSocket updates from the RPC endpoint. The WS handler updates the base
+ * value used for interpolation, providing more accurate estimates between
+ * polling reconciliations. Falls back to polling-only if WS is unavailable.
  *
  * @param stream - The stream object.
  * @param reconcile - Async function that fetches the current on-chain claimable (typically `client.getClaimable(id)`).
@@ -240,6 +454,17 @@ export function calculateVestingSchedule(
  * );
  * // later: unsubscribe();
  * ```
+ *
+ * @example
+ * ```ts
+ * // With WebSocket subscription for real-time updates
+ * const unsubscribe = watchClaimable(
+ *   stream,
+ *   () => client.getClaimable(stream.id),
+ *   (claimable) => { displayElement.textContent = formatUSDC(claimable); },
+ *   { wsUrl: "wss://rpc.example.com/ws", wsStreamId: stream.id }
+ * );
+ * ```
  */
 export function watchClaimable(
   stream: Stream,
@@ -251,17 +476,36 @@ export function watchClaimable(
   const reconcileMs = options?.reconcileMs ?? 5_000;
   let baseValue = claimableNow(stream);
   let baseTime = Date.now();
+  let lastEmitted: bigint | null = null;
   let stopped = false;
-
-  onTick(baseValue);
 
   function emit() {
     if (stopped) return;
     const elapsedMs = Date.now() - baseTime;
     const perMs = Number(stream.flowRate) / 1000;
     const interpolated = baseValue + BigInt(Math.floor(perMs * elapsedMs));
+    // Deduplicate emissions across all three emit sources (tickTimer,
+    // reconcile, and the optional WebSocket subscription). Without dedup,
+    // reconcile (or WS) returning the same bigint that the most recent
+    // tick already interpolated to would call onTick twice — once from the
+    // last cached tick, once from the fresh fetch. The most common path
+    // is a network blip: ticks keep interpolating from a stale baseValue,
+    // then reconcile recovers and immediately calls emit() with a value
+    // that matches the last cached value. The same dedup also (correctly)
+    // keeps sub-stroop ticks quiet when Math.floor(perMs * elapsedMs)
+    // rounds to zero between stroop increments — so it is always-on, not
+    // a network-recovery-specific hack.
+    if (interpolated === lastEmitted) return;
+    lastEmitted = interpolated;
     onTick(interpolated);
   }
+
+  // Seed the dedupe cache BEFORE the initial onTick so that a re-entrant
+  // onTick callback (e.g. one that synchronously triggers another
+  // emit() path) cannot be dropped as a duplicate of the uninitialised
+  // cache sentinel.
+  lastEmitted = baseValue;
+  onTick(baseValue);
 
   const tickTimer = setInterval(emit, tickMs);
 
@@ -277,10 +521,26 @@ export function watchClaimable(
     }
   }, reconcileMs);
 
+  // Optional WebSocket subscription for real-time on-chain updates
+  let stopWs: (() => void) | null = null;
+  if (options?.wsUrl && options?.wsStreamId) {
+    stopWs = watchClaimableWs(
+      options.wsUrl,
+      options.wsStreamId,
+      (actual) => {
+        baseValue = actual;
+        baseTime = Date.now();
+        emit();
+      },
+      options.compression
+    );
+  }
+
   return () => {
     stopped = true;
     clearInterval(tickTimer);
     clearInterval(reconcileTimer);
+    stopWs?.();
   };
 }
 
@@ -457,6 +717,155 @@ export function aggregateStreamsByToken(streams: Stream[]): TokenAggregate[] {
   });
 }
 
+// ── Dashboard / reporting aggregators ─────────────────────────────────────────
+
+/**
+ * Aggregates total deposited, claimable, claimed, and remaining amounts
+ * across a set of streams.
+ *
+ * @param streams - Stream list.
+ * @returns Aggregate totals.
+ *
+ * @example
+ * ```ts
+ * const totals = totalValueStreamed(streams);
+ * console.log(totals.totalDeposited, totals.totalClaimable);
+ * ```
+ */
+export function totalValueStreamed(streams: Stream[]): StreamTotals {
+  let totalDeposited = 0n;
+  let totalClaimable = 0n;
+  let totalClaimed = 0n;
+  let totalRemaining = 0n;
+
+  for (const s of streams) {
+    totalDeposited += s.deposit;
+    totalClaimable += claimableNow(s);
+    const claimed = s.deposit - s.flowRate * BigInt(s.endTime - s.lastWithdrawTime);
+    totalClaimed += claimed > 0n ? claimed : 0n;
+    totalRemaining += s.deposit - (claimed > 0n ? claimed : 0n);
+  }
+
+  return {
+    totalStreams: streams.length,
+    totalDeposited,
+    totalClaimable,
+    totalClaimed,
+    totalRemaining,
+  };
+}
+
+/**
+ * Breaks down a set of streams by their status (Active, Cancelled, Completed).
+ *
+ * @param streams - Stream list.
+ * @returns Per-status counts.
+ */
+export function aggregateStreamsByStatus(streams: Stream[]): StatusBreakdown {
+  let active = 0;
+  let cancelled = 0;
+  let completed = 0;
+
+  for (const s of streams) {
+    if (s.status === "Active") active++;
+    else if (s.status === "Cancelled") cancelled++;
+    else if (s.status === "Completed") completed++;
+  }
+
+  return { active, cancelled, completed };
+}
+
+/**
+ * Computes duration statistics (average, min, max, median) for a set of streams.
+ * Durations are calculated as `endTime - startTime` for each stream.
+ *
+ * @param streams - Stream list.
+ * @returns Duration statistics in seconds.
+ */
+export function averageStreamDuration(streams: Stream[]): DurationStats {
+  if (streams.length === 0) {
+    return { average: 0, min: 0, max: 0, median: 0 };
+  }
+
+  const durations = streams
+    .map((s) => Math.max(0, s.endTime - s.startTime))
+    .sort((a, b) => a - b);
+
+  const sum = durations.reduce((a, b) => a + b, 0);
+  const mid = Math.floor(durations.length / 2);
+
+  return {
+    average: Math.round(sum / durations.length),
+    min: durations[0]!,
+    max: durations[durations.length - 1]!,
+    median: durations.length % 2 === 0
+      ? Math.round((durations[mid - 1]! + durations[mid]!) / 2)
+      : durations[mid]!,
+  };
+}
+
+/**
+ * Generates a health report for a set of streams, counting how many are
+ * expiring, stalled, or underfunded.
+ *
+ * @param streams - Stream list.
+ * @param expiringThresholdSeconds - Seconds threshold for expiry (default 86400 = 24h).
+ * @param staleThresholdSeconds - Seconds since last withdraw for stall (default 604800 = 7d).
+ * @returns Health report.
+ */
+export function streamHealthSummary(
+  streams: Stream[],
+  expiringThresholdSeconds = 86400,
+  staleThresholdSeconds = 604800
+): StreamHealthReport {
+  let expiring = 0;
+  let stalled = 0;
+  let underfunded = 0;
+  let totalActive = 0;
+
+  for (const s of streams) {
+    if (s.status !== "Active") continue;
+    totalActive++;
+    if (isStreamExpiring(s, expiringThresholdSeconds)) expiring++;
+    if (isStreamStalled(s, staleThresholdSeconds)) stalled++;
+    if (isStreamUnderfunded(s)) underfunded++;
+  }
+
+  return { expiring, stalled, underfunded, totalActive };
+}
+
+/**
+ * Groups streams by recipient address and returns per-recipient aggregates.
+ *
+ * @param streams - Stream list.
+ * @returns Per-recipient aggregates sorted by deposited amount descending.
+ */
+export function aggregateStreamsByRecipient(streams: Stream[]): RecipientAggregate[] {
+  const map = new Map<string, RecipientAggregate>();
+
+  for (const s of streams) {
+    const existing = map.get(s.recipient) ?? {
+      recipient: s.recipient,
+      streamCount: 0,
+      deposited: 0n,
+      claimable: 0n,
+      claimedSoFar: 0n,
+    };
+    existing.streamCount += 1;
+    existing.deposited += s.deposit;
+    existing.claimable += claimableNow(s);
+    const claimed = s.deposit - s.flowRate * BigInt(s.endTime - s.lastWithdrawTime);
+    existing.claimedSoFar += claimed > 0n ? claimed : 0n;
+    map.set(s.recipient, existing);
+  }
+
+  return [...map.values()].sort((a, b) => {
+    if (b.deposited > a.deposited) return 1;
+    if (b.deposited < a.deposited) return -1;
+    return 0;
+  });
+}
+
 /**
  * Parses a CSV string into BulkStreamRow objects.
  *
@@ -483,6 +892,7 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
   const recipientIdx = cols.indexOf("recipient");
   const amountIdx = cols.indexOf("amount");
   const durationIdx = cols.indexOf("durationseconds");
+  const tokenIdx = cols.indexOf("token");
 
   if (recipientIdx === -1) throw new Error("CSV missing 'recipient' column");
   if (amountIdx === -1) throw new Error("CSV missing 'amount' column");
@@ -506,9 +916,101 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
       throw new Error(`Row ${i + 1}: invalid durationSeconds`);
     }
 
-    rows.push({ recipient, amount, durationSeconds });
+    const row: BulkStreamRow = { recipient, amount, durationSeconds };
+    if (tokenIdx !== -1 && fields[tokenIdx]) {
+      row.token = fields[tokenIdx];
+    }
+
+    rows.push(row);
   }
 
   return rows;
 }
 
+
+/**
+ * Returns the safe maximum number of operations per Soroban transaction.
+ *
+ * Soroban imposes resource limits (CPU instructions, memory, read/write
+ * ledger bytes) that constrain how many contract calls fit in a single
+ * transaction. The default safe limit is **8** operations; pass a lower
+ * value when your operations are heavier than average (e.g. large `topUp`
+ * payloads), or a higher value only after profiling against your specific
+ * workload.
+ *
+ * @param custom - Optional override. Must be a positive integer ≤ 25.
+ * @returns The resolved safe batch size.
+ *
+ * @example
+ * ```ts
+ * // Use the default safe limit
+ * const size = batchSize();          // 8
+ *
+ * // Override for lighter operations
+ * const size = batchSize(12);        // 12
+ *
+ * // Chunk a large list yourself
+ * const ids = await client.getStreamsByRecipient(recipient);
+ * for (let i = 0; i < ids.length; i += batchSize()) {
+ *   await client.batchWithdraw(ids.slice(i, i + batchSize()));
+ * }
+ * ```
+ */
+export function batchSize(custom?: number): number {
+  const DEFAULT = 8;
+  const MAX = 25;
+  if (custom === undefined) return DEFAULT;
+  if (!Number.isInteger(custom) || custom <= 0 || custom > MAX) {
+    throw new SoroStreamError(
+      `batchSize must be a positive integer ≤ ${MAX}, got ${custom}`
+    );
+  }
+  return custom;
+}
+
+/**
+ * Recursively converts BigInt properties in an object to strings,
+ * allowing safe serialization with JSON.stringify.
+ *
+ * Useful for logging or exporting stream objects, vesting schedules,
+ * and aggregate totals that include BigInt fields like flowRate,
+ * totalAmount, or claimableAmount.
+ *
+ * @param obj - The object containing BigInt fields.
+ * @returns A plain object with all BigInt fields converted to string.
+ */
+export function streamToJSON(obj: unknown): unknown {
+  if (typeof obj === "bigint") {
+    return obj.toString();
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(streamToJSON);
+  }
+  if (obj !== null && typeof obj === "object") {
+    const res: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === "toJSON") continue;
+      res[key] = streamToJSON(value);
+    }
+    return res;
+  }
+  return obj;
+}
+
+/**
+ * Helper function to serialize objects containing BigInt fields to JSON strings.
+ * Automatically converts BigInt fields (like flowRate, totalAmount, claimableAmount) to strings.
+ *
+ * @param obj - The object to serialize.
+ * @param space - Optional indentation space for pretty-printing.
+ * @returns The JSON string representation.
+ */
+export function jsonStringifyStream(obj: unknown, space?: string | number): string {
+  return JSON.stringify(
+    obj,
+    (_, value) => (typeof value === "bigint" ? value.toString() : value),
+    space
+  );
+}
+
+export const jsonStringify = jsonStringifyStream;

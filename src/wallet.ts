@@ -19,7 +19,7 @@ import type { WalletAdapter, Network, MultisigSigner, PasskeyAdapterConfig } fro
  *
  * @example
  * ```ts
- * // Bot key loaded from env — never has custody of the recipient address.
+ * // Bot key loaded from env â€” never has custody of the recipient address.
  * const botSigner: MultisigSigner = {
  *   async signTransaction(xdr, network) {
  *     const kp = Keypair.fromSecret(process.env.CLAIM_BOT_SECRET!);
@@ -54,6 +54,18 @@ const NETWORK_PASSPHRASES: Record<Network, string> = {
 /**
  * Creates a WalletAdapter backed by the Freighter browser extension.
  * Dynamically imports @stellar/freighter-api to avoid SSR issues.
+ *
+ * @example
+ * ```ts
+ * import { SoroStreamClient, createFreighterAdapter } from "@sorostream/sdk";
+ *
+ * const freighterAdapter = await createFreighterAdapter();
+ * const client = new SoroStreamClient({
+ *   network: "testnet",
+ *   contractId: "YOUR_CONTRACT_ID",
+ *   walletAdapter: freighterAdapter,
+ * });
+ * ```
  */
 export async function createFreighterAdapter(): Promise<WalletAdapter> {
   const freighter = await import("@stellar/freighter-api");
@@ -88,8 +100,14 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
  *
  * @example
  * ```ts
- * const adapter = createKeypairAdapter("SAZ...YOUR...SECRET...KEY...");
- * const client = new SoroStreamClient({ network: "testnet", contractId: "...", walletAdapter: adapter });
+ * import { SoroStreamClient, createKeypairAdapter } from "@sorostream/sdk";
+ *
+ * const serverKeypairAdapter = createKeypairAdapter(process.env.STELLAR_SECRET!);
+ * const client = new SoroStreamClient({
+ *   network: "testnet",
+ *   contractId: "YOUR_CONTRACT_ID",
+ *   walletAdapter: serverKeypairAdapter,
+ * });
  * ```
  */
 export function createKeypairAdapter(secretKey: string): WalletAdapter {
@@ -222,7 +240,7 @@ export async function createMultisigAdapter(config: {
   };
 }
 
-// ── Issue #46: WebAuthn passkey adapter ──────────────────────────────────────
+// â”€â”€ Issue #46: WebAuthn passkey adapter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Converts a DER-encoded P-256 ECDSA signature to compact (r || s) form.
@@ -387,6 +405,47 @@ export async function createPasskeyAdapter(
 
       if (!modified) return xdrStr;
 
+      return txEnvelope.toXDR("base64");
+    },
+  };
+}
+
+/**
+ * Creates a WalletAdapter backed by a Ledger hardware wallet via `@ledgerhq/hw-app-str`.
+ *
+ * @example
+ * ```ts
+ * import TransportWebUSB from "@ledgerhq/hw-transport-webusb";
+ * const transport = await TransportWebUSB.create();
+ * const adapter = createLedgerAdapter({ transport });
+ * const client = new SoroStreamClient({ network: "mainnet", contractId: "...", walletAdapter: adapter });
+ * ```
+ */
+export function createLedgerAdapter(config: { transport: unknown }): WalletAdapter {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const hwAppStr = require("@ledgerhq/hw-app-str");
+  const StrClass = hwAppStr.default ?? hwAppStr;
+  const str = new StrClass(config.transport);
+
+  return {
+    async isConnected(): Promise<boolean> {
+      return true;
+    },
+    async getPublicKey(): Promise<string> {
+      const result = await str.getPublicKey("44'/148'/0'");
+      return result.publicKey as string;
+    },
+    async signTransaction(xdrStr: string, _network: Network): Promise<string> {
+      const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, "base64");
+      const txHash = hash(txEnvelope.toXDR());
+      const result = await str.signHash("44'/148'/0'", txHash);
+      const kp = Keypair.fromPublicKey(await str.getPublicKey("44'/148'/0'").then((r: { publicKey: string }) => r.publicKey));
+      const decorated = new xdr.DecoratedSignature({
+        hint: kp.signatureHint(),
+        signature: result.signature as Buffer,
+      });
+      const tx = txEnvelope.v1().tx();
+      txEnvelope.v1().signatures().push(decorated);
       return txEnvelope.toXDR("base64");
     },
   };
