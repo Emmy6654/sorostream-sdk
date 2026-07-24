@@ -12,6 +12,11 @@ import {
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
 import { isValidStellarAddress } from "./utils.js";
+import { withRetry } from "./retry.js";
+import { CircuitBreaker } from "./circuitBreaker.js";
+import type { CircuitBreakerOptions } from "./circuitBreaker.js";
+import { Cache } from "./cache.js";
+import { createContractEncoder } from "./contractEncoders.js";
 import {
   TransactionFailedError,
   StreamNotFoundError,
@@ -130,6 +135,11 @@ export class SoroStreamClient {
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
 
+  /** TTL cache: streamId → resolved claimable amount */
+  private readonly claimableCache: Cache<string, bigint>;
+  /** In-flight deduplication: streamId → shared promise for the active RPC call */
+  private readonly claimableInflight = new Map<string, Promise<bigint>>();
+
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
     this.walletAdapter = options.walletAdapter;
@@ -146,6 +156,9 @@ export class SoroStreamClient {
     this.encoder = createContractEncoder(this.contract, options.contractVersion ?? "v1");
     this.defaultFeeBump = options.feeBump ?? null;
     this.priceFeed = options.priceFeed ?? null;
+    // Default TTL of 5 seconds: short enough to stay reasonably fresh,
+    // long enough to absorb bursts of concurrent reads for the same stream.
+    this.claimableCache = new Cache<string, bigint>(5_000);
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
@@ -734,6 +747,11 @@ export class SoroStreamClient {
   /**
    * Returns the currently claimable amount in stroops for a stream.
    *
+   * Concurrent callers for the same stream ID share a single in-flight RPC
+   * request — they all receive the same resolved value rather than racing to
+   * produce independent results. After resolution the value is cached for 5 s,
+   * so subsequent callers within that window skip the RPC call entirely.
+   *
    * Distinguishes "stream not found" (returns `0n`) from transient RPC errors
    * (retried automatically, then thrown). A contract-level simulation error
    * indicates the stream does not exist; network failures are retried.
@@ -741,7 +759,17 @@ export class SoroStreamClient {
    * @param streamId - The stream ID to check.
    */
   async getClaimable(streamId: string): Promise<bigint> {
-    const result = await withRetry(
+    // 1. Fast path: serve from TTL cache.
+    const cached = this.claimableCache.get(streamId);
+    if (cached !== undefined) return cached;
+
+    // 2. Deduplication: if an RPC call for this stream is already in-flight,
+    //    join it rather than launching a second one.
+    const existing = this.claimableInflight.get(streamId);
+    if (existing) return existing;
+
+    // 3. No cached value and no in-flight request — start one.
+    const request = withRetry(
       () =>
         this.simulateOp(
           this.contract.call(
@@ -750,13 +778,30 @@ export class SoroStreamClient {
           )
         ),
       this.readRetry
-    );
+    )
+      .then((result): bigint => {
+        if (rpc.Api.isSimulationError(result)) return 0n;
+        const retval = (result as rpc.Api.SimulateTransactionSuccessResponse)
+          .result?.retval;
+        return retval ? BigInt(scValToNative(retval) as number) : 0n;
+      })
+      .then((value): bigint => {
+        // On success: populate the TTL cache so the next burst of callers
+        // doesn't need to wait for a new RPC round-trip.
+        this.claimableCache.set(streamId, value);
+        return value;
+      })
+      .finally(() => {
+        // Always remove the in-flight entry so future callers after TTL
+        // expiry can start a fresh request.
+        this.claimableInflight.delete(streamId);
+      });
 
-    if (rpc.Api.isSimulationError(result)) return 0n;
+    // Register before yielding so any other synchronous callers that arrive
+    // before the first await see the shared promise.
+    this.claimableInflight.set(streamId, request);
 
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) return 0n;
-    return BigInt(scValToNative(returnVal) as number);
+    return request;
   }
 
   /**
