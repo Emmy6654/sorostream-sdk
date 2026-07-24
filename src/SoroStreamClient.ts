@@ -906,7 +906,12 @@ export class SoroStreamClient {
 
     const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
     if (!returnVal) return 0n;
-    return BigInt(scValToNative(returnVal) as number);
+    const raw = BigInt(scValToNative(returnVal) as number);
+    if (raw < 0n) {
+      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+      return 0n;
+    }
+    return raw;
   }
 
   /**

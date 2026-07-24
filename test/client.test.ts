@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, nativeToScVal } from "@stellar/stellar-sdk";
 
 // Pre-generated valid Stellar addresses for tests that pass addresses to contract calls.
 const TEST_KEYPAIR = Keypair.random();
@@ -1509,6 +1509,18 @@ describe("getClaimable stream-not-found vs RPC error", () => {
       error: "contract error: stream not found",
       id: "1",
       latestLedger: 100,
+    });
+
+    const result = await client.getClaimable("99");
+    expect(result).toBe(0n);
+  });
+
+  it("clamps negative claimable to 0n", async () => {
+    const retval = nativeToScVal(-1n, { type: "i128" });
+    vi.spyOn(client as any, "simulateOp").mockResolvedValue({
+      result: { retval },
+      id: "1",
+      latestLedger: 200,
     });
 
     const result = await client.getClaimable("99");
