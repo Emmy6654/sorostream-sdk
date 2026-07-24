@@ -98,6 +98,7 @@ export type {
   BulkCreateResult,
   BatchCancelResult,
   BatchWithdrawResult,
+  SkippedStream,
   TokenAggregate,
   MultisigSigner,
   StreamEvent,
