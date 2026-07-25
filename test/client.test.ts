@@ -946,6 +946,36 @@ describe("SoroStreamClient batchWithdraw", () => {
     expect(results[0]!.streamIds).toHaveLength(3);
     expect(results[3]!.streamIds).toHaveLength(1);
   });
+
+  it("skips zero-claimable streams and reports them in results", async () => {
+    vi.spyOn(client, "getClaimable")
+      .mockResolvedValueOnce(0n)
+      .mockResolvedValueOnce(500n)
+      .mockResolvedValueOnce(0n);
+
+    const results = await client.batchWithdraw(["1", "2", "3"], 8);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.streamIds).toEqual(["2"]);
+    expect(results[0]!.amounts).toEqual(["500"]);
+    expect(results[0]!.skipped).toHaveLength(2);
+    expect(results[0]!.skipped).toEqual([
+      { id: "1", reason: "zero_claimable" },
+      { id: "3", reason: "zero_claimable" },
+    ]);
+  });
+
+  it("returns empty batch result when all streams have zero claimable", async () => {
+    vi.spyOn(client, "getClaimable").mockResolvedValue(0n);
+
+    const results = await client.batchWithdraw(["1", "2"], 8);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.txHash).toBe("");
+    expect(results[0]!.streamIds).toEqual([]);
+    expect(results[0]!.amounts).toEqual([]);
+    expect(results[0]!.skipped).toHaveLength(2);
+  });
 });
 
 // ── bulkCreateStreams validation tests ────────────────────────────────────────
@@ -1274,6 +1304,7 @@ describe("formatUSDC locale-aware", () => {
   it("trims to maximumFractionDigits", () => {
     const result = formatUSDC(1_005_000_000n, 7, {
       locale: "en-US",
+      minimumFractionDigits: 0,
       maximumFractionDigits: 2,
     });
     // 100.5000000 → "100.5" (max 2 decimal digits, trailing zeros removed)
@@ -1293,6 +1324,7 @@ describe("formatUSDC locale-aware", () => {
     const result = formatUSDC(12_340_000_000n, 7, {
       locale: "en-US",
       useGrouping: false,
+      minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     });
     expect(result).not.toContain(",");
@@ -1303,10 +1335,47 @@ describe("formatUSDC locale-aware", () => {
     const result = formatUSDC(12_340_000_000n, 7, {
       locale: "de-DE",
       useGrouping: true,
+      minimumFractionDigits: 0,
       maximumFractionDigits: 0,
     });
     // de-DE uses period as thousands separator
     expect(result).toContain(".");
+  });
+
+  it("formats with en-US locale and default fraction digits", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "en-US" });
+    expect(result).toBe("100.00");
+  });
+
+  it("formats with de-DE locale (comma decimal separator)", () => {
+    const result = formatUSDC(10_500_000n, 7, { locale: "de-DE" });
+    expect(result).toBe("1,05");
+  });
+
+  it("formats with ja-JP locale", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "ja-JP" });
+    expect(result).toBe("100.00");
+  });
+
+  it("formats with ar-SA locale (Arabic-Indic digits)", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "ar-SA" });
+    expect(typeof result).toBe("string");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).toMatch(/[\.٫]/);
+  });
+
+  it("defaults minimum fraction digits to 2 with locale", () => {
+    const result = formatUSDC(1_000_000_000n, 7, { locale: "en-US" });
+    expect(result).toBe("100.00");
+  });
+
+  it("respects explicit minimumFractionDigits override", () => {
+    const result = formatUSDC(1_000_000_000n, 7, {
+      locale: "en-US",
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 7,
+    });
+    expect(result).toBe("100.0000");
   });
 });
 
@@ -1724,6 +1793,18 @@ describe("getClaimable stream-not-found vs RPC error", () => {
     const result = await client.getClaimable("99");
     expect(result).toBe(0n);
   });
+
+  it("clamps negative claimable to 0n", async () => {
+    const retval = nativeToScVal(-1n, { type: "i128" });
+    vi.spyOn(client as any, "simulateOp").mockResolvedValue({
+      result: { retval },
+      id: "1",
+      latestLedger: 200,
+    });
+
+    const result = await client.getClaimable("99");
+    expect(result).toBe(0n);
+  });
 });
 
 // ── Issue #46: createPasskeyAdapter ──────────────────────────────────────────
@@ -1897,5 +1978,105 @@ describe("createLedgerAdapter", () => {
 
     expect(await adapter.isConnected()).toBe(true);
     expect(await adapter.getPublicKey()).toBe(mockPublicKey);
+  });
+});
+
+// ── Issue: getClaimable in-flight deduplication ───────────────────────────────
+
+describe("getClaimable – in-flight deduplication and TTL cache", () => {
+  let client: SoroStreamClient;
+  let mockAdapter: WalletAdapter;
+
+  beforeEach(() => {
+    mockAdapter = {
+      getPublicKey: vi.fn().mockResolvedValue("GABC123"),
+      signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+      isConnected: vi.fn().mockResolvedValue(true),
+    };
+    client = new SoroStreamClient({
+      network: "testnet",
+      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      walletAdapter: mockAdapter,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("10 concurrent callers for the same stream ID all receive identical values", async () => {
+    // Build a real xdr.ScVal so scValToNative() decodes it correctly.
+    const { nativeToScVal } = await import("@stellar/stellar-sdk");
+    const expectedAmount = 123_456_789n;
+    const retval = nativeToScVal(Number(expectedAmount), { type: "i128" });
+
+    let rpcCallCount = 0;
+    vi.spyOn(client as any, "simulateOp").mockImplementation(async () => {
+      rpcCallCount++;
+      // Simulate a network round-trip so concurrent callers actually overlap.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      return {
+        result: { retval },
+        latestLedger: 100,
+      } as any;
+    });
+
+    // Fire 10 calls simultaneously — all with the same stream ID.
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => client.getClaimable("42"))
+    );
+
+    // Every caller must get the exact same value.
+    expect(results).toHaveLength(10);
+    for (const result of results) {
+      expect(result).toBe(expectedAmount);
+    }
+
+    // Only a single RPC call should have been made for all 10 concurrent callers.
+    expect(rpcCallCount).toBe(1);
+  });
+
+  it("callers after TTL expiry trigger a new RPC call", async () => {
+    const { nativeToScVal } = await import("@stellar/stellar-sdk");
+    const retval = nativeToScVal(500, { type: "i128" });
+
+    let rpcCallCount = 0;
+    vi.spyOn(client as any, "simulateOp").mockImplementation(async () => {
+      rpcCallCount++;
+      return { result: { retval }, latestLedger: 100 } as any;
+    });
+
+    // First call — populates the in-flight + cache.
+    const first = await client.getClaimable("7");
+    expect(first).toBe(500n);
+    expect(rpcCallCount).toBe(1);
+
+    // Expire the TTL cache by clearing it directly.
+    (client as any).claimableCache.clear();
+
+    // Next call after TTL expiry should issue a fresh RPC call.
+    const second = await client.getClaimable("7");
+    expect(second).toBe(500n);
+    expect(rpcCallCount).toBe(2);
+  });
+
+  it("serves cached value within TTL without additional RPC calls", async () => {
+    const { nativeToScVal } = await import("@stellar/stellar-sdk");
+    const retval = nativeToScVal(999, { type: "i128" });
+
+    let rpcCallCount = 0;
+    vi.spyOn(client as any, "simulateOp").mockImplementation(async () => {
+      rpcCallCount++;
+      return { result: { retval }, latestLedger: 100 } as any;
+    });
+
+    // First call — populates the cache.
+    await client.getClaimable("55");
+    // Immediate second call — must hit the cache, not make another RPC call.
+    await client.getClaimable("55");
+    // Third for good measure.
+    await client.getClaimable("55");
+
+    expect(rpcCallCount).toBe(1);
   });
 });

@@ -224,11 +224,16 @@ console.log(`Created ${batches.length} batch(es)`);
 
 | Document | Description |
 |----------|-------------|
+| [Getting Started](./GETTING_STARTED.md) | Step-by-step tutorial from installation to withdrawal |
+| [Plugins](./PLUGINS.md) | Plugin/middleware system reference with worked examples |
+| [Custom Wallet Adapters](./CUSTOM_WALLET_ADAPTERS.md) | How to build adapters for unsupported wallets |
+| [Migration from Stellar SDK](./MIGRATION_FROM_STELLAR_SDK.md) | Before/after mapping of common operations |
 | [Stream State Machine](./docs/state-machine.md) | Mermaid diagram of all stream states and valid / invalid transitions |
 | [Rate Limiting](./docs/rate-limiting.md) | Default polling intervals, network call frequency, and tuning advice |
 | [linear-vesting.ts](./examples/linear-vesting.ts) | Constant-rate stream with no cliff |
 | [cliff-linear-vesting.ts](./examples/cliff-linear-vesting.ts) | Cliff period followed by linear release |
 | [milestone-vesting.ts](./examples/milestone-vesting.ts) | Fixed tranches released at scheduled dates |
+| [logging-middleware.ts](./examples/logging-middleware.ts) | Plugin system worked example |
 ## Architecture
 
 ```

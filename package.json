@@ -33,13 +33,18 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean",
+    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean && npm run validate-exports",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
+    "check:changeset": "node scripts/check-changeset.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "check:changelog": "node scripts/check-changelog-format.js",
     "build:all": "npm run build && npm run build -w packages/react && npm run build -w packages/cli",
-    "docs": "typedoc"
+    "docs": "typedoc",
+    "validate-exports": "node scripts/validate-exports.js",
+    "prepublishOnly": "npm run validate-exports"
   },
   "keywords": [
     "stellar",
@@ -58,8 +63,10 @@
     "@stellar/stellar-sdk": "^13.0.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.1",
     "@types/node": "^22.0.0",
     "fast-check": "^3.22.0",
+    "prettier": "^3.3.0",
     "tsup": "^8.0.0",
     "typedoc": "^0.28.0",
     "typescript": "^5.9.3",

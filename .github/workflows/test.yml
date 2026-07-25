@@ -26,8 +26,10 @@ jobs:
         run: |
           npm ci
           git fetch --no-tags --depth=1 origin main
+          npm run format:check
           npm run lint
-          npm run check:changelog -- --base origin/main
+          npm run check:changeset -- --base origin/main
+          npm run build
           npm test
 
       - name: Setup Bun
@@ -40,6 +42,7 @@ jobs:
         if: matrix.runtime == 'bun'
         run: |
           bun install
+          bun run format:check
           bun run lint
           bun run test
 
@@ -53,5 +56,6 @@ jobs:
         if: matrix.runtime == 'deno'
         run: |
           npm ci
+          npm run format:check
           npm run lint
           deno run -A npm:vitest run

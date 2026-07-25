@@ -42,6 +42,12 @@ export {
   streamToJSON,
   jsonStringifyStream,
   jsonStringify,
+  serializeStreamToJSON,
+  deserializeStreamFromJSON,
+  bigintReplacer,
+  bigintReviver,
+  validateStringLength,
+  STRING_FIELD_LIMITS,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { serializeStream, deserializeStream } from "./serialization.js";
@@ -73,9 +79,11 @@ export {
   BulkCreatePartialError,
   InsufficientAllowanceError,
   FederationResolutionError,
-  SoroStreamVersionError,
+  SoroStreamValidationError,
+  NonceNotSupportedError,
+  SoroStreamRetryExhaustedError,
 } from "./errors.js";
-export type { BulkCreateFailedSlot } from "./errors.js";
+export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
 export type {
   Stream,
   StreamStatus,
@@ -103,6 +111,7 @@ export type {
   BulkCreateResult,
   BatchCancelResult,
   BatchWithdrawResult,
+  BatchWithdrawPartialResult,
   TokenAggregate,
   MultisigSigner,
   StreamEvent,
