@@ -286,9 +286,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   /** TTL cache: streamId → resolved claimable amount */
-  private readonly claimableCache: Cache<string, bigint>;
+  private readonly claimableCache = new Cache<string, bigint>(5_000);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
+  /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
+  private readonly streamInflight = new Map<string, Promise<Stream>>();
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -435,6 +437,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+  }
+
+  /**
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
    *
@@ -513,6 +518,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.streamCache.clear();
     this.senderCache.clear();
     this.recipientCache.clear();
+    // Issue #221: Clear in-flight deduplication maps on network switch
+    this.streamInflight.clear();
+    this.claimableInflight.clear();
+    this.claimableCache.clear();
 
     // 2. Destroy the existing event poller — it's still pointing at the
     //    previous network's RPC and would otherwise emit stale events for
@@ -1781,10 +1790,19 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
-    const cached = this.streamCache.get(`${networkAtCallTime}:${streamId}`);
+    const cacheKey = `${networkAtCallTime}:${streamId}`;
+
+    // 1. Fast path: serve from TTL cache.
+    const cached = this.streamCache.get(cacheKey);
     if (cached) return cached;
 
-    const result = await withRetry(
+    // 2. Deduplication: if an RPC call for this stream is already in-flight,
+    //    join it rather than launching a second one.
+    const existing = this.streamInflight.get(cacheKey);
+    if (existing) return existing;
+
+    // 3. No cached value and no in-flight request — start one.
+    const request = withRetry(
       () =>
         this.simulateOp(
           this.contract.call(
@@ -1795,25 +1813,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       this.readRetry
     );
 
-    if (rpc.Api.isSimulationError(result)) {
-      throw new StreamNotFoundError(streamId);
-    }
+    // Store the in-flight promise so concurrent callers can join it.
+    this.streamInflight.set(cacheKey, request.then((result) => {
+      if (rpc.Api.isSimulationError(result)) {
+        throw new StreamNotFoundError(streamId);
+      }
 
-    const returnVal = (
-      result as rpc.Api.SimulateTransactionSuccessResponse
-    ).result?.retval;
-    if (!returnVal) throw new Error("No return value from contract");
-    const stream = scValToStream(returnVal);
+      const returnVal = (
+        result as rpc.Api.SimulateTransactionSuccessResponse
+      ).result?.retval;
+      if (!returnVal) throw new Error("No return value from contract");
+      return scValToStream(returnVal);
+    }));
 
-    // Only cache the result if the network hasn't changed during the RPC.
-    // This guard maintains the cache contract keyed by the *current*
-    // network: an in-flight read on the old network must never write into
-    // the new network's slot, and any entry already present must remain
-    // addressable under the network in which it was originally fetched.
-    if (networkAtCallTime === this.network) {
-      this.streamCache.set(`${networkAtCallTime}:${streamId}`, stream);
+    try {
+      const stream = await this.streamInflight.get(cacheKey)!;
+
+      // Only cache the result if the network hasn't changed during the RPC.
+      // This guard maintains the cache contract keyed by the *current*
+      // network: an in-flight read on the old network must never write into
+      // the new network's slot, and any entry already present must remain
+      // addressable under the network in which it was originally fetched.
+      if (networkAtCallTime === this.network) {
+        this.streamCache.set(cacheKey, stream);
+      }
+      return stream;
+    } finally {
+      // Clear the in-flight entry after settlement so the next call after
+      // resolution makes a fresh request. This maintains the deduplication
+      // guarantee: each unique stream fetch (after cache expiry) triggers
+      // exactly one RPC call.
+      this.streamInflight.delete(cacheKey);
     }
-    return stream;
   }
 
   /**
@@ -1851,18 +1882,34 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           )
         ),
       this.readRetry
-    );
+    ).then((result) => {
+      if (rpc.Api.isSimulationError(result)) return 0n;
 
-    if (rpc.Api.isSimulationError(result)) return 0n;
+      const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!returnVal) return 0n;
+      const raw = BigInt(scValToNative(returnVal) as number);
+      if (raw < 0n) {
+        console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+        return 0n;
+      }
+      return raw;
+    });
 
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) return 0n;
-    const raw = BigInt(scValToNative(returnVal) as number);
-    if (raw < 0n) {
-      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-      return 0n;
+    // Store the in-flight promise so concurrent callers can join it.
+    this.claimableInflight.set(streamId, request);
+
+    try {
+      const claimable = await request;
+      // Cache the result for 5 seconds.
+      this.claimableCache.set(streamId, claimable);
+      return claimable;
+    } finally {
+      // Clear the in-flight entry after settlement so the next call after
+      // resolution makes a fresh request. This maintains the deduplication
+      // guarantee: each unique claimable fetch (after cache expiry) triggers
+      // exactly one RPC call.
+      this.claimableInflight.delete(streamId);
     }
-    return raw;
   }
 
   /**
