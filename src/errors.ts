@@ -132,6 +132,22 @@ export class FederationResolutionError extends SoroStreamError {
   }
 }
 
+export class SoroStreamValidationError extends SoroStreamError {
+  /** Name of the field that failed validation. */
+  readonly field: string;
+  /** Actual length of the value in bytes. */
+  readonly actualLength: number;
+  /** Maximum allowed length in bytes. */
+  readonly maxLength: number;
+
+  constructor(field: string, actualLength: number, maxLength: number) {
+    super(
+      `Field "${field}" exceeded maximum length: ${actualLength} bytes (max ${maxLength})`
+    );
+    this.name = "SoroStreamValidationError";
+    this.field = field;
+    this.actualLength = actualLength;
+    this.maxLength = maxLength;
 /**
  * Thrown by `createStream` when `strict: true` is set in {@link WriteOptions}
  * and the caller provides a `nonce` field but the deployed contract does not
@@ -148,5 +164,43 @@ export class NonceNotSupportedError extends SoroStreamError {
         "Pass strict: true in WriteOptions to turn this into an error."
     );
     this.name = "NonceNotSupportedError";
+  }
+}
+
+export interface RetryAttempt {
+  attempt: number;
+  timestamp: number;
+  error: unknown;
+}
+
+/**
+ * Thrown by {@link withRetry} when all retry attempts are exhausted.
+ *
+ * Includes the original error from the last attempt, the total number of
+ * attempts made, a timestamped log of every attempt, and (when available)
+ * the final RPC response body for debugging.
+ */
+export class SoroStreamRetryExhaustedError extends SoroStreamError {
+  readonly originalError: unknown;
+  readonly attemptCount: number;
+  readonly attempts: RetryAttempt[];
+  readonly finalResponseBody: string | null;
+
+  constructor(
+    originalError: unknown,
+    attemptCount: number,
+    attempts: RetryAttempt[],
+    finalResponseBody: string | null
+  ) {
+    const lastErrMsg =
+      originalError instanceof Error ? originalError.message : String(originalError);
+    super(
+      `RPC request failed after ${attemptCount} attempt(s): ${lastErrMsg}`
+    );
+    this.name = "SoroStreamRetryExhaustedError";
+    this.originalError = originalError;
+    this.attemptCount = attemptCount;
+    this.attempts = attempts;
+    this.finalResponseBody = finalResponseBody;
   }
 }

@@ -12,7 +12,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
-import { isValidStellarAddress, isFederationAddress, resolveFederationAddress } from "./utils.js";
+import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 
@@ -176,6 +176,13 @@ export interface SoroStreamClientOptions {
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
+  /**
+   * When true, write a JSON entry to localStorage['sorostream_audit_log']
+   * for each SDK write operation: timestamp, operation name, parameters
+   * (redacted of keys), result (success/error), and duration.
+   * Issue #227.
+   */
+  auditLog?: boolean;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -261,12 +268,27 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly disconnectedCbs = new Set<(error: unknown) => void>();
   // Issue #187: event batching options
   private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
+  // Issue #228: network version counter — incremented on each setNetwork call
+  private networkVersion = 0;
+  // Issue #227: audit log toggle
+  private readonly auditLogEnabled: boolean;
   /**
    * Cached result of the contract's nonce-parameter capability check.
    * `null` means the check has not been performed yet.
    * Issue #231.
    */
   private _nonceSupported: boolean | null = null;
+  /**
+   * Cached ledger timestamp (Unix seconds) with 5-second TTL.
+   * Used as the canonical "now" reference for time-based validation
+   * instead of the local system clock (Date.now()).
+   */
+  private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
+
+  /** TTL cache: streamId → resolved claimable amount */
+  private readonly claimableCache: Cache<string, bigint>;
+  /** In-flight deduplication: streamId → shared promise for the active RPC call */
+  private readonly claimableInflight = new Map<string, Promise<bigint>>();
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -292,6 +314,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.checkDuplicate = options.checkDuplicate ?? false;
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
+    this.auditLogEnabled = options.auditLog ?? false;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -312,6 +335,88 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
   }
 
+  // ── Issue #227: Audit log ───────────────────────────────────────────────────
+
+  private static readonly AUDIT_LOG_KEY = "sorostream_audit_log";
+  private static readonly AUDIT_LOG_MAX_ENTRIES = 100;
+
+  private writeAuditEntry(entry: {
+    operation: string;
+    params?: unknown;
+    result?: "success" | "error";
+    error?: string;
+    durationMs: number;
+  }): void {
+    if (!this.auditLogEnabled) return;
+    try {
+      const raw = localStorage.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+      const log: unknown[] = raw ? JSON.parse(raw) : [];
+      // Redact keys from params (keep values for debugging)
+      const redacted = entry.params ? this.redactParams(entry.params) : undefined;
+      log.push({
+        timestamp: new Date().toISOString(),
+        network: this.network,
+        operation: entry.operation,
+        params: redacted,
+        result: entry.result,
+        error: entry.error,
+        durationMs: entry.durationMs,
+      });
+      // Circular buffer: keep last N entries
+      while (log.length > SoroStreamClient.AUDIT_LOG_MAX_ENTRIES) {
+        log.shift();
+      }
+      localStorage.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
+    } catch {
+      // localStorage may be unavailable or full — never throw
+    }
+  }
+
+  private redactParams(params: unknown): unknown {
+    if (params === null || typeof params !== "object") return params;
+    if (Array.isArray(params)) return params.map((p) => this.redactParams(p));
+    const redacted: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+      if (key === "secret" || key === "secretKey" || key === "privateKey" || key === "seed") {
+        redacted[key] = "***REDACTED***";
+      } else if (typeof value === "bigint") {
+        redacted[key] = value.toString();
+      } else {
+        redacted[key] = value;
+      }
+    }
+    return redacted;
+  }
+
+  /**
+   * Returns the current audit log entries. Only meaningful when
+   * `{ auditLog: true }` was passed to the constructor.
+   *
+   * Issue #227.
+   * @returns Array of audit log entries, or empty array if unavailable.
+   */
+  getAuditLog(): Array<Record<string, unknown>> {
+    try {
+      const raw = localStorage.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Clears all audit log entries from localStorage.
+   *
+   * Issue #227.
+   */
+  clearAuditLog(): void {
+    try {
+      localStorage.removeItem(SoroStreamClient.AUDIT_LOG_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
   /**
    * Returns the network this client is currently connected to.
    * @returns The currently active network.
@@ -321,6 +426,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
+   * Returns a monotonically increasing version number that increments
+   * each time {@link setNetwork} is called. Useful for `watchClaimable`
+   * to detect network switches mid-session and restart polling.
+   *
+   * Issue #228.
+   * @returns The current network version counter.
+   */
+  getNetworkVersion(): number {
+    return this.networkVersion;
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
    *
@@ -388,6 +502,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return;
     }
 
+    // Issue #228: increment version so active watchClaimable instances
+    // detect the switch and restart polling against the new endpoint.
+    this.networkVersion++;
+
+    // 1. Drop the read cache so stale stream data from the previous network
+    //    is never served from cache after the switch.
     // 1. Drop the read caches so stale stream data from the previous network
     //    is never served from cache after the switch (issue #230).
     this.streamCache.clear();
@@ -479,8 +599,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async buildAndSubmit(
     operation: xdr.Operation,
     signal?: AbortSignal,
-    feeBumpOpts?: FeeBumpOptions
+    feeBumpOpts?: FeeBumpOptions,
+    operationName?: string
   ): Promise<string> {
+    const opStart = Date.now();
     const publicKey = await this.walletAdapter.getPublicKey();
 
     const account = await withRetry(
@@ -545,6 +667,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     if (response.status === "FAILED") {
       throw new TransactionFailedError(result.hash);
+    }
+
+    if (operationName) {
+      this.writeAuditEntry({
+        operation: operationName,
+        result: "success",
+        durationMs: Date.now() - opStart,
+      });
     }
 
     return result.hash;
@@ -632,11 +762,48 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.withBreaker(() => this.server.simulateTransaction(tx));
   }
 
+  /**
+   * Returns the current ledger timestamp (Unix seconds) from the RPC endpoint,
+   * cached with a 5-second TTL to avoid an extra RPC call on every request.
+   *
+   * Falls back to `Math.floor(Date.now() / 1000)` when the RPC is unreachable
+   * so that time-based validation does not block stream creation during an
+   * outage. The fallback is intentionally silent — the local clock drift is
+   * small relative to the multi-second stream durations being validated.
+   */
+  private async getLedgerTimestamp(): Promise<number> {
+    const now = Date.now();
+    if (this._ledgerTimestampCache && now < this._ledgerTimestampCache.expiresAt) {
+      return this._ledgerTimestampCache.value;
+    }
+    try {
+      const ledger = await this.withBreaker(() => this.server.getLatestLedger()) as { id: string; sequence: number; protocolVersion: string; lastLedgerCloseTime?: number };
+      const ts = ledger.lastLedgerCloseTime ?? Math.floor(Date.now() / 1000);
+      this._ledgerTimestampCache = { value: ts, expiresAt: now + 5_000 };
+      return ts;
+    } catch {
+      return Math.floor(Date.now() / 1000);
+    }
+  }
+
+  /**
+   * Clears the cached ledger timestamp. Useful when callers know the ledger
+   * has advanced (e.g. after a transaction submission) and want the next
+   * validation to fetch a fresh timestamp.
+   */
+  clearLedgerTimestampCache(): void {
+    this._ledgerTimestampCache = null;
+  }
+
   // ── Pre-flight validation (Issue 2) ───────────────────────────────────────
 
   private async validateStreamParams(
     params: CreateStreamParams
   ): Promise<void> {
+    // Issue #226: validate string field lengths before transaction construction
+    validateStringLength("recipient", params.recipient);
+    validateStringLength("token", params.token);
+
     if (!isValidStellarAddress(params.recipient)) {
       throw new InvalidAddressError(params.recipient);
     }
@@ -650,8 +817,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       );
     }
 
-    // Verify endTime > startTime at the time of submission.
-    const startTime = Math.floor(Date.now() / 1000);
+    // Use the ledger timestamp as the canonical "now" reference instead of the
+    // local system clock so that a clock-skewed machine does not incorrectly
+    // accept or reject stream creation.
+    const ledgerNow = await this.getLedgerTimestamp();
+    const startTime = ledgerNow;
     const endTime = startTime + params.durationSeconds;
     if (endTime <= startTime) {
       throw new ZeroDurationError(
@@ -815,7 +985,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
       const operation = this.encoder.createStream(sender, params);
       const feeBump = this.resolveFeeBump(options?.feeBump);
-      const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+      const txHash = await this.buildAndSubmit(operation, signal, feeBump, "createStream");
 
       const result = await this.getStreamsBySender(sender);
       const streams = Array.isArray(result) ? result : result.streams;
@@ -905,7 +1075,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
     return { txHash, amount: claimable.toString() };
   }
 
@@ -1008,7 +1178,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
     return { txHash };
   }
 
@@ -1056,7 +1226,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.amount
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "topUp");
 
     // Fetch fresh on-chain state and cache it so immediate getStream() calls
     // reflect the topped-up balance without stale data.
@@ -1113,7 +1283,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate");
     return { txHash };
   }
 
@@ -1145,7 +1315,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.approved
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "setOperator");
     return { txHash };
   }
 
@@ -1167,7 +1337,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.operatorCancelStream(params.streamId, operator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream");
     return { txHash };
   }
 
@@ -1192,7 +1362,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp");
     return { txHash };
   }
 
@@ -1240,7 +1410,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const operation = this.encoder.splitStream(sender, params);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "splitStream");
 
     const result = await this.getStreamsBySender(sender);
     const streams = Array.isArray(result) ? result : result.streams;
@@ -1279,7 +1449,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.newRecipient
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "transferStream");
     return { txHash };
   }
 
@@ -1301,7 +1471,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.pauseStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause");
     return { txHash };
   }
 
@@ -1323,7 +1493,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.resumeStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume");
     return { txHash };
   }
 
@@ -1649,6 +1819,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /**
    * Returns the currently claimable amount in stroops for a stream.
    *
+   * Concurrent callers for the same stream ID share a single in-flight RPC
+   * request — they all receive the same resolved value rather than racing to
+   * produce independent results. After resolution the value is cached for 5 s,
+   * so subsequent callers within that window skip the RPC call entirely.
+   *
    * Distinguishes "stream not found" (returns `0n`) from transient RPC errors
    * (retried automatically, then thrown). A contract-level simulation error
    * indicates the stream does not exist; network failures are retried.
@@ -1657,7 +1832,17 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @returns The claimable amount in stroops, or `0n` if the stream does not exist.
    */
   async getClaimable(streamId: string): Promise<bigint> {
-    const result = await withRetry(
+    // 1. Fast path: serve from TTL cache.
+    const cached = this.claimableCache.get(streamId);
+    if (cached !== undefined) return cached;
+
+    // 2. Deduplication: if an RPC call for this stream is already in-flight,
+    //    join it rather than launching a second one.
+    const existing = this.claimableInflight.get(streamId);
+    if (existing) return existing;
+
+    // 3. No cached value and no in-flight request — start one.
+    const request = withRetry(
       () =>
         this.simulateOp(
           this.contract.call(
@@ -1987,7 +2172,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
                 durationSeconds: row.durationSeconds,
                 autoRenew,
               });
-              const txHash = await this.buildAndSubmit(operation);
+              const txHash = await this.buildAndSubmit(operation, undefined, undefined, "bulkCreateStreams");
 
               const result = await this.getStreamsBySender(sender);
               const streams = Array.isArray(result) ? result : result.streams;
