@@ -34,6 +34,8 @@
   },
   "scripts": {
     "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean && npm run validate-exports",
+    "size": "size-limit",
+    "size:check": "npm run build && size-limit --why",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
@@ -64,9 +66,11 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",
+    "@size-limit/preset-small-lib": "^13.0.1",
     "@types/node": "^22.0.0",
     "fast-check": "^3.22.0",
     "prettier": "^3.3.0",
+    "size-limit": "^13.0.1",
     "tsup": "^8.0.0",
     "typedoc": "^0.28.0",
     "typescript": "^5.9.3",
