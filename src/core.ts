@@ -1,16 +1,26 @@
+/**
+ * Lightweight entry point for consumers who only need the client, streaming
+ * math, and error types — no wallet adapters (Freighter, Ledger, passkey,
+ * multisig) or their heavier browser/hardware dependencies.
+ *
+ * Bundlers that support tree-shaking (Rollup, esbuild, webpack) will exclude
+ * `wallet.ts` and its dependencies entirely when only this entry point is
+ * imported, since nothing here references it.
+ *
+ * @example
+ * ```ts
+ * import { SoroStreamClient } from "@sorostream/sdk/core";
+ *
+ * const client = new SoroStreamClient({ network: "testnet", contractId: "...", walletAdapter });
+ * const claimable = await client.getClaimable(streamId);
+ * ```
+ */
+
 export { SoroStreamClient } from "./SoroStreamClient.js";
 export type { SoroStreamClientOptions, SimulateOnlyResult } from "./SoroStreamClient.js";
 
 export { MockSoroStreamClient } from "./mock.js";
 
-export {
-  createFreighterAdapter,
-  connectWallet,
-  createMultisigAdapter,
-  createClaimDelegateAdapter,
-  createPasskeyAdapter,
-} from "./wallet.js";
-export type { ClaimDelegateConfig } from "./wallet.js";
 export { WebhookForwarder } from "./webhook.js";
 export {
   toStroops,
@@ -125,7 +135,6 @@ export type {
   FormatUSDCOptions,
   StreamDrift,
   ReconcileStreamOptions,
-  PasskeyAdapterConfig,
   PriceFeedAdapter,
   FeeBumpOptions,
   ContractVersion,

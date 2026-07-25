@@ -15,6 +15,8 @@ import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
+import { InMemoryEventBus } from "./eventBus.js";
+import type { IEventBus } from "./eventBus.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -183,6 +185,13 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /**
+   * Custom event bus for framework-agnostic subscription to SDK lifecycle
+   * events (`stream.created`, `stream.withdrawn`, `stream.cancelled`,
+   * `rpc.error`). Defaults to an internal {@link InMemoryEventBus} when omitted.
+   * Issue #212.
+   */
+  eventBus?: IEventBus;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -286,12 +295,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   /** TTL cache: streamId → resolved claimable amount */
-  private readonly claimableCache: Cache<string, bigint>;
+  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
+  /** Event bus used to emit SDK lifecycle events. Issue #212. */
+  private readonly eventBus: IEventBus;
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
+    this.eventBus = options.eventBus ?? new InMemoryEventBus();
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
     this.server = new rpc.Server(
@@ -435,6 +447,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+  }
+
+  /**
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
    *
@@ -603,81 +618,87 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     operationName?: string
   ): Promise<string> {
     const opStart = Date.now();
-    const publicKey = await this.walletAdapter.getPublicKey();
+    try {
+      const publicKey = await this.walletAdapter.getPublicKey();
 
-    const account = await withRetry(
-      () => this.withBreaker(() => this.server.getAccount(publicKey)),
-      { ...this.submitRetry, signal }
-    );
+      const account = await withRetry(
+        () => this.withBreaker(() => this.server.getAccount(publicKey)),
+        { ...this.submitRetry, signal }
+      );
 
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASES[this.network],
-    })
-      .addOperation(operation)
-      .setTimeout(30)
-      .build();
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASES[this.network],
+      })
+        .addOperation(operation)
+        .setTimeout(30)
+        .build();
 
-    const preparedTx = await withRetry(
-      () => this.withBreaker(() => this.server.prepareTransaction(tx)),
-      { ...this.submitRetry, signal }
-    );
+      const preparedTx = await withRetry(
+        () => this.withBreaker(() => this.server.prepareTransaction(tx)),
+        { ...this.submitRetry, signal }
+      );
 
-    const signedXdr = await this.walletAdapter.signTransaction(
-      preparedTx.toXDR(),
-      this.network
-    );
+      const signedXdr = await this.walletAdapter.signTransaction(
+        preparedTx.toXDR(),
+        this.network
+      );
 
-    const result = await withRetry(
-      () => this.withBreaker(() =>
-        this.server.sendTransaction(
-          TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
-        )
-      ),
-      { ...this.submitRetry, signal }
-    );
+      const result = await withRetry(
+        () => this.withBreaker(() =>
+          this.server.sendTransaction(
+            TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
+          )
+        ),
+        { ...this.submitRetry, signal }
+      );
 
-    if (result.status === "ERROR") {
-      throw new TransactionFailedError(JSON.stringify(result.errorResult));
-    }
-
-    // Poll for completion with configurable timeout and exponential backoff
-    const startTime = Date.now();
-    let delay = 500;
-    const maxDelay = 10_000;
-
-    let response = await this.server.getTransaction(result.hash);
-    while (response.status === "NOT_FOUND") {
-      if (signal?.aborted) {
-        throw new DOMException("Transaction polling aborted", "AbortError");
+      if (result.status === "ERROR") {
+        throw new TransactionFailedError(JSON.stringify(result.errorResult));
       }
 
-      const elapsed = Date.now() - startTime;
-      if (elapsed >= this.txTimeoutMs) {
-        throw new Error(
-          `Transaction confirmation timed out after ${this.txTimeoutMs}ms`
-        );
+      // Poll for completion with configurable timeout and exponential backoff
+      const startTime = Date.now();
+      let delay = 500;
+      const maxDelay = 10_000;
+
+      let response = await this.server.getTransaction(result.hash);
+      while (response.status === "NOT_FOUND") {
+        if (signal?.aborted) {
+          throw new DOMException("Transaction polling aborted", "AbortError");
+        }
+
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= this.txTimeoutMs) {
+          throw new Error(
+            `Transaction confirmation timed out after ${this.txTimeoutMs}ms`
+          );
+        }
+
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, maxDelay);
+
+        response = await this.server.getTransaction(result.hash);
       }
 
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelay);
+      if (response.status === "FAILED") {
+        throw new TransactionFailedError(result.hash);
+      }
 
-      response = await this.server.getTransaction(result.hash);
+      if (operationName) {
+        this.writeAuditEntry({
+          operation: operationName,
+          result: "success",
+          durationMs: Date.now() - opStart,
+        });
+      }
+
+      return result.hash;
+    } catch (err) {
+      // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
+      this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
+      throw err;
     }
-
-    if (response.status === "FAILED") {
-      throw new TransactionFailedError(result.hash);
-    }
-
-    if (operationName) {
-      this.writeAuditEntry({
-        operation: operationName,
-        result: "success",
-        durationMs: Date.now() - opStart,
-      });
-    }
-
-    return result.hash;
   }
 
   private resolveFeeBump(override?: FeeBumpOptions): FeeBumpOptions | undefined {
@@ -995,6 +1016,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           "(unknown — post-creation fetch returned empty)"
         );
 
+      // Issue #212: notify subscribers of the custom event bus.
+      this.eventBus.emit("stream.created", {
+        streamId: latest.id,
+        sender,
+        recipient: params.recipient,
+        token: params.token,
+        txHash,
+      });
+
       return { streamId: latest.id, txHash };
     });
   }
@@ -1076,6 +1106,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
+
+    // Issue #212: notify subscribers of the custom event bus.
+    this.eventBus.emit("stream.withdrawn", {
+      streamId: params.streamId,
+      amount: claimable.toString(),
+      txHash,
+    });
+
     return { txHash, amount: claimable.toString() };
   }
 
@@ -1179,6 +1217,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
+
+    // Issue #212: notify subscribers of the custom event bus.
+    this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
+
     return { txHash };
   }
 
@@ -1842,27 +1884,36 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (existing) return existing;
 
     // 3. No cached value and no in-flight request — start one.
-    const request = withRetry(
-      () =>
-        this.simulateOp(
-          this.contract.call(
-            "get_claimable",
-            nativeToScVal(BigInt(streamId), { type: "u64" })
-          )
-        ),
-      this.readRetry
-    );
+    const request = (async () => {
+      const result = await withRetry(
+        () =>
+          this.simulateOp(
+            this.contract.call(
+              "get_claimable",
+              nativeToScVal(BigInt(streamId), { type: "u64" })
+            )
+          ),
+        this.readRetry
+      );
 
-    if (rpc.Api.isSimulationError(result)) return 0n;
+      if (rpc.Api.isSimulationError(result)) return 0n;
 
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) return 0n;
-    const raw = BigInt(scValToNative(returnVal) as number);
-    if (raw < 0n) {
-      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-      return 0n;
-    }
-    return raw;
+      const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!returnVal) return 0n;
+      const raw = BigInt(scValToNative(returnVal) as number);
+      if (raw < 0n) {
+        console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+        return 0n;
+      }
+      return raw;
+    })().finally(() => {
+      this.claimableInflight.delete(streamId);
+    });
+
+    this.claimableInflight.set(streamId, request);
+    const value = await request;
+    this.claimableCache.set(streamId, value);
+    return value;
   }
 
   /**
