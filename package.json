@@ -30,10 +30,15 @@
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.mjs",
       "require": "./dist/testing.js"
+    },
+    "./graphql": {
+      "types": "./dist/graphql.d.ts",
+      "import": "./dist/graphql.mjs",
+      "require": "./dist/graphql.js"
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean && npm run validate-exports",
+    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts src/graphql.ts --format cjs,esm --dts --clean && npm run validate-exports",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
@@ -66,6 +71,7 @@
     "@changesets/cli": "^2.31.1",
     "@types/node": "^22.0.0",
     "fast-check": "^3.22.0",
+    "graphql": "^16.9.0",
     "prettier": "^3.3.0",
     "tsup": "^8.0.0",
     "typedoc": "^0.28.0",
