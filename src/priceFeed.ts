@@ -1,4 +1,5 @@
 import type { PriceFeedAdapter } from "./types.js";
+import type { FetchAdapter } from "./adapters.js";
 
 export interface SimplePriceFeedOptions {
   /** Base URL for the price API (e.g. "https://api.coingecko.com/api/v3/simple/price"). */
@@ -7,6 +8,8 @@ export interface SimplePriceFeedOptions {
   headers?: Record<string, string>;
   /** Cache duration in ms (default: 60000). */
   cacheMs?: number;
+  /** Overrides the global `fetch` used to query the price API (issue #199). */
+  fetch?: FetchAdapter;
 }
 
 interface CacheEntry {
@@ -17,6 +20,7 @@ interface CacheEntry {
 export function createSimplePriceFeed(options: SimplePriceFeedOptions): PriceFeedAdapter {
   const cache = new Map<string, CacheEntry>();
   const cacheMs = options.cacheMs ?? 60_000;
+  const fetchImpl = options.fetch ?? fetch;
 
   return {
     async getPrice(
@@ -30,7 +34,7 @@ export function createSimplePriceFeed(options: SimplePriceFeedOptions): PriceFee
       }
 
       const url = `${options.apiUrl}/${tokenAddress}?vs_currencies=${displayCurrency}`;
-      const response = await fetch(url, { headers: options.headers });
+      const response = await fetchImpl(url, { headers: options.headers });
       if (!response.ok) {
         throw new Error(`Price feed request failed: ${response.status}`);
       }

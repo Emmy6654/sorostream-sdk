@@ -1,5 +1,11 @@
-export { SoroStreamClient } from "./SoroStreamClient.js";
+export { SoroStreamClient, createClient } from "./SoroStreamClient.js";
 export type { SoroStreamClientOptions, SimulateOnlyResult } from "./SoroStreamClient.js";
+export type {
+  StorageAdapter,
+  WebSocketFactory,
+  FetchAdapter,
+  SoroStreamAdapters,
+} from "./adapters.js";
 
 export { MockSoroStreamClient } from "./mock.js";
 
@@ -62,6 +68,7 @@ export { createContractEncoder } from "./contractEncoders.js";
 export type { ContractCallEncoder } from "./contractEncoders.js";
 export { createSimplePriceFeed } from "./priceFeed.js";
 export type { SimplePriceFeedOptions } from "./priceFeed.js";
+export { encodeMemo, encodeMemoHash, decodeMemo } from "./memo.js";
 export {
   SoroStreamError,
   InsufficientAmountError,
@@ -78,6 +85,7 @@ export {
   SoroStreamValidationError,
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
+  SoroStreamMemoError,
 } from "./errors.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
 export type {

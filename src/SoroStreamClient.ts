@@ -15,6 +15,8 @@ import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
+import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
+import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -177,12 +179,20 @@ export interface SoroStreamClientOptions {
    */
   checkDuplicate?: boolean;
   /**
-   * When true, write a JSON entry to localStorage['sorostream_audit_log']
-   * for each SDK write operation: timestamp, operation name, parameters
-   * (redacted of keys), result (success/error), and duration.
+   * When true, write a JSON entry to the `sorostream_audit_log` storage key
+   * (via `adapters.storage`, `localStorage` by default) for each SDK write
+   * operation: timestamp, operation name, parameters (redacted of keys),
+   * result (success/error), and duration.
    * Issue #227.
    */
   auditLog?: boolean;
+  /**
+   * Overrides for the browser globals (`localStorage`, `WebSocket`, `fetch`)
+   * the SDK uses by default. Required in environments — like React Native —
+   * that don't provide them as globals. See `@sorostream/sdk-react-native`.
+   * Issue #199.
+   */
+  adapters?: SoroStreamAdapters;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -272,6 +282,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private networkVersion = 0;
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
+  private readonly storageAdapter: StorageAdapter | null;
+  private readonly fetchAdapter: FetchAdapter;
   /**
    * Cached result of the contract's nonce-parameter capability check.
    * `null` means the check has not been performed yet.
@@ -307,6 +320,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.encoder = createContractEncoder(this.contract, options.contractVersion ?? "v1");
     this.defaultFeeBump = options.feeBump ?? null;
     this.priceFeed = options.priceFeed ?? null;
+    // Default TTL of 5 seconds: short enough to stay reasonably fresh,
+    // long enough to absorb bursts of concurrent reads for the same stream.
+    this.claimableCache = new Cache<string, bigint>(5_000);
     this.validateCliff = options.validateCliff ?? ((s) => {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
@@ -315,6 +331,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
     this.auditLogEnabled = options.auditLog ?? false;
+    this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
+    this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -347,9 +365,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     error?: string;
     durationMs: number;
   }): void {
-    if (!this.auditLogEnabled) return;
+    if (!this.auditLogEnabled || !this.storageAdapter) return;
     try {
-      const raw = localStorage.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+      const raw = this.storageAdapter.getItem(SoroStreamClient.AUDIT_LOG_KEY);
       const log: unknown[] = raw ? JSON.parse(raw) : [];
       // Redact keys from params (keep values for debugging)
       const redacted = entry.params ? this.redactParams(entry.params) : undefined;
@@ -366,9 +384,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       while (log.length > SoroStreamClient.AUDIT_LOG_MAX_ENTRIES) {
         log.shift();
       }
-      localStorage.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
+      this.storageAdapter.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
     } catch {
-      // localStorage may be unavailable or full — never throw
+      // storage may be unavailable or full — never throw
     }
   }
 
@@ -396,8 +414,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @returns Array of audit log entries, or empty array if unavailable.
    */
   getAuditLog(): Array<Record<string, unknown>> {
+    if (!this.storageAdapter) return [];
     try {
-      const raw = localStorage.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+      const raw = this.storageAdapter.getItem(SoroStreamClient.AUDIT_LOG_KEY);
       return raw ? JSON.parse(raw) : [];
     } catch {
       return [];
@@ -405,13 +424,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
-   * Clears all audit log entries from localStorage.
+   * Clears all audit log entries from storage.
    *
    * Issue #227.
    */
   clearAuditLog(): void {
+    if (!this.storageAdapter) return;
     try {
-      localStorage.removeItem(SoroStreamClient.AUDIT_LOG_KEY);
+      this.storageAdapter.removeItem(SoroStreamClient.AUDIT_LOG_KEY);
     } catch {
       // ignore
     }
@@ -435,6 +455,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+  }
+
+  /**
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
    *
@@ -958,7 +981,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         if (cached) {
           params = { ...params, recipient: cached };
         } else {
-          const resolved = await resolveFederationAddress(params.recipient);
+          const resolved = await resolveFederationAddress(params.recipient, this.fetchAdapter);
           this.federationCache.set(params.recipient, resolved);
           params = { ...params, recipient: resolved };
         }
@@ -1851,18 +1874,35 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           )
         ),
       this.readRetry
-    );
+    )
+      .then((result): bigint => {
+        if (rpc.Api.isSimulationError(result)) return 0n;
+        const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+        if (!returnVal) return 0n;
+        const raw = BigInt(scValToNative(returnVal) as number);
+        if (raw < 0n) {
+          console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+          return 0n;
+        }
+        return raw;
+      })
+      .then((value): bigint => {
+        // On success: populate the TTL cache so the next burst of callers
+        // doesn't need to wait for a new RPC round-trip.
+        this.claimableCache.set(streamId, value);
+        return value;
+      })
+      .finally(() => {
+        // Always remove the in-flight entry so future callers after TTL
+        // expiry can start a fresh request.
+        this.claimableInflight.delete(streamId);
+      });
 
-    if (rpc.Api.isSimulationError(result)) return 0n;
+    // Register before yielding so any other synchronous callers that arrive
+    // before the first await see the shared promise.
+    this.claimableInflight.set(streamId, request);
 
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) return 0n;
-    const raw = BigInt(scValToNative(returnVal) as number);
-    if (raw < 0n) {
-      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-      return 0n;
-    }
-    return raw;
+    return request;
   }
 
   /**
@@ -2520,6 +2560,33 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       })
       .sort((a, b) => a.timestamp - b.timestamp);
   }
+}
+
+/**
+ * Factory function for constructing a {@link SoroStreamClient}. Equivalent to
+ * `new SoroStreamClient(options)` — provided so environments without a
+ * default `localStorage`/`WebSocket`/`fetch` (e.g. React Native) can supply
+ * overrides via `adapters` without reaching for the class constructor.
+ *
+ * Issue #199.
+ *
+ * @example
+ * ```ts
+ * import { createClient } from "@sorostream/sdk";
+ * import { reactNativeAdapters } from "@sorostream/sdk-react-native";
+ *
+ * const client = createClient({
+ *   network: "testnet",
+ *   contractId: "...",
+ *   walletAdapter,
+ *   adapters: reactNativeAdapters,
+ * });
+ * ```
+ */
+export function createClient<TEventData = Record<string, unknown>>(
+  options: SoroStreamClientOptions
+): SoroStreamClient<TEventData> {
+  return new SoroStreamClient<TEventData>(options);
 }
 
 // Re-export for convenience

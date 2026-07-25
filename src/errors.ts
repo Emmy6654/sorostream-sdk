@@ -125,6 +125,13 @@ export class DuplicateStreamError extends SoroStreamError {
   }
 }
 
+export class SoroStreamMemoError extends SoroStreamError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SoroStreamMemoError";
+  }
+}
+
 export class FederationResolutionError extends SoroStreamError {
   constructor(address: string, reason?: string) {
     super(`Failed to resolve federation address "${address}"${reason ? `: ${reason}` : ""}`);
@@ -148,6 +155,9 @@ export class SoroStreamValidationError extends SoroStreamError {
     this.field = field;
     this.actualLength = actualLength;
     this.maxLength = maxLength;
+  }
+}
+
 /**
  * Thrown by `createStream` when `strict: true` is set in {@link WriteOptions}
  * and the caller provides a `nonce` field but the deployed contract does not

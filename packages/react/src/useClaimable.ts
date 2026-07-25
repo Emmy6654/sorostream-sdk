@@ -34,12 +34,14 @@ export function useClaimable(
 
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
+    const activeClient = client;
+    const activeStreamId = streamId;
 
     async function fetchClaimable() {
       setLoading(true);
       setError(null);
       try {
-        const result = await client.getClaimable(streamId);
+        const result = await activeClient.getClaimable(activeStreamId);
         if (!cancelled) {
           setClaimable(result);
           setLoading(false);

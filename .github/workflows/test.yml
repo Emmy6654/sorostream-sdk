@@ -31,6 +31,7 @@ jobs:
           npm run check:changeset -- --base origin/main
           npm run build
           npm test
+          npm run test:cjs
 
       - name: Setup Bun
         if: matrix.runtime == 'bun'
