@@ -148,5 +148,21 @@ export class SoroStreamValidationError extends SoroStreamError {
     this.field = field;
     this.actualLength = actualLength;
     this.maxLength = maxLength;
+/**
+ * Thrown by `createStream` when `strict: true` is set in {@link WriteOptions}
+ * and the caller provides a `nonce` field but the deployed contract does not
+ * support the nonce parameter (issue #231).
+ *
+ * When `strict` is **not** set (default), a `console.warn` is emitted instead.
+ */
+export class NonceNotSupportedError extends SoroStreamError {
+  constructor() {
+    super(
+      "The nonce field was provided but the deployed contract does not support " +
+        "nonce-based idempotency. Retries will NOT be deduplicated. " +
+        "Upgrade the contract or remove the nonce field. " +
+        "Pass strict: true in WriteOptions to turn this into an error."
+    );
+    this.name = "NonceNotSupportedError";
   }
 }

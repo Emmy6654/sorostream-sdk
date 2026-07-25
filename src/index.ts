@@ -72,6 +72,7 @@ export {
   InsufficientAllowanceError,
   FederationResolutionError,
   SoroStreamValidationError,
+  NonceNotSupportedError,
 } from "./errors.js";
 export type { BulkCreateFailedSlot } from "./errors.js";
 export type {
@@ -101,6 +102,8 @@ export type {
   BulkCreateResult,
   BatchCancelResult,
   BatchWithdrawResult,
+  BatchWithdrawPartialResult,
+  SkippedStream,
   TokenAggregate,
   MultisigSigner,
   StreamEvent,

@@ -39,11 +39,13 @@ import {
   InsufficientAllowanceError,
   DuplicateStreamError,
   FederationResolutionError,
+  NonceNotSupportedError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
   BatchCancelResult,
   BatchWithdrawResult,
+  BatchWithdrawPartialResult,
   BulkCreateOptions,
   BulkCreateResult,
   CancelStreamParams,
@@ -237,6 +239,18 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private eventPoller: EventPoller | null = null;
   /** Per-stream read cache, keyed by `${network}:${streamId}`. */
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
+  /**
+   * Per-sender streams cache, keyed by `${network}:${sender}`.
+   * Invalidated on every `setNetwork` call to prevent stale cross-network data.
+   * Issue #230.
+   */
+  private readonly senderCache = new Cache<string, Stream[]>(STREAM_CACHE_TTL_MS);
+  /**
+   * Per-recipient streams cache, keyed by `${network}:${recipient}`.
+   * Invalidated on every `setNetwork` call to prevent stale cross-network data.
+   * Issue #230.
+   */
+  private readonly recipientCache = new Cache<string, Stream[]>(STREAM_CACHE_TTL_MS);
   /** Federation address resolution cache (5 min TTL). */
   private readonly federationCache = new Cache<string, string>(300_000);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
@@ -258,6 +272,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private networkVersion = 0;
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  /**
+   * Cached result of the contract's nonce-parameter capability check.
+   * `null` means the check has not been performed yet.
+   * Issue #231.
+   */
+  private _nonceSupported: boolean | null = null;
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -404,6 +424,49 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+   * Detects whether the deployed contract supports the `nonce` parameter on
+   * `create_stream` by calling `get_version` and inspecting the response.
+   *
+   * The result is cached after the first successful call so subsequent calls
+   * are instant. Returns `false` on any RPC/simulation error so callers degrade
+   * gracefully when the check cannot be performed.
+   *
+   * Issue #231.
+   */
+  async supportsNonce(): Promise<boolean> {
+    if (this._nonceSupported !== null) return this._nonceSupported;
+    try {
+      const result = await this.simulateOp(
+        this.contract.call("get_version")
+      );
+      if (rpc.Api.isSimulationError(result)) {
+        // Contract too old to have get_version — nonces not supported.
+        this._nonceSupported = false;
+        return false;
+      }
+      const retval = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!retval) {
+        this._nonceSupported = false;
+        return false;
+      }
+      const version = scValToNative(retval) as Record<string, unknown> | string | number;
+      // A contract that returns a version map with a `nonce_support` flag or
+      // a major version >= 2 is considered to support nonces.
+      if (typeof version === "object" && version !== null) {
+        const hasNonceFlag =
+          "nonce_support" in version && Boolean(version["nonce_support"]);
+        const majorVersion =
+          typeof version["major"] === "number" ? version["major"] : 0;
+        this._nonceSupported = hasNonceFlag || majorVersion >= 2;
+      } else {
+        // Scalar version number: version >= 2 supports nonces.
+        const v = Number(version);
+        this._nonceSupported = !isNaN(v) && v >= 2;
+      }
+    } catch {
+      this._nonceSupported = false;
+    }
+    return this._nonceSupported;
   }
 
   /**
@@ -434,7 +497,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     // 1. Drop the read cache so stale stream data from the previous network
     //    is never served from cache after the switch.
+    // 1. Drop the read caches so stale stream data from the previous network
+    //    is never served from cache after the switch (issue #230).
     this.streamCache.clear();
+    this.senderCache.clear();
+    this.recipientCache.clear();
 
     // 2. Destroy the existing event poller — it's still pointing at the
     //    previous network's RPC and would otherwise emit stale events for
@@ -450,6 +517,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       options?.rpcUrl ?? RPC_URLS[network],
       { allowHttp: false }
     );
+
+    // Reset nonce-support cache so it is re-probed on the new network.
+    this._nonceSupported = null;
 
     // Note: `this.encoder` is bound to the contract address (not the network)
     // and is therefore safe to reuse. The contract instance and wallet adapter
@@ -816,6 +886,25 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (params.amount <= 0n) throw new InsufficientAmountError();
       await this.validateCliff(params.cliffSeconds ?? 0);
 
+      // Issue #231: Warn (or throw when strict:true) if the caller provides a
+      // nonce field but the contract does not support it.
+      if (params.nonce !== undefined) {
+        const nonceOk = await this.supportsNonce();
+        if (!nonceOk) {
+          if (options?.strict) {
+            throw new NonceNotSupportedError();
+          } else {
+            console.warn(
+              "[SoroStream SDK] createStream: nonce was provided but the deployed " +
+                "contract does not support nonce-based idempotency. " +
+                "Retries will NOT be deduplicated and may create duplicate streams. " +
+                "Upgrade the contract or pass strict: true in WriteOptions to turn " +
+                "this into an error."
+            );
+          }
+        }
+      }
+
       // Resolve federation address if needed, with caching
       if (isFederationAddress(params.recipient)) {
         const cached = this.federationCache.get(params.recipient);
@@ -944,46 +1033,109 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
-   * Withdraws from multiple streams in batched transactions.
+   * Withdraws from multiple streams, collecting partial results instead of
+   * throwing on first failure.
    *
-   * Streams are chunked by `batchSize` to stay within Stellar's per-transaction
-   * operation limit. Each chunk becomes one submitted transaction.
+   * Each withdrawal is submitted individually. When a stream succeeds its ID
+   * is recorded in `successes`; when it fails the ID and error are recorded in
+   * `failures`. The method **never throws** — callers should inspect the
+   * returned object to detect failures and safely retry only the failed IDs.
    *
    * @param streamIds - Stream IDs to withdraw from.
-   * @param batchSize - Maximum operations per transaction (default 8).
-   * @returns Array of `BatchWithdrawResult`, one entry per submitted transaction.
-   * @throws {TransactionFailedError} If any batch transaction is rejected.
+   * @param batchSize - Maximum operations per transaction (default 8). Chunks
+   *   are still attempted together, but a chunk failure is recorded per-stream.
+   * @returns `{ successes, failures }` — IDs that were successfully withdrawn
+   *   and the IDs+errors that were not.
+   *
+   * **Migration note (issue #229):** Previously this method returned
+   * `BatchWithdrawResult[]` and threw on the first failure. It now returns
+   * `BatchWithdrawPartialResult` and never throws. Update call sites that rely
+   * on a thrown error to instead check `result.failures`.
    *
    * @example
    * ```ts
-   * const results = await client.batchWithdraw(["1", "2", "3"]);
-   * for (const r of results) console.log(r.txHash, r.amounts);
+   * const { successes, failures } = await client.batchWithdraw(["1", "2", "3"]);
+   * if (failures.length) {
+   *   console.warn("Some withdrawals failed:", failures);
+   * }
+   * console.log("Withdrawn:", successes);
    * ```
    */
   async batchWithdraw(
     streamIds: string[],
     batchSize = 8
-  ): Promise<BatchWithdrawResult[]> {
-    const results: BatchWithdrawResult[] = [];
+  ): Promise<BatchWithdrawPartialResult> {
+    const successes: string[] = [];
+    const failures: { id: string; error: Error }[] = [];
     const recipient = await this.walletAdapter.getPublicKey();
 
     for (let i = 0; i < streamIds.length; i += batchSize) {
       const chunk = streamIds.slice(i, i + batchSize);
+
+      // Fetch claimable amounts first — individual failures here are recorded
+      // but do not prevent us from attempting the remaining streams.
+      const amounts: Map<string, string> = new Map();
+      for (const id of chunk) {
+        try {
+          const claimable = await this.getClaimable(id);
+          amounts.set(id, claimable.toString());
+        } catch {
+          amounts.set(id, "0");
+        }
+      }
+
       const operations = chunk.map((id) =>
         this.encoder.withdraw(id, recipient)
       );
 
-      const amounts: string[] = [];
+      try {
+        await this.executeBatch(operations);
+        for (const id of chunk) {
+          successes.push(id);
+        }
+      } catch (err) {
+        // Batch failed — record every stream in the chunk as failed.
+        for (const id of chunk) {
+          failures.push({ id, error: err instanceof Error ? err : new Error(String(err)) });
+        }
+      }
+      const skipped: SkippedStream[] = [];
+      const activeIds: string[] = [];
+
       for (const id of chunk) {
+        const claimable = await this.getClaimable(id);
+        if (claimable === 0n) {
+          skipped.push({ id, reason: "zero_claimable" });
+        } else {
+          activeIds.push(id);
+        }
+      }
+
+      if (activeIds.length === 0) {
+        results.push({
+          txHash: "",
+          streamIds: [],
+          amounts: [],
+          skipped,
+        });
+        continue;
+      }
+
+      const operations = activeIds.map((id) =>
+        this.encoder.withdraw(id, recipient)
+      );
+
+      const amounts: string[] = [];
+      for (const id of activeIds) {
         const claimable = await this.getClaimable(id);
         amounts.push(claimable.toString());
       }
 
       const txHash = await this.executeBatch(operations);
-      results.push({ txHash, streamIds: chunk, amounts });
+      results.push({ txHash, streamIds: activeIds, amounts, skipped });
     }
 
-    return results;
+    return { successes, failures };
   }
 
   /**
@@ -1676,12 +1828,19 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
     if (!returnVal) return 0n;
-    return BigInt(scValToNative(returnVal) as number);
+    const raw = BigInt(scValToNative(returnVal) as number);
+    if (raw < 0n) {
+      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+      return 0n;
+    }
+    return raw;
   }
 
   /**
    * Returns all streams created by a sender address.
    * When `pagination` is omitted, returns the full result set (backward-compatible).
+   * Results are cached per-network to prevent stale cross-network data on network
+   * switches. The cache is invalidated by {@link setNetwork}. (Issue #230.)
    * Automatically retries on transient RPC errors.
    *
    * @param sender - The sender address to query.
@@ -1692,6 +1851,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     sender: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
+    // Network-keyed cache for non-paginated calls (issue #230).
+    const networkAtCallTime = this.network;
+    const cacheKey = `${networkAtCallTime}:${sender}`;
+    if (!pagination) {
+      const cached = this.senderCache.get(cacheKey);
+      if (cached) return cached;
+    }
+
     const args: xdr.ScVal[] = [nativeToScVal(sender, { type: "address" })];
 
     if (pagination) {
@@ -1726,6 +1893,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const raw = scValToNative(returnVal) as xdr.ScVal[];
     const streams = raw.map(scValToStream);
 
+    // Only cache non-paginated results, and only when the network hasn't
+    // switched mid-flight (mirrors the guard in getStream).
+    if (!pagination && networkAtCallTime === this.network) {
+      this.senderCache.set(cacheKey, streams);
+    }
+
     if (!pagination) return streams;
 
     const limit = pagination.limit ?? 20;
@@ -1740,6 +1913,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /**
    * Returns all streams targeting a recipient address.
    * When `pagination` is omitted, returns the full result set (backward-compatible).
+   * Results are cached per-network to prevent stale cross-network data on network
+   * switches. The cache is invalidated by {@link setNetwork}. (Issue #230.)
    * Automatically retries on transient RPC errors.
    *
    * @param recipient - The recipient address to query.
@@ -1750,6 +1925,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     recipient: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
+    // Network-keyed cache for non-paginated calls (issue #230).
+    const networkAtCallTime = this.network;
+    const cacheKey = `${networkAtCallTime}:${recipient}`;
+    if (!pagination) {
+      const cached = this.recipientCache.get(cacheKey);
+      if (cached) return cached;
+    }
+
     const args: xdr.ScVal[] = [
       nativeToScVal(recipient, { type: "address" }),
     ];
@@ -1785,6 +1968,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const raw = scValToNative(returnVal) as xdr.ScVal[];
     const streams = raw.map(scValToStream);
+
+    // Only cache non-paginated results, and only when the network hasn't
+    // switched mid-flight (mirrors the guard in getStream and getStreamsBySender).
+    if (!pagination && networkAtCallTime === this.network) {
+      this.recipientCache.set(cacheKey, streams);
+    }
 
     if (!pagination) return streams;
 
