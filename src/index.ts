@@ -46,6 +46,8 @@ export {
   deserializeStreamFromJSON,
   bigintReplacer,
   bigintReviver,
+  validateStringLength,
+  STRING_FIELD_LIMITS,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -73,6 +75,7 @@ export {
   BulkCreatePartialError,
   InsufficientAllowanceError,
   FederationResolutionError,
+  SoroStreamValidationError,
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
 } from "./errors.js";
