@@ -48,6 +48,10 @@ export {
   bigintReviver,
   validateStringLength,
   STRING_FIELD_LIMITS,
+  filterStreams,
+  sortStreams,
+  detectNetworkFromRpcUrl,
+  parseMemo,
 } from "./utils.js";
 export { templates } from "./templates.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
@@ -142,4 +146,12 @@ export type {
   StreamActivityEntry,
   StreamActivityType,
   GetActivityLogOptions,
+  StreamFilterCriteria,
+  StreamFilter,
+  StreamSortField,
+  SortOrder,
+  TokenMetadata,
+  MemoHash,
+  HorizonTransactionRecord,
+  ParsedMemo,
 } from "./types.js";

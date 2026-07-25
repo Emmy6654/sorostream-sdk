@@ -9,10 +9,11 @@ import {
   xdr,
   Transaction,
   FeeBumpTransaction,
+  Memo,
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
 import { Cache } from "./cache.js";
-import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength } from "./utils.js";
+import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 
@@ -84,6 +85,8 @@ import type {
   MiddlewareContext,
   StreamActivityEntry,
   GetActivityLogOptions,
+  TokenMetadata,
+  MemoHash,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
@@ -103,8 +106,15 @@ const NETWORK_PASSPHRASES: Record<Network, string> = {
 
 /** Options for constructing a SoroStreamClient. */
 export interface SoroStreamClientOptions {
-  /** The Stellar network to connect to. */
-  network: Network;
+  /**
+   * The Stellar network to connect to. Optional when `rpcUrl` is provided
+   * and its host can be auto-detected (issue #202): URLs containing
+   * `"testnet"` resolve to `"testnet"`; `"mainnet"` or `"horizon.stellar.org"`
+   * resolve to `"mainnet"`. When both are provided, `network` always wins —
+   * a mismatch against the auto-detected value logs a `console.warn` in
+   * non-production builds. Required (and not auto-detectable) for futurenet.
+   */
+  network?: Network;
   /** The deployed StreamContract address. */
   contractId: string;
   /** Wallet adapter for signing transactions. */
@@ -183,6 +193,12 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /**
+   * TTL in ms for cached SAC token metadata (name, symbol, decimals) returned
+   * by {@link SoroStreamClient.getTokenMetadata} (default: 600000 = 10 minutes).
+   * Issue #203.
+   */
+  tokenMetadataTtlMs?: number;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -290,12 +306,45 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
 
+  /** TTL cache: token address → resolved SAC metadata. Issue #203. */
+  private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
+  /** In-flight deduplication: token address → shared promise for the active RPC calls. */
+  private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
+
   constructor(options: SoroStreamClientOptions) {
-    this.network = options.network;
+    // Issue #202: auto-detect the network from the RPC URL host when
+    // `network` is not explicitly provided. An explicit `network` always
+    // wins; a mismatch against the detected value is logged as a warning
+    // so misconfigured testnet/mainnet setups are caught early.
+    const detectedNetwork = options.rpcUrl
+      ? detectNetworkFromRpcUrl(options.rpcUrl)
+      : undefined;
+    if (options.network !== undefined) {
+      this.network = options.network;
+      if (
+        detectedNetwork !== undefined &&
+        detectedNetwork !== options.network &&
+        typeof process !== "undefined" &&
+        process.env?.["NODE_ENV"] !== "production"
+      ) {
+        console.warn(
+          `[SoroStream SDK] rpcUrl "${options.rpcUrl}" looks like the "${detectedNetwork}" ` +
+            `network, but network was explicitly set to "${options.network}". ` +
+            `Using "${options.network}" — pass a matching rpcUrl or network to silence this warning.`
+        );
+      }
+    } else if (detectedNetwork !== undefined) {
+      this.network = detectedNetwork;
+    } else {
+      throw new Error(
+        "SoroStreamClient: could not determine the network. Pass `network` explicitly, " +
+          'or an `rpcUrl` containing "testnet", "mainnet", or "horizon.stellar.org".'
+      );
+    }
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
     this.server = new rpc.Server(
-      options.rpcUrl ?? RPC_URLS[options.network],
+      options.rpcUrl ?? RPC_URLS[this.network],
       { allowHttp: false }
     );
     this.txTimeoutMs = options.txTimeoutMs ?? 120_000;
@@ -307,6 +356,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.encoder = createContractEncoder(this.contract, options.contractVersion ?? "v1");
     this.defaultFeeBump = options.feeBump ?? null;
     this.priceFeed = options.priceFeed ?? null;
+    // Default TTL of 5 seconds: short enough to stay reasonably fresh,
+    // long enough to absorb bursts of concurrent reads for the same stream.
+    this.claimableCache = new Cache<string, bigint>(5_000);
+    // Default TTL of 10 minutes — token metadata (name/symbol/decimals) rarely
+    // changes, so a long TTL avoids redundant RPC calls. Issue #203.
+    this.tokenMetadataCache = new Cache<string, TokenMetadata>(
+      options.tokenMetadataTtlMs ?? 600_000
+    );
     this.validateCliff = options.validateCliff ?? ((s) => {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
@@ -329,7 +386,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         poolSize: options.poolSize,
         maxSubscriptionsPerConnection: options.maxSubscriptionsPerConnection,
         idleTimeoutMs: options.idleTimeoutMs,
-        rpcUrl: options.rpcUrl ?? RPC_URLS[options.network],
+        rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
         contractId: options.contractId,
       } satisfies ConnectionPoolOptions);
     }
@@ -435,6 +492,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+  }
+
+  /**
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
    *
@@ -596,11 +656,34 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return result;
   }
 
+  /**
+   * Builds a Stellar {@link Memo} from a write-option memo value (issue #201).
+   *
+   * - `string` values are encoded as `MEMO_TEXT`. Stellar limits text memos to
+   *   28 bytes once UTF-8 encoded; longer values throw.
+   * - {@link MemoHash} values are encoded as `MEMO_HASH` and must be exactly
+   *   32 bytes; any other length throws.
+   */
+  private buildMemo(memo: string | MemoHash): Memo {
+    if (typeof memo === "string") {
+      const byteLength = new TextEncoder().encode(memo).byteLength;
+      if (byteLength > 28) {
+        throw new Error(`Text memo exceeds the 28-byte limit (got ${byteLength} bytes)`);
+      }
+      return Memo.text(memo);
+    }
+    if (memo.length !== 32) {
+      throw new Error(`Hash memo must be exactly 32 bytes (got ${memo.length})`);
+    }
+    return Memo.hash(memo);
+  }
+
   private async buildAndSubmit(
     operation: xdr.Operation,
     signal?: AbortSignal,
     feeBumpOpts?: FeeBumpOptions,
-    operationName?: string
+    operationName?: string,
+    memo?: string | MemoHash
   ): Promise<string> {
     const opStart = Date.now();
     const publicKey = await this.walletAdapter.getPublicKey();
@@ -610,13 +693,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       { ...this.submitRetry, signal }
     );
 
-    const tx = new TransactionBuilder(account, {
+    const txBuilder = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: NETWORK_PASSPHRASES[this.network],
-    })
-      .addOperation(operation)
-      .setTimeout(30)
-      .build();
+    }).addOperation(operation);
+
+    if (memo !== undefined) {
+      txBuilder.addMemo(this.buildMemo(memo));
+    }
+
+    const tx = txBuilder.setTimeout(30).build();
 
     const preparedTx = await withRetry(
       () => this.withBreaker(() => this.server.prepareTransaction(tx)),
@@ -985,7 +1071,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
       const operation = this.encoder.createStream(sender, params);
       const feeBump = this.resolveFeeBump(options?.feeBump);
-      const txHash = await this.buildAndSubmit(operation, signal, feeBump, "createStream");
+      const txHash = await this.buildAndSubmit(operation, signal, feeBump, "createStream", options?.memo);
 
       const result = await this.getStreamsBySender(sender);
       const streams = Array.isArray(result) ? result : result.streams;
@@ -1075,7 +1161,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
     return { txHash, amount: claimable.toString() };
   }
 
@@ -1178,7 +1264,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
     return { txHash };
   }
 
@@ -1226,7 +1312,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.amount
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "topUp");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "topUp", options?.memo);
 
     // Fetch fresh on-chain state and cache it so immediate getStream() calls
     // reflect the topped-up balance without stale data.
@@ -1283,7 +1369,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
     return { txHash };
   }
 
@@ -1315,7 +1401,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.approved
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "setOperator");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "setOperator", options?.memo);
     return { txHash };
   }
 
@@ -1337,7 +1423,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.operatorCancelStream(params.streamId, operator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
     return { txHash };
   }
 
@@ -1362,7 +1448,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
     return { txHash };
   }
 
@@ -1410,7 +1496,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const operation = this.encoder.splitStream(sender, params);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "splitStream");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "splitStream", options?.memo);
 
     const result = await this.getStreamsBySender(sender);
     const streams = Array.isArray(result) ? result : result.streams;
@@ -1449,7 +1535,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.newRecipient
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "transferStream");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "transferStream", options?.memo);
     return { txHash };
   }
 
@@ -1471,7 +1557,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.pauseStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
     return { txHash };
   }
 
@@ -1493,7 +1579,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.resumeStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume");
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
     return { txHash };
   }
 
@@ -1851,18 +1937,121 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           )
         ),
       this.readRetry
-    );
+    )
+      .then((result): bigint => {
+        if (rpc.Api.isSimulationError(result)) return 0n;
+        const retval = (result as rpc.Api.SimulateTransactionSuccessResponse)
+          .result?.retval;
+        if (!retval) return 0n;
+        const raw = BigInt(scValToNative(retval) as number);
+        if (raw < 0n) {
+          console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+          return 0n;
+        }
+        return raw;
+      })
+      .then((value): bigint => {
+        // On success: populate the TTL cache so the next burst of callers
+        // doesn't need to wait for a new RPC round-trip.
+        this.claimableCache.set(streamId, value);
+        return value;
+      })
+      .finally(() => {
+        // Always remove the in-flight entry so future callers after TTL
+        // expiry can start a fresh request.
+        this.claimableInflight.delete(streamId);
+      });
 
-    if (rpc.Api.isSimulationError(result)) return 0n;
+    // Register before yielding so any other synchronous callers that arrive
+    // before the first await see the shared promise.
+    this.claimableInflight.set(streamId, request);
 
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) return 0n;
-    const raw = BigInt(scValToNative(returnVal) as number);
-    if (raw < 0n) {
-      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-      return 0n;
+    return request;
+  }
+
+  // ── Issue #203: Token metadata caching ────────────────────────────────────
+
+  /**
+   * Returns SAC token metadata (name, symbol, decimals) for a token contract.
+   *
+   * Results are cached in-memory per client instance with the TTL configured
+   * via `tokenMetadataTtlMs` (default 10 minutes). Concurrent callers for the
+   * same token address share a single in-flight RPC request.
+   *
+   * @param tokenAddress - The SAC token contract address.
+   * @returns The token's `{ name, symbol, decimals }`.
+   *
+   * @example
+   * ```ts
+   * const { symbol, decimals } = await client.getTokenMetadata(usdcAddress);
+   * console.log(formatUSDC(claimable, decimals), symbol);
+   * ```
+   */
+  async getTokenMetadata(tokenAddress: string): Promise<TokenMetadata> {
+    // 1. Fast path: serve from TTL cache.
+    const cached = this.tokenMetadataCache.get(tokenAddress);
+    if (cached !== undefined) return cached;
+
+    // 2. Deduplication: if a fetch for this token is already in-flight,
+    //    join it rather than launching a second one.
+    const existing = this.tokenMetadataInflight.get(tokenAddress);
+    if (existing) return existing;
+
+    // 3. No cached value and no in-flight request — start one.
+    const tokenContract = new Contract(tokenAddress);
+    const readView = async (method: string): Promise<unknown> => {
+      const result = await withRetry(
+        () => this.simulateOp(tokenContract.call(method)),
+        this.readRetry
+      );
+      if (rpc.Api.isSimulationError(result)) {
+        throw new Error(`Failed to read token ${method}(): ${result.error}`);
+      }
+      const retval = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      return retval ? scValToNative(retval) : undefined;
+    };
+
+    const request = Promise.all([
+      readView("name"),
+      readView("symbol"),
+      readView("decimals"),
+    ])
+      .then(([name, symbol, decimals]): TokenMetadata => ({
+        name: String(name ?? ""),
+        symbol: String(symbol ?? ""),
+        decimals: Number(decimals ?? 7),
+      }))
+      .then((metadata) => {
+        // On success: populate the TTL cache so subsequent calls for this
+        // token are served without another RPC round-trip.
+        this.tokenMetadataCache.set(tokenAddress, metadata);
+        return metadata;
+      })
+      .finally(() => {
+        // Always remove the in-flight entry so future callers after TTL
+        // expiry can start a fresh request.
+        this.tokenMetadataInflight.delete(tokenAddress);
+      });
+
+    // Register before yielding so any other synchronous callers that arrive
+    // before the first await see the shared promise.
+    this.tokenMetadataInflight.set(tokenAddress, request);
+
+    return request;
+  }
+
+  /**
+   * Clears cached SAC token metadata.
+   *
+   * @param tokenAddress - Optional specific token to invalidate. If omitted,
+   *   the entire token metadata cache is cleared.
+   */
+  clearTokenCache(tokenAddress?: string): void {
+    if (tokenAddress === undefined) {
+      this.tokenMetadataCache.clear();
+      return;
     }
-    return raw;
+    this.tokenMetadataCache.delete(tokenAddress);
   }
 
   /**
