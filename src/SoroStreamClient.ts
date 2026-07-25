@@ -278,6 +278,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * Issue #231.
    */
   private _nonceSupported: boolean | null = null;
+  /**
+   * Cached ledger timestamp (Unix seconds) with 5-second TTL.
+   * Used as the canonical "now" reference for time-based validation
+   * instead of the local system clock (Date.now()).
+   */
+  private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
@@ -751,6 +757,39 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.withBreaker(() => this.server.simulateTransaction(tx));
   }
 
+  /**
+   * Returns the current ledger timestamp (Unix seconds) from the RPC endpoint,
+   * cached with a 5-second TTL to avoid an extra RPC call on every request.
+   *
+   * Falls back to `Math.floor(Date.now() / 1000)` when the RPC is unreachable
+   * so that time-based validation does not block stream creation during an
+   * outage. The fallback is intentionally silent — the local clock drift is
+   * small relative to the multi-second stream durations being validated.
+   */
+  private async getLedgerTimestamp(): Promise<number> {
+    const now = Date.now();
+    if (this._ledgerTimestampCache && now < this._ledgerTimestampCache.expiresAt) {
+      return this._ledgerTimestampCache.value;
+    }
+    try {
+      const ledger = await this.withBreaker(() => this.server.getLatestLedger()) as { id: string; sequence: number; protocolVersion: string; lastLedgerCloseTime?: number };
+      const ts = ledger.lastLedgerCloseTime ?? Math.floor(Date.now() / 1000);
+      this._ledgerTimestampCache = { value: ts, expiresAt: now + 5_000 };
+      return ts;
+    } catch {
+      return Math.floor(Date.now() / 1000);
+    }
+  }
+
+  /**
+   * Clears the cached ledger timestamp. Useful when callers know the ledger
+   * has advanced (e.g. after a transaction submission) and want the next
+   * validation to fetch a fresh timestamp.
+   */
+  clearLedgerTimestampCache(): void {
+    this._ledgerTimestampCache = null;
+  }
+
   // ── Pre-flight validation (Issue 2) ───────────────────────────────────────
 
   private async validateStreamParams(
@@ -773,8 +812,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       );
     }
 
-    // Verify endTime > startTime at the time of submission.
-    const startTime = Math.floor(Date.now() / 1000);
+    // Use the ledger timestamp as the canonical "now" reference instead of the
+    // local system clock so that a clock-skewed machine does not incorrectly
+    // accept or reject stream creation.
+    const ledgerNow = await this.getLedgerTimestamp();
+    const startTime = ledgerNow;
     const endTime = startTime + params.durationSeconds;
     if (endTime <= startTime) {
       throw new ZeroDurationError(
