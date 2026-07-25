@@ -285,6 +285,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
+  /** TTL cache: streamId → resolved claimable amount */
+  private readonly claimableCache: Cache<string, bigint>;
+  /** In-flight deduplication: streamId → shared promise for the active RPC call */
+  private readonly claimableInflight = new Map<string, Promise<bigint>>();
+
   constructor(options: SoroStreamClientOptions) {
     this.network = options.network;
     this.walletAdapter = options.walletAdapter;
@@ -1847,6 +1852,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /**
    * Returns the currently claimable amount in stroops for a stream.
    *
+   * Concurrent callers for the same stream ID share a single in-flight RPC
+   * request — they all receive the same resolved value rather than racing to
+   * produce independent results. After resolution the value is cached for 5 s,
+   * so subsequent callers within that window skip the RPC call entirely.
+   *
    * Distinguishes "stream not found" (returns `0n`) from transient RPC errors
    * (retried automatically, then thrown). A contract-level simulation error
    * indicates the stream does not exist; network failures are retried.
@@ -1855,7 +1865,17 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @returns The claimable amount in stroops, or `0n` if the stream does not exist.
    */
   async getClaimable(streamId: string): Promise<bigint> {
-    const result = await withRetry(
+    // 1. Fast path: serve from TTL cache.
+    const cached = this.claimableCache.get(streamId);
+    if (cached !== undefined) return cached;
+
+    // 2. Deduplication: if an RPC call for this stream is already in-flight,
+    //    join it rather than launching a second one.
+    const existing = this.claimableInflight.get(streamId);
+    if (existing) return existing;
+
+    // 3. No cached value and no in-flight request — start one.
+    const request = withRetry(
       () =>
         this.simulateOp(
           this.contract.call(
