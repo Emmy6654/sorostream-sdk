@@ -54,6 +54,9 @@
     }
   },
   "scripts": {
+    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean && npm run validate-exports",
+    "size": "size-limit",
+    "size:check": "npm run build && size-limit --why",
     "build": "tsup src/index.ts src/core.ts src/wallets.ts src/batch.ts src/mock.ts src/testing.ts --format cjs,esm --dts --sourcemap --clean && npm run validate-exports",
     "build:dev": "tsup src/index.ts src/core.ts src/wallets.ts src/batch.ts src/mock.ts src/testing.ts --format cjs,esm --dts --sourcemap inline --clean",
     "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts src/graphql.ts --format cjs,esm --dts --clean && npm run validate-exports",
@@ -89,11 +92,13 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",
+    "@size-limit/preset-small-lib": "^13.0.1",
     "@types/node": "^22.0.0",
     "esbuild": "^0.27.7",
     "fast-check": "^3.22.0",
     "graphql": "^16.9.0",
     "prettier": "^3.3.0",
+    "size-limit": "^13.0.1",
     "source-map-explorer": "^2.5.3",
     "tsup": "^8.0.0",
     "typedoc": "^0.28.0",
