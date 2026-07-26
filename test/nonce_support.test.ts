@@ -28,6 +28,7 @@ function makeClient() {
     network: "testnet",
     contractId: VALID_CONTRACT,
     walletAdapter: adapter,
+    skipPeerCheck: true,
   });
   return client;
 }

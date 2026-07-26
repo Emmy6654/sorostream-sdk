@@ -52,6 +52,10 @@ export {
   decodeStreamId,
 } from "./utils.js";
 export { templates } from "./templates.js";
+export { serializeStream, deserializeStream } from "./serialization.js";
+export type { SerializedStream } from "./serialization.js";
+export { getTransactionHistory, getAddressActivity } from "./horizon.js";
+export type { StreamTransaction, TransactionHistoryPage, TransactionHistoryOptions } from "./horizon.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
 export { withRetry } from "./retry.js";
 export type { RetryOptions } from "./retry.js";
@@ -82,7 +86,9 @@ export {
   SoroStreamValidationError,
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
+  SoroStreamDependencyError,
 } from "./errors.js";
+export { checkPeerDependencies } from "./peerDependencies.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
 export type {
   Stream,

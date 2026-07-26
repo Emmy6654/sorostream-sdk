@@ -1,4 +1,3 @@
-/** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
 
 // ── Event types (#1) ─────────────────────────────────────────────────────────
@@ -334,6 +333,16 @@ export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
   isConnected(): Promise<boolean>;
+  /**
+   * Optional: subscribe to wallet-initiated network changes (issue #215).
+   * Called with the new network whenever the connected wallet switches
+   * networks mid-session (e.g. the user changes networks in the Freighter
+   * extension). Returns an unsubscribe function.
+   *
+   * Adapters that cannot detect wallet-side network changes (server-side
+   * keypair adapters, multisig adapters, etc.) simply omit this method.
+   */
+  onNetworkChange?(callback: (network: Network) => void): () => void;
 }
 
 /** A single row for bulk stream creation. */

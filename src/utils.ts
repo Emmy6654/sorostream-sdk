@@ -1041,6 +1041,48 @@ export function jsonStringifyStream(obj: unknown, space?: string | number): stri
 
 export const jsonStringify = jsonStringifyStream;
 
+// ── Issue #226: String field length validation ────────────────────────────────
+
+/**
+ * Maximum byte length limits for string fields passed to the contract.
+ * Keys match the field names used in `CreateStreamParams` and related types.
+ *
+ * @example
+ * ```ts
+ * import { STRING_FIELD_LIMITS } from "@sorostream/sdk";
+ * const limit = STRING_FIELD_LIMITS.recipient; // 64
+ * ```
+ */
+export const STRING_FIELD_LIMITS: Readonly<Record<string, number>> = {
+  recipient: 64,
+  token: 64,
+  metadataUri: 128,
+  description: 256,
+};
+
+/**
+ * Validates that a string field does not exceed its allowed byte length.
+ * Throws {@link SoroStreamValidationError} when the limit is exceeded.
+ *
+ * @param field - Field name (must be a key in `STRING_FIELD_LIMITS`).
+ * @param value - The string value to validate.
+ * @throws {SoroStreamValidationError} When the byte length exceeds the limit.
+ *
+ * @example
+ * ```ts
+ * validateStringLength("recipient", params.recipient);
+ * validateStringLength("metadataUri", metadataUri); // 128 byte limit
+ * ```
+ */
+export function validateStringLength(field: string, value: string): void {
+  const limit = STRING_FIELD_LIMITS[field];
+  if (limit === undefined) return; // no configured limit — pass through
+  const byteLength = new TextEncoder().encode(value).byteLength;
+  if (byteLength > limit) {
+    throw new SoroStreamValidationError(field, byteLength, limit);
+  }
+}
+
 const BIGINT_SUFFIX = "_bigint";
 
 /**
@@ -1260,3 +1302,4 @@ export function validateStringLength(field: string, value: string): void {
     throw new SoroStreamValidationError(field, byteLength, limit);
   }
 }
+
