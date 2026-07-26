@@ -17,6 +17,13 @@ import type {
   StreamHealthReport,
   RecipientAggregate,
   CompressionOptions,
+  StreamFilter,
+  StreamSortField,
+  SortOrder,
+  Network,
+  HorizonTransactionRecord,
+  ParsedMemo,
+  MemoHash,
 } from "./types.js";
 
 /** A single point in a stream's payout forecast. */
@@ -113,6 +120,26 @@ export async function toFiatDisplay(
 
   const fiatAmount = fiatValue.toFixed(2);
   return { tokenAmount, fiatAmount };
+}
+
+// ── Issue #202: Network auto-detection ──────────────────────────────────────
+
+/**
+ * Attempts to detect the Stellar network from an RPC URL.
+ *
+ * URLs containing `"testnet"` resolve to `"testnet"`; URLs containing
+ * `"mainnet"` or `"horizon.stellar.org"` resolve to `"mainnet"`. Returns
+ * `undefined` for URLs that don't match a known pattern (e.g. futurenet or
+ * a custom/self-hosted RPC), in which case the network must be set explicitly.
+ *
+ * @param rpcUrl - The RPC endpoint URL to inspect.
+ * @returns The detected network, or `undefined` if it can't be determined.
+ */
+export function detectNetworkFromRpcUrl(rpcUrl: string): Network | undefined {
+  const lower = rpcUrl.toLowerCase();
+  if (lower.includes("testnet")) return "testnet";
+  if (lower.includes("mainnet") || lower.includes("horizon.stellar.org")) return "mainnet";
+  return undefined;
 }
 
 /**
@@ -711,6 +738,53 @@ export function isStreamUnderfunded(stream: Stream): boolean {
   return remainingDeposit < expectedRemaining;
 }
 
+// ── Stream filtering / sorting (issue #204) ─────────────────────────────────
+
+/**
+ * Filters a list of streams by status, sender, recipient, token, and/or
+ * active-only. All provided criteria are ANDed together.
+ *
+ * @param streams - Streams to filter.
+ * @param filters - Criteria to filter by. Omitted fields are not checked.
+ * @returns A new array containing only the matching streams.
+ *
+ * @example
+ * ```ts
+ * const activeFromAlice = filterStreams(streams, { sender: aliceAddress, activeOnly: true });
+ * ```
+ */
+export function filterStreams(streams: Stream[], filters: StreamFilter): Stream[] {
+  return streams.filter((s) => {
+    if (filters.status !== undefined && s.status !== filters.status) return false;
+    if (filters.sender !== undefined && s.sender !== filters.sender) return false;
+    if (filters.recipient !== undefined && s.recipient !== filters.recipient) return false;
+    if (filters.token !== undefined && s.token !== filters.token) return false;
+    if (filters.activeOnly && (s.status !== "Active" || isExpired(s))) return false;
+    return true;
+  });
+}
+
+/**
+ * Returns a new array of streams sorted by the given field.
+ *
+ * @param streams - Streams to sort (not mutated).
+ * @param by - Field to sort by. `"amount"` sorts by `deposit`.
+ * @param order - Sort direction (default `"asc"`).
+ * @returns A new, sorted array.
+ */
+export function sortStreams(
+  streams: Stream[],
+  by: StreamSortField,
+  order: SortOrder = "asc"
+): Stream[] {
+  const direction = order === "desc" ? -1 : 1;
+  return [...streams].sort((a, b) => {
+    const diff =
+      by === "amount" ? a.deposit - b.deposit : BigInt(a[by]) - BigInt(b[by]);
+    return (diff < 0n ? -1 : diff > 0n ? 1 : 0) * direction;
+  });
+}
+
 // ── Token aggregation ─────────────────────────────────────────────────────────
 
 
@@ -1051,6 +1125,48 @@ export function jsonStringifyStream(obj: unknown, space?: string | number): stri
 }
 
 export const jsonStringify = jsonStringifyStream;
+
+// ── Issue #226: String field length validation ────────────────────────────────
+
+/**
+ * Maximum byte length limits for string fields passed to the contract.
+ * Keys match the field names used in `CreateStreamParams` and related types.
+ *
+ * @example
+ * ```ts
+ * import { STRING_FIELD_LIMITS } from "@sorostream/sdk";
+ * const limit = STRING_FIELD_LIMITS.recipient; // 64
+ * ```
+ */
+export const STRING_FIELD_LIMITS: Readonly<Record<string, number>> = {
+  recipient: 64,
+  token: 64,
+  metadataUri: 128,
+  description: 256,
+};
+
+/**
+ * Validates that a string field does not exceed its allowed byte length.
+ * Throws {@link SoroStreamValidationError} when the limit is exceeded.
+ *
+ * @param field - Field name (must be a key in `STRING_FIELD_LIMITS`).
+ * @param value - The string value to validate.
+ * @throws {SoroStreamValidationError} When the byte length exceeds the limit.
+ *
+ * @example
+ * ```ts
+ * validateStringLength("recipient", params.recipient);
+ * validateStringLength("metadataUri", metadataUri); // 128 byte limit
+ * ```
+ */
+export function validateStringLength(field: string, value: string): void {
+  const limit = STRING_FIELD_LIMITS[field];
+  if (limit === undefined) return; // no configured limit — pass through
+  const byteLength = new TextEncoder().encode(value).byteLength;
+  if (byteLength > limit) {
+    throw new SoroStreamValidationError(field, byteLength, limit);
+  }
+}
 
 const BIGINT_SUFFIX = "_bigint";
 

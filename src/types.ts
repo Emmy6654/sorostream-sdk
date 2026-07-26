@@ -344,6 +344,16 @@ export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
   isConnected(): Promise<boolean>;
+  /**
+   * Optional: subscribe to wallet-initiated network changes (issue #215).
+   * Called with the new network whenever the connected wallet switches
+   * networks mid-session (e.g. the user changes networks in the Freighter
+   * extension). Returns an unsubscribe function.
+   *
+   * Adapters that cannot detect wallet-side network changes (server-side
+   * keypair adapters, multisig adapters, etc.) simply omit this method.
+   */
+  onNetworkChange?(callback: (network: Network) => void): () => void;
 }
 
 /** A single row for bulk stream creation. */
@@ -507,7 +517,41 @@ export interface FeeBumpOptions {
   maxFee?: number;
 }
 
+// ── Issue #201: Memo parsing ─────────────────────────────────────────────────
+
+/**
+ * The subset of a Horizon transaction record's fields needed to decode its
+ * memo. Accepts a full Horizon transaction response as well as this minimal
+ * shape.
+ */
+export interface HorizonTransactionRecord {
+  /** The memo encoding used, or `"none"` when no memo was set. */
+  memo_type?: "none" | "text" | "id" | "hash" | "return";
+  /**
+   * The raw memo value as returned by Horizon: plain text for `"text"`/`"id"`,
+   * base64 for `"hash"`/`"return"`. Absent when `memo_type` is `"none"`.
+   */
+  memo?: string;
+}
+
+/** The result of decoding a Horizon transaction record's memo. */
+export interface ParsedMemo {
+  /** The memo's encoding, or `"none"` when the transaction had no memo. */
+  type: "none" | "text" | "id" | "hash" | "return";
+  /**
+   * The decoded value: the plain string for `"text"`/`"id"`, a 32-byte
+   * `Buffer` for `"hash"`/`"return"`, or `null` when `type` is `"none"`.
+   */
+  value: string | MemoHash | null;
+}
+
 // ── Write options ────────────────────────────────────────────────────────────
+
+/**
+ * A 32-byte hash memo, as required by Stellar's `MEMO_HASH` type (issue #201).
+ * Any value whose length is not exactly 32 bytes is rejected at submission time.
+ */
+export type MemoHash = Buffer;
 
 /** Options for write operations (create, withdraw, cancel, top-up). */
 export interface WriteOptions {
@@ -521,6 +565,13 @@ export interface WriteOptions {
    * (default), a `console.warn` is emitted instead.
    */
   strict?: boolean;
+  /**
+   * Optional transaction memo for off-chain reconciliation (issue #201),
+   * e.g. tagging a transaction with an invoice ID or order reference.
+   * - `string` — encoded as `MEMO_TEXT`. Must be <= 28 bytes once UTF-8 encoded.
+   * - {@link MemoHash} (`Buffer`) — encoded as `MEMO_HASH`. Must be exactly 32 bytes.
+   */
+  memo?: string | MemoHash;
 }
 
 // ── Contract versioning (#Issue 4) ───────────────────────────────────────────
@@ -592,7 +643,7 @@ export interface RecipientAggregate {
   claimedSoFar: bigint;
 }
 
-// ── Stream filtering ────────────────────────────────────────────────────────
+// ── Stream filtering (issue #204) ───────────────────────────────────────────
 
 /** Criteria for filtering streams. */
 export interface StreamFilterCriteria {
@@ -600,7 +651,18 @@ export interface StreamFilterCriteria {
   recipient?: string;
   token?: string;
   status?: StreamStatus;
+  /** When true, only include streams that are `"Active"` and not yet expired. */
+  activeOnly?: boolean;
 }
+
+/** Alias for {@link StreamFilterCriteria}, matching the `filterStreams` API. */
+export type StreamFilter = StreamFilterCriteria;
+
+/** Field to sort streams by in {@link sortStreams}. `"amount"` sorts by `deposit`. */
+export type StreamSortField = "startTime" | "endTime" | "amount";
+
+/** Sort direction for {@link sortStreams}. */
+export type SortOrder = "asc" | "desc";
 
 // ── Issue #166: Stream activity log ─────────────────────────────────────────
 
@@ -699,6 +761,18 @@ export interface SoroStreamPlugin {
    * Re-throwing replaces the original error; returning swallows it.
    */
   onError?(ctx: MiddlewareContext, error: unknown): void | Promise<void>;
+}
+
+// ── Issue #203: Token metadata caching ──────────────────────────────────────
+
+/** SAC token metadata (name, symbol, decimals) as read from the token contract. */
+export interface TokenMetadata {
+  /** Full token name (e.g. "USD Coin"). */
+  name: string;
+  /** Token symbol (e.g. "USDC"). */
+  symbol: string;
+  /** Number of decimal places the token uses. */
+  decimals: number;
 }
 
 // ── Issue #187: Event batching ───────────────────────────────────────────────

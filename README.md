@@ -64,6 +64,11 @@ await client.withdraw({ streamId });
 | `estimateWithdrawFee(params)` | Estimates network fee for `withdraw`. Returns `{ totalFee, minResourceFee }` |
 | `estimateCancelStreamFee(params)` | Estimates network fee for `cancelStream`. Returns `{ totalFee, minResourceFee }` |
 | `estimateTopUpFee(params)` | Estimates network fee for `topUp`. Returns `{ totalFee, minResourceFee }` |
+| `getNetwork()` | Returns the resolved network (explicit or auto-detected from `rpcUrl`) |
+| `getTokenMetadata(tokenAddress)` | Returns cached or fresh SAC token `{ name, symbol, decimals }` |
+| `clearTokenCache(tokenAddress?)` | Clears cached token metadata for one token, or all tokens when omitted |
+| `resolveFederationAddress(name)` | Resolves a federation address (`alice*example.com`) to a G-address. Cached for 5 minutes; returns `null` (never throws) if unresolvable |
+| `onNetworkChanged(cb)` | Subscribes to wallet-initiated network switches. Returns an unsubscribe function |
 
 ### Utilities
 
@@ -76,19 +81,28 @@ await client.withdraw({ streamId });
 | `timeUntilStreamEnd(stream)` | Returns seconds until stream ends |
 | `calculateVestingSchedule(stream, cliffSeconds, now?)` | Display-only vesting schedule approximating a cliff. **Not enforced on-chain** |
 | `watchClaimable(stream, reconcile, onTick, options?)` | Live counting-up ticker for claimable balance. Returns unsubscribe function |
+| `filterStreams(streams, filters)` | Filters streams by status, sender, recipient, token, and/or active-only |
+| `sortStreams(streams, by, order?)` | Sorts streams by `"startTime"`, `"endTime"`, or `"amount"` |
+| `detectNetworkFromRpcUrl(rpcUrl)` | Detects `"testnet"`/`"mainnet"` from an RPC URL, or `undefined` if unrecognized |
+| `parseMemo(transaction)` | Decodes the memo from a Horizon transaction record |
 
 ### Client Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `network` | â€” | Stellar network (`"mainnet"`, `"testnet"`, `"futurenet"`) |
+| `network?` | Auto-detected from `rpcUrl` | Stellar network (`"mainnet"`, `"testnet"`, `"futurenet"`). Required unless `rpcUrl` contains a detectable `"testnet"`/`"mainnet"`/`horizon.stellar.org` hostname |
 | `contractId` | â€” | Deployed stream contract address |
 | `walletAdapter` | â€” | Wallet adapter for signing |
-| `rpcUrl?` | Default per network | Custom RPC URL override |
+| `rpcUrl?` | Default per network | Custom RPC URL override; also used for network auto-detection |
 | `txTimeoutMs?` | `120000` | Max time (ms) to wait for transaction confirmation |
 | `checkDuplicate?` | `false` | Heuristic check to warn/block duplicate stream creation |
+| `tokenMetadataTtlMs?` | `600000` | TTL (ms) for cached `getTokenMetadata()` results |
+| `onNetworkChange?` | â€” | Called when the connected wallet switches networks mid-session |
+| `skipPeerCheck?` | `false` | Skips the `@stellar/stellar-sdk` peer version compatibility check |
 
 All mutation methods (`createStream`, `withdraw`, `cancelStream`, `topUp`) accept an optional `AbortSignal` as the last argument to cancel in-flight transactions.
+
+All write methods also accept a `memo` field on their `WriteOptions` argument (e.g. `client.withdraw(params, signal, { memo: "invoice-123" })`) to tag the transaction for off-chain reconciliation. A `string` is encoded as `MEMO_TEXT` (28-byte limit); a 32-byte `Buffer` is encoded as `MEMO_HASH`. Use `parseMemo()` to decode a memo back out of a Horizon transaction record.
 
 | Method | Description |
 |--------|-------------|

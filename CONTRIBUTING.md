@@ -47,3 +47,36 @@ Example:
 ```
 
 Before opening a PR, run `node scripts/check-changelog-format.js --staged` if you touched `CHANGELOG.md`.
+
+## Bundle Size Enforcement
+
+This project enforces bundle size limits to maintain performance for end users. Bundle sizes are checked in CI on every PR.
+
+### Size Limits (gzipped)
+
+- `@sorostream/sdk` (full) ≤ 120 KB
+- `@sorostream/sdk/wallets` ≤ 50 KB
+- `@sorostream/sdk/mock` ≤ 80 KB
+- `@sorostream/sdk/testing` ≤ 30 KB
+
+### Local Bundle Size Check
+
+Before submitting a PR, verify bundle sizes locally:
+
+```bash
+npm run build      # Build the SDK
+npm run size:check # Check sizes with detailed breakdown
+```
+
+The `npm run size` command will exit with non-zero status if any entry point exceeds its limit, preventing accidental regressions from being merged.
+
+### Addressing Bundle Size Increases
+
+If your changes increase bundle size:
+
+1. **Review your changes** – check if new dependencies were added or code grew unexpectedly.
+2. **Optimize** – consider:
+   - Lazy-loading dependencies
+   - Tree-shaking opportunities
+   - Removing unused code paths
+3. **Update limits** – if the increase is justified, update `.size-limit.json` and explain the change in your PR description.
