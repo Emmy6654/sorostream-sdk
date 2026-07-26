@@ -51,6 +51,13 @@ const NETWORK_PASSPHRASES: Record<Network, string> = {
   futurenet: "Test SDF Future Network ; October 2022",
 };
 
+/** Maps Freighter's network identifiers to the SDK's {@link Network} type. */
+const FREIGHTER_NETWORK_MAP: Record<string, Network> = {
+  PUBLIC: "mainnet",
+  TESTNET: "testnet",
+  FUTURENET: "futurenet",
+};
+
 /**
  * Creates a WalletAdapter backed by the Freighter browser extension.
  * Dynamically imports @stellar/freighter-api to avoid SSR issues.
@@ -88,6 +95,33 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
       });
       if (result.error) throw new Error(result.error.message);
       return result.signedTxXdr;
+    },
+
+    /**
+     * Subscribes to Freighter's network-change polling (issue #215).
+     * Freighter has no push event for network switches, so this wraps
+     * `WatchWalletChanges`, which polls `getNetworkDetails()` and reports
+     * whenever the network differs from the last observed value. The first
+     * poll only seeds the baseline and does not fire `callback`.
+     */
+    onNetworkChange(callback: (network: Network) => void): () => void {
+      const watcher = new freighter.WatchWalletChanges();
+      let lastNetwork: string | null = null;
+
+      watcher.watch(({ network, error }) => {
+        if (error || !network) return;
+        if (lastNetwork === null) {
+          lastNetwork = network;
+          return;
+        }
+        if (network === lastNetwork) return;
+        lastNetwork = network;
+
+        const mapped = FREIGHTER_NETWORK_MAP[network];
+        if (mapped) callback(mapped);
+      });
+
+      return () => watcher.stop();
     },
   };
 }

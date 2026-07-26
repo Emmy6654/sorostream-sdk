@@ -1,23 +1,3 @@
-export interface RetryOptions {
-  /** Maximum number of attempts (default: 3). */
-  maxAttempts?: number;
-  /** Base delay in ms for exponential backoff (default: 200). */
-  baseDelayMs?: number;
-  /** Maximum delay cap in ms (default: 5000). */
-  maxDelayMs?: number;
-  /** Optional AbortSignal to cancel retries mid-flight. */
-  signal?: AbortSignal;
-}
-
-/**
- * Wraps an async function with configurable exponential-backoff retry and full jitter.
- *
- * Uses the AWS "full jitter" formula to spread retry load:
- *   delay = random(0, min(maxDelayMs, baseDelayMs * 2^attempt))
- *
- * @param fn - Async function to execute.
- * @param options - Retry configuration.
- */
 import { SoroStreamRetryExhaustedError } from "./errors.js";
 import type { RetryAttempt } from "./errors.js";
 

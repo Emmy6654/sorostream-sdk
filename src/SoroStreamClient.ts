@@ -124,6 +124,7 @@ import type {
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON } from "./utils.js";
+import { checkPeerDependencies } from "./peerDependencies.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -219,6 +220,19 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /**
+   * Called when the connected wallet switches networks mid-session (e.g.
+   * the user changes networks in the Freighter extension). The client
+   * automatically re-points itself at the new network before this fires.
+   * Equivalent to calling `client.onNetworkChanged(cb)` at construction time.
+   * Issue #215.
+   */
+  onNetworkChange?: (network: Network) => void;
+  /**
+   * Skips the `@stellar/stellar-sdk` peer dependency compatibility check
+   * that normally runs once when the client is constructed. Issue #213.
+   */
+  skipPeerCheck?: boolean;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -306,6 +320,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
   // Issue #228: network version counter — incremented on each setNetwork call
   private networkVersion = 0;
+  // Issue #215: wallet-initiated network switch subscribers
+  private readonly networkChangedCbs = new Set<(network: Network) => void>();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
   /**
@@ -322,11 +338,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   /** TTL cache: streamId → resolved claimable amount */
-  private readonly claimableCache: Cache<string, bigint>;
+  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
 
   constructor(options: SoroStreamClientOptions) {
+    // Issue #213: fail fast with a clear error on an incompatible
+    // @stellar/stellar-sdk peer version, instead of cryptic errors at call time.
+    if (!options.skipPeerCheck) {
+      checkPeerDependencies();
+    }
     this.network = options.network;
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
@@ -370,6 +391,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       } satisfies ConnectionPoolOptions);
     }
 
+    // Issue #215: automatic network switch handling.
+    if (options.onNetworkChange) {
+      this.networkChangedCbs.add(options.onNetworkChange);
+    }
+    if (this.walletAdapter.onNetworkChange) {
+      this.walletAdapter.onNetworkChange((newNetwork) => {
+        if (newNetwork === this.network) return;
+        this.setNetwork(newNetwork);
+        for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
@@ -527,6 +558,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+  }
+
+  /**
+   * Resolves a Stellar federation address (e.g. `"alice*example.com"`) to a
+   * raw Stellar public key, using the Stellar Federation Protocol. Shares
+   * the client's 5-minute TTL federation cache with the automatic recipient
+   * resolution performed by {@link createStream}.
+   *
+   * Unlike the standalone `resolveFederationAddress` utility (which throws),
+   * this never throws for resolution failures — it returns `null` when the
+   * address cannot be resolved, so callers can treat federation lookup as an
+   * optional, best-effort convenience.
+   *
+   * Issue #216.
+   *
+   * @param name - A federation address in `user*domain.com` format.
+   * @returns The resolved G-address, or `null` if it could not be resolved.
+   */
+  async resolveFederationAddress(name: string): Promise<string | null> {
+    const cached = this.federationCache.get(name);
+    if (cached) return cached;
+
+    try {
+      const resolved = await resolveFederationAddress(name);
+      this.federationCache.set(name, resolved);
+      return resolved;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
    *
@@ -1934,27 +1997,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (existing) return existing;
 
     // 3. No cached value and no in-flight request — start one.
-    const request = withRetry(
-      () =>
-        this.simulateOp(
-          this.contract.call(
-            "get_claimable",
-            nativeToScVal(BigInt(streamId), { type: "u64" })
-          )
-        ),
-      this.readRetry
-    );
+    const request = (async () => {
+      const result = await withRetry(
+        () =>
+          this.simulateOp(
+            this.contract.call(
+              "get_claimable",
+              nativeToScVal(BigInt(streamId), { type: "u64" })
+            )
+          ),
+        this.readRetry
+      );
 
-    if (rpc.Api.isSimulationError(result)) return 0n;
+      if (rpc.Api.isSimulationError(result)) return 0n;
 
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) return 0n;
-    const raw = BigInt(scValToNative(returnVal) as number);
-    if (raw < 0n) {
-      console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-      return 0n;
+      const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!returnVal) return 0n;
+      const raw = BigInt(scValToNative(returnVal) as number);
+      if (raw < 0n) {
+        console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+        return 0n;
+      }
+      return raw;
+    })();
+
+    this.claimableInflight.set(streamId, request);
+    try {
+      const value = await request;
+      this.claimableCache.set(streamId, value);
+      return value;
+    } finally {
+      this.claimableInflight.delete(streamId);
     }
-    return raw;
   }
 
   /**
@@ -2446,6 +2520,19 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   onDisconnected(cb: (error: unknown) => void): () => void {
     this.disconnectedCbs.add(cb);
     return () => this.disconnectedCbs.delete(cb);
+  }
+
+  /**
+   * Registers a callback that fires when the connected wallet switches
+   * networks mid-session and the client automatically re-points itself at
+   * the new network. Only fires for wallet adapters that implement
+   * `onNetworkChange` (e.g. {@link createFreighterAdapter}). Returns an
+   * unsubscribe function.
+   * Issue #215.
+   */
+  onNetworkChanged(cb: (network: Network) => void): () => void {
+    this.networkChangedCbs.add(cb);
+    return () => this.networkChangedCbs.delete(cb);
   }
 
   // ── Issue #187: Event batching ────────────────────────────────────────────

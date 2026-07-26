@@ -64,6 +64,8 @@ await client.withdraw({ streamId });
 | `estimateWithdrawFee(params)` | Estimates network fee for `withdraw`. Returns `{ totalFee, minResourceFee }` |
 | `estimateCancelStreamFee(params)` | Estimates network fee for `cancelStream`. Returns `{ totalFee, minResourceFee }` |
 | `estimateTopUpFee(params)` | Estimates network fee for `topUp`. Returns `{ totalFee, minResourceFee }` |
+| `resolveFederationAddress(name)` | Resolves a federation address (`alice*example.com`) to a G-address. Cached for 5 minutes; returns `null` (never throws) if unresolvable |
+| `onNetworkChanged(cb)` | Subscribes to wallet-initiated network switches. Returns an unsubscribe function |
 
 ### Utilities
 
@@ -87,6 +89,8 @@ await client.withdraw({ streamId });
 | `rpcUrl?` | Default per network | Custom RPC URL override |
 | `txTimeoutMs?` | `120000` | Max time (ms) to wait for transaction confirmation |
 | `checkDuplicate?` | `false` | Heuristic check to warn/block duplicate stream creation |
+| `onNetworkChange?` | â€” | Called when the connected wallet switches networks mid-session |
+| `skipPeerCheck?` | `false` | Skips the `@stellar/stellar-sdk` peer version compatibility check |
 
 All mutation methods (`createStream`, `withdraw`, `cancelStream`, `topUp`) accept an optional `AbortSignal` as the last argument to cancel in-flight transactions.
 
