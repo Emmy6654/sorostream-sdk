@@ -16,6 +16,10 @@ import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
+import { InMemoryEventBus } from "./eventBus.js";
+import type { IEventBus } from "./eventBus.js";
+import { getTransactionHistory, getAddressActivity } from "./horizon.js";
+import type { TransactionHistoryPage, TransactionHistoryOptions } from "./horizon.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -25,6 +29,40 @@ const STREAM_CACHE_TTL_MS = 5_000;
 
 /** Minimum allowed stream duration in seconds. */
 export const MIN_STREAM_DURATION_SECONDS = 1;
+
+/**
+ * SDK-compatible contract version range (issue #209).
+ * The SDK will work with contracts >= MIN_COMPATIBLE_VERSION and <= MAX_COMPATIBLE_VERSION.
+ */
+const MIN_COMPATIBLE_CONTRACT_VERSION = "1.0.0";
+const MAX_COMPATIBLE_CONTRACT_VERSION = "1.99.99";
+
+/**
+ * Parses a semantic version string into major, minor, patch numbers.
+ */
+function parseVersion(version: string): { major: number; minor: number; patch: number } {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) throw new Error(`Invalid version format: ${version}`);
+  return {
+    major: parseInt(match[1]!, 10),
+    minor: parseInt(match[2]!, 10),
+    patch: parseInt(match[3]!, 10),
+  };
+}
+
+/**
+ * Compares two semantic versions. Returns -1 if a < b, 0 if a === b, 1 if a > b.
+ */
+function compareVersions(a: string, b: string): number {
+  const vA = parseVersion(a);
+  const vB = parseVersion(b);
+  
+  if (vA.major !== vB.major) return vA.major < vB.major ? -1 : 1;
+  if (vA.minor !== vB.minor) return vA.minor < vB.minor ? -1 : 1;
+  if (vA.patch !== vB.patch) return vA.patch < vB.patch ? -1 : 1;
+  return 0;
+}
+
 import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
@@ -91,6 +129,7 @@ import type {
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON } from "./utils.js";
+import { checkPeerDependencies } from "./peerDependencies.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -199,6 +238,24 @@ export interface SoroStreamClientOptions {
    * Issue #203.
    */
   tokenMetadataTtlMs?: number;
+   * Custom event bus for framework-agnostic subscription to SDK lifecycle
+   * events (`stream.created`, `stream.withdrawn`, `stream.cancelled`,
+   * `rpc.error`). Defaults to an internal {@link InMemoryEventBus} when omitted.
+   * Issue #212.
+   */
+  eventBus?: IEventBus;
+   * Called when the connected wallet switches networks mid-session (e.g.
+   * the user changes networks in the Freighter extension). The client
+   * automatically re-points itself at the new network before this fires.
+   * Equivalent to calling `client.onNetworkChanged(cb)` at construction time.
+   * Issue #215.
+   */
+  onNetworkChange?: (network: Network) => void;
+  /**
+   * Skips the `@stellar/stellar-sdk` peer dependency compatibility check
+   * that normally runs once when the client is constructed. Issue #213.
+   */
+  skipPeerCheck?: boolean;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -286,6 +343,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
   // Issue #228: network version counter — incremented on each setNetwork call
   private networkVersion = 0;
+  // Issue #215: wallet-initiated network switch subscribers
+  private readonly networkChangedCbs = new Set<(network: Network) => void>();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
   /**
@@ -302,9 +361,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   /** TTL cache: streamId → resolved claimable amount */
-  private readonly claimableCache: Cache<string, bigint>;
+  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
+  /** Event bus used to emit SDK lifecycle events. Issue #212. */
+  private readonly eventBus: IEventBus;
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
   private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
@@ -341,6 +402,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           'or an `rpcUrl` containing "testnet", "mainnet", or "horizon.stellar.org".'
       );
     }
+    // Issue #213: fail fast with a clear error on an incompatible
+    // @stellar/stellar-sdk peer version, instead of cryptic errors at call time.
+    if (!options.skipPeerCheck) {
+      checkPeerDependencies();
+    }
+    this.network = options.network;
+    this.eventBus = options.eventBus ?? new InMemoryEventBus();
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
     this.server = new rpc.Server(
@@ -389,6 +457,72 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
         contractId: options.contractId,
       } satisfies ConnectionPoolOptions);
+    }
+
+    // Issue #215: automatic network switch handling.
+    if (options.onNetworkChange) {
+      this.networkChangedCbs.add(options.onNetworkChange);
+    }
+    if (this.walletAdapter.onNetworkChange) {
+      this.walletAdapter.onNetworkChange((newNetwork) => {
+        if (newNetwork === this.network) return;
+        this.setNetwork(newNetwork);
+        for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
+    // Issue #209: Version negotiation check
+    if (!options.skipVersionCheck) {
+      void this.checkContractVersion();
+    }
+  }
+
+  /**
+   * Checks the deployed contract version and validates compatibility (issue #209).
+   * Emits a console warning for forward-compatible newer versions.
+   * Throws SoroStreamVersionError for incompatible older versions.
+   * 
+   * @throws {SoroStreamVersionError} When the contract version is below the minimum required
+   */
+  private async checkContractVersion(): Promise<void> {
+    try {
+      const op = this.contract.call("get_version");
+      const tx = new TransactionBuilder(
+        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
+      )
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      const simulated = await this.server.simulateTransaction(tx);
+      
+      if (rpc.Api.isSimulationSuccess(simulated) && simulated.result) {
+        const contractVersion = scValToNative(simulated.result.retval) as string;
+        
+        const cmpMin = compareVersions(contractVersion, MIN_COMPATIBLE_CONTRACT_VERSION);
+        const cmpMax = compareVersions(contractVersion, MAX_COMPATIBLE_CONTRACT_VERSION);
+
+        // Contract too old - incompatible
+        if (cmpMin < 0) {
+          throw new SoroStreamVersionError(contractVersion, MIN_COMPATIBLE_CONTRACT_VERSION);
+        }
+
+        // Contract newer than SDK - forward compatible but warn
+        if (cmpMax > 0) {
+          console.warn(
+            `[SoroStream] Contract version ${contractVersion} is newer than SDK maximum ${MAX_COMPATIBLE_CONTRACT_VERSION}. ` +
+            `Some features may not be available. Consider updating the SDK.`
+          );
+        }
+
+        // Version is compatible - silent success
+      }
+    } catch (error) {
+      // If version check fails due to contract not having get_version, silently continue
+      // This maintains backward compatibility with contracts that don't expose version
+      if (error instanceof SoroStreamVersionError) {
+        throw error; // Re-throw version errors
+      }
+      // Silently ignore other errors (e.g., contract doesn't have get_version method)
     }
   }
 
@@ -492,6 +626,35 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
+  }
+
+  /**
+   * Resolves a Stellar federation address (e.g. `"alice*example.com"`) to a
+   * raw Stellar public key, using the Stellar Federation Protocol. Shares
+   * the client's 5-minute TTL federation cache with the automatic recipient
+   * resolution performed by {@link createStream}.
+   *
+   * Unlike the standalone `resolveFederationAddress` utility (which throws),
+   * this never throws for resolution failures — it returns `null` when the
+   * address cannot be resolved, so callers can treat federation lookup as an
+   * optional, best-effort convenience.
+   *
+   * Issue #216.
+   *
+   * @param name - A federation address in `user*domain.com` format.
+   * @returns The resolved G-address, or `null` if it could not be resolved.
+   */
+  async resolveFederationAddress(name: string): Promise<string | null> {
+    const cached = this.federationCache.get(name);
+    if (cached) return cached;
+
+    try {
+      const resolved = await resolveFederationAddress(name);
+      this.federationCache.set(name, resolved);
+      return resolved;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -686,12 +849,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     memo?: string | MemoHash
   ): Promise<string> {
     const opStart = Date.now();
-    const publicKey = await this.walletAdapter.getPublicKey();
+    try {
+      const publicKey = await this.walletAdapter.getPublicKey();
 
-    const account = await withRetry(
-      () => this.withBreaker(() => this.server.getAccount(publicKey)),
-      { ...this.submitRetry, signal }
-    );
+      const account = await withRetry(
+        () => this.withBreaker(() => this.server.getAccount(publicKey)),
+        { ...this.submitRetry, signal }
+      );
 
     const txBuilder = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -703,67 +867,79 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const tx = txBuilder.setTimeout(30).build();
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASES[this.network],
+      })
+        .addOperation(operation)
+        .setTimeout(30)
+        .build();
 
-    const preparedTx = await withRetry(
-      () => this.withBreaker(() => this.server.prepareTransaction(tx)),
-      { ...this.submitRetry, signal }
-    );
+      const preparedTx = await withRetry(
+        () => this.withBreaker(() => this.server.prepareTransaction(tx)),
+        { ...this.submitRetry, signal }
+      );
 
-    const signedXdr = await this.walletAdapter.signTransaction(
-      preparedTx.toXDR(),
-      this.network
-    );
+      const signedXdr = await this.walletAdapter.signTransaction(
+        preparedTx.toXDR(),
+        this.network
+      );
 
-    const result = await withRetry(
-      () => this.withBreaker(() =>
-        this.server.sendTransaction(
-          TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
-        )
-      ),
-      { ...this.submitRetry, signal }
-    );
+      const result = await withRetry(
+        () => this.withBreaker(() =>
+          this.server.sendTransaction(
+            TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASES[this.network])
+          )
+        ),
+        { ...this.submitRetry, signal }
+      );
 
-    if (result.status === "ERROR") {
-      throw new TransactionFailedError(JSON.stringify(result.errorResult));
-    }
-
-    // Poll for completion with configurable timeout and exponential backoff
-    const startTime = Date.now();
-    let delay = 500;
-    const maxDelay = 10_000;
-
-    let response = await this.server.getTransaction(result.hash);
-    while (response.status === "NOT_FOUND") {
-      if (signal?.aborted) {
-        throw new DOMException("Transaction polling aborted", "AbortError");
+      if (result.status === "ERROR") {
+        throw new TransactionFailedError(JSON.stringify(result.errorResult));
       }
 
-      const elapsed = Date.now() - startTime;
-      if (elapsed >= this.txTimeoutMs) {
-        throw new Error(
-          `Transaction confirmation timed out after ${this.txTimeoutMs}ms`
-        );
+      // Poll for completion with configurable timeout and exponential backoff
+      const startTime = Date.now();
+      let delay = 500;
+      const maxDelay = 10_000;
+
+      let response = await this.server.getTransaction(result.hash);
+      while (response.status === "NOT_FOUND") {
+        if (signal?.aborted) {
+          throw new DOMException("Transaction polling aborted", "AbortError");
+        }
+
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= this.txTimeoutMs) {
+          throw new Error(
+            `Transaction confirmation timed out after ${this.txTimeoutMs}ms`
+          );
+        }
+
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, maxDelay);
+
+        response = await this.server.getTransaction(result.hash);
       }
 
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelay);
+      if (response.status === "FAILED") {
+        throw new TransactionFailedError(result.hash);
+      }
 
-      response = await this.server.getTransaction(result.hash);
+      if (operationName) {
+        this.writeAuditEntry({
+          operation: operationName,
+          result: "success",
+          durationMs: Date.now() - opStart,
+        });
+      }
+
+      return result.hash;
+    } catch (err) {
+      // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
+      this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
+      throw err;
     }
-
-    if (response.status === "FAILED") {
-      throw new TransactionFailedError(result.hash);
-    }
-
-    if (operationName) {
-      this.writeAuditEntry({
-        operation: operationName,
-        result: "success",
-        durationMs: Date.now() - opStart,
-      });
-    }
-
-    return result.hash;
   }
 
   private resolveFeeBump(override?: FeeBumpOptions): FeeBumpOptions | undefined {
@@ -1081,6 +1257,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           "(unknown — post-creation fetch returned empty)"
         );
 
+      // Issue #212: notify subscribers of the custom event bus.
+      this.eventBus.emit("stream.created", {
+        streamId: latest.id,
+        sender,
+        recipient: params.recipient,
+        token: params.token,
+        txHash,
+      });
+
       return { streamId: latest.id, txHash };
     });
   }
@@ -1162,6 +1347,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
+
+    // Issue #212: notify subscribers of the custom event bus.
+    this.eventBus.emit("stream.withdrawn", {
+      streamId: params.streamId,
+      amount: claimable.toString(),
+      txHash,
+    });
+
     return { txHash, amount: claimable.toString() };
   }
 
@@ -1265,6 +1459,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
+
+    // Issue #212: notify subscribers of the custom event bus.
+    this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
+
     return { txHash };
   }
 
@@ -2052,6 +2251,46 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return;
     }
     this.tokenMetadataCache.delete(tokenAddress);
+    const request = (async () => {
+      const result = await withRetry(
+        () =>
+          this.simulateOp(
+            this.contract.call(
+              "get_claimable",
+              nativeToScVal(BigInt(streamId), { type: "u64" })
+            )
+          ),
+        this.readRetry
+      );
+
+      if (rpc.Api.isSimulationError(result)) return 0n;
+
+      const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!returnVal) return 0n;
+      const raw = BigInt(scValToNative(returnVal) as number);
+      if (raw < 0n) {
+        console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+        return 0n;
+      }
+      return raw;
+    })().finally(() => {
+      this.claimableInflight.delete(streamId);
+    });
+
+    this.claimableInflight.set(streamId, request);
+    const value = await request;
+    this.claimableCache.set(streamId, value);
+    return value;
+    })();
+
+    this.claimableInflight.set(streamId, request);
+    try {
+      const value = await request;
+      this.claimableCache.set(streamId, value);
+      return value;
+    } finally {
+      this.claimableInflight.delete(streamId);
+    }
   }
 
   /**
@@ -2545,6 +2784,19 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return () => this.disconnectedCbs.delete(cb);
   }
 
+  /**
+   * Registers a callback that fires when the connected wallet switches
+   * networks mid-session and the client automatically re-points itself at
+   * the new network. Only fires for wallet adapters that implement
+   * `onNetworkChange` (e.g. {@link createFreighterAdapter}). Returns an
+   * unsubscribe function.
+   * Issue #215.
+   */
+  onNetworkChanged(cb: (network: Network) => void): () => void {
+    this.networkChangedCbs.add(cb);
+    return () => this.networkChangedCbs.delete(cb);
+  }
+
   // ── Issue #187: Event batching ────────────────────────────────────────────
 
   /**
@@ -2708,6 +2960,58 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         return true;
       })
       .sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  /**
+   * Retrieves paginated transaction history for a specific stream from Horizon API (issue #200).
+   *
+   * @param streamId - The stream ID to query
+   * @param options - Pagination and filtering options
+   * @returns Paginated transaction history with cursor support
+   *
+   * @example
+   * ```ts
+   * const history = await client.getTransactionHistory("123", { limit: 20 });
+   * if (history.hasMore) {
+   *   const nextPage = await client.getTransactionHistory("123", { 
+   *     cursor: history.nextCursor 
+   *   });
+   * }
+   * ```
+   */
+  async getTransactionHistory(
+    streamId: string,
+    options?: TransactionHistoryOptions
+  ): Promise<TransactionHistoryPage> {
+    return getTransactionHistory(streamId, this.network, {
+      ...options,
+      contractId: this.contract.contractId(),
+    });
+  }
+
+  /**
+   * Retrieves all stream-related transactions for a given address from Horizon API (issue #200).
+   *
+   * @param address - The Stellar address to query
+   * @param options - Pagination and filtering options
+   * @returns Paginated activity log with cursor support
+   *
+   * @example
+   * ```ts
+   * const activity = await client.getAddressActivity("GUSER...");
+   * for (const tx of activity.transactions) {
+   *   console.log(`${tx.operationType} at ${tx.createdAt}`);
+   * }
+   * ```
+   */
+  async getAddressActivity(
+    address: string,
+    options?: TransactionHistoryOptions
+  ): Promise<TransactionHistoryPage> {
+    return getAddressActivity(address, this.network, {
+      ...options,
+      contractId: this.contract.contractId(),
+    });
   }
 }
 

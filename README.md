@@ -67,6 +67,8 @@ await client.withdraw({ streamId });
 | `getNetwork()` | Returns the resolved network (explicit or auto-detected from `rpcUrl`) |
 | `getTokenMetadata(tokenAddress)` | Returns cached or fresh SAC token `{ name, symbol, decimals }` |
 | `clearTokenCache(tokenAddress?)` | Clears cached token metadata for one token, or all tokens when omitted |
+| `resolveFederationAddress(name)` | Resolves a federation address (`alice*example.com`) to a G-address. Cached for 5 minutes; returns `null` (never throws) if unresolvable |
+| `onNetworkChanged(cb)` | Subscribes to wallet-initiated network switches. Returns an unsubscribe function |
 
 ### Utilities
 
@@ -95,6 +97,8 @@ await client.withdraw({ streamId });
 | `txTimeoutMs?` | `120000` | Max time (ms) to wait for transaction confirmation |
 | `checkDuplicate?` | `false` | Heuristic check to warn/block duplicate stream creation |
 | `tokenMetadataTtlMs?` | `600000` | TTL (ms) for cached `getTokenMetadata()` results |
+| `onNetworkChange?` | â€” | Called when the connected wallet switches networks mid-session |
+| `skipPeerCheck?` | `false` | Skips the `@stellar/stellar-sdk` peer version compatibility check |
 
 All mutation methods (`createStream`, `withdraw`, `cancelStream`, `topUp`) accept an optional `AbortSignal` as the last argument to cancel in-flight transactions.
 

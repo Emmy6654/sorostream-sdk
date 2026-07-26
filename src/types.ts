@@ -1,4 +1,3 @@
-/** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
 
 // ── Event types (#1) ─────────────────────────────────────────────────────────
@@ -334,6 +333,16 @@ export interface WalletAdapter {
   getPublicKey(): Promise<string>;
   signTransaction(xdr: string, network: Network): Promise<string>;
   isConnected(): Promise<boolean>;
+  /**
+   * Optional: subscribe to wallet-initiated network changes (issue #215).
+   * Called with the new network whenever the connected wallet switches
+   * networks mid-session (e.g. the user changes networks in the Freighter
+   * extension). Returns an unsubscribe function.
+   *
+   * Adapters that cannot detect wallet-side network changes (server-side
+   * keypair adapters, multisig adapters, etc.) simply omit this method.
+   */
+  onNetworkChange?(callback: (network: Network) => void): () => void;
 }
 
 /** A single row for bulk stream creation. */
@@ -775,4 +784,48 @@ export interface BatchMetrics {
   averageBatchSize: number;
   /** Unix timestamp (ms) of the most recent flush, or null if none. */
   lastFlushAt: number | null;
+}
+
+// ── Issue #212: Custom event bus integration ─────────────────────────────────
+
+/** Payload emitted on the `"stream.created"` event bus event. */
+export interface StreamCreatedEventPayload {
+  streamId: string;
+  sender: string;
+  recipient: string;
+  token: string;
+  txHash: string;
+}
+
+/** Payload emitted on the `"stream.withdrawn"` event bus event. */
+export interface StreamWithdrawnEventPayload {
+  streamId: string;
+  amount: string;
+  txHash: string;
+}
+
+/** Payload emitted on the `"stream.cancelled"` event bus event. */
+export interface StreamCancelledEventPayload {
+  streamId: string;
+  txHash: string;
+}
+
+/** Payload emitted on the `"rpc.error"` event bus event. */
+export interface RpcErrorEventPayload {
+  /** Name of the client method that failed (e.g. `"createStream"`). */
+  method: string;
+  /** The underlying error thrown during submission. */
+  error: unknown;
+}
+
+/**
+ * Maps each SDK lifecycle event name emitted through {@link IEventBus} to its
+ * payload shape. Reference-only — {@link IEventBus.emit} itself stays
+ * loosely typed so any framework-agnostic bus can implement it.
+ */
+export interface SoroStreamEventMap {
+  "stream.created": StreamCreatedEventPayload;
+  "stream.withdrawn": StreamWithdrawnEventPayload;
+  "stream.cancelled": StreamCancelledEventPayload;
+  "rpc.error": RpcErrorEventPayload;
 }
