@@ -15,6 +15,8 @@ import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
+import { getTransactionHistory, getAddressActivity } from "./horizon.js";
+import type { TransactionHistoryPage, TransactionHistoryOptions } from "./horizon.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -24,6 +26,40 @@ const STREAM_CACHE_TTL_MS = 5_000;
 
 /** Minimum allowed stream duration in seconds. */
 export const MIN_STREAM_DURATION_SECONDS = 1;
+
+/**
+ * SDK-compatible contract version range (issue #209).
+ * The SDK will work with contracts >= MIN_COMPATIBLE_VERSION and <= MAX_COMPATIBLE_VERSION.
+ */
+const MIN_COMPATIBLE_CONTRACT_VERSION = "1.0.0";
+const MAX_COMPATIBLE_CONTRACT_VERSION = "1.99.99";
+
+/**
+ * Parses a semantic version string into major, minor, patch numbers.
+ */
+function parseVersion(version: string): { major: number; minor: number; patch: number } {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) throw new Error(`Invalid version format: ${version}`);
+  return {
+    major: parseInt(match[1]!, 10),
+    minor: parseInt(match[2]!, 10),
+    patch: parseInt(match[3]!, 10),
+  };
+}
+
+/**
+ * Compares two semantic versions. Returns -1 if a < b, 0 if a === b, 1 if a > b.
+ */
+function compareVersions(a: string, b: string): number {
+  const vA = parseVersion(a);
+  const vB = parseVersion(b);
+  
+  if (vA.major !== vB.major) return vA.major < vB.major ? -1 : 1;
+  if (vA.minor !== vB.minor) return vA.minor < vB.minor ? -1 : 1;
+  if (vA.patch !== vB.patch) return vA.patch < vB.patch ? -1 : 1;
+  return 0;
+}
+
 import { createContractEncoder } from "./contractEncoders.js";
 import type { ContractCallEncoder } from "./contractEncoders.js";
 import { CircuitBreaker } from "./circuitBreaker.js";
@@ -332,6 +368,62 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         rpcUrl: options.rpcUrl ?? RPC_URLS[options.network],
         contractId: options.contractId,
       } satisfies ConnectionPoolOptions);
+    }
+
+    // Issue #209: Version negotiation check
+    if (!options.skipVersionCheck) {
+      void this.checkContractVersion();
+    }
+  }
+
+  /**
+   * Checks the deployed contract version and validates compatibility (issue #209).
+   * Emits a console warning for forward-compatible newer versions.
+   * Throws SoroStreamVersionError for incompatible older versions.
+   * 
+   * @throws {SoroStreamVersionError} When the contract version is below the minimum required
+   */
+  private async checkContractVersion(): Promise<void> {
+    try {
+      const op = this.contract.call("get_version");
+      const tx = new TransactionBuilder(
+        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
+      )
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      const simulated = await this.server.simulateTransaction(tx);
+      
+      if (rpc.Api.isSimulationSuccess(simulated) && simulated.result) {
+        const contractVersion = scValToNative(simulated.result.retval) as string;
+        
+        const cmpMin = compareVersions(contractVersion, MIN_COMPATIBLE_CONTRACT_VERSION);
+        const cmpMax = compareVersions(contractVersion, MAX_COMPATIBLE_CONTRACT_VERSION);
+
+        // Contract too old - incompatible
+        if (cmpMin < 0) {
+          throw new SoroStreamVersionError(contractVersion, MIN_COMPATIBLE_CONTRACT_VERSION);
+        }
+
+        // Contract newer than SDK - forward compatible but warn
+        if (cmpMax > 0) {
+          console.warn(
+            `[SoroStream] Contract version ${contractVersion} is newer than SDK maximum ${MAX_COMPATIBLE_CONTRACT_VERSION}. ` +
+            `Some features may not be available. Consider updating the SDK.`
+          );
+        }
+
+        // Version is compatible - silent success
+      }
+    } catch (error) {
+      // If version check fails due to contract not having get_version, silently continue
+      // This maintains backward compatibility with contracts that don't expose version
+      if (error instanceof SoroStreamVersionError) {
+        throw error; // Re-throw version errors
+      }
+      // Silently ignore other errors (e.g., contract doesn't have get_version method)
     }
   }
 
@@ -2519,6 +2611,58 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         return true;
       })
       .sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  /**
+   * Retrieves paginated transaction history for a specific stream from Horizon API (issue #200).
+   *
+   * @param streamId - The stream ID to query
+   * @param options - Pagination and filtering options
+   * @returns Paginated transaction history with cursor support
+   *
+   * @example
+   * ```ts
+   * const history = await client.getTransactionHistory("123", { limit: 20 });
+   * if (history.hasMore) {
+   *   const nextPage = await client.getTransactionHistory("123", { 
+   *     cursor: history.nextCursor 
+   *   });
+   * }
+   * ```
+   */
+  async getTransactionHistory(
+    streamId: string,
+    options?: TransactionHistoryOptions
+  ): Promise<TransactionHistoryPage> {
+    return getTransactionHistory(streamId, this.network, {
+      ...options,
+      contractId: this.contract.contractId(),
+    });
+  }
+
+  /**
+   * Retrieves all stream-related transactions for a given address from Horizon API (issue #200).
+   *
+   * @param address - The Stellar address to query
+   * @param options - Pagination and filtering options
+   * @returns Paginated activity log with cursor support
+   *
+   * @example
+   * ```ts
+   * const activity = await client.getAddressActivity("GUSER...");
+   * for (const tx of activity.transactions) {
+   *   console.log(`${tx.operationType} at ${tx.createdAt}`);
+   * }
+   * ```
+   */
+  async getAddressActivity(
+    address: string,
+    options?: TransactionHistoryOptions
+  ): Promise<TransactionHistoryPage> {
+    return getAddressActivity(address, this.network, {
+      ...options,
+      contractId: this.contract.contractId(),
+    });
   }
 }
 
