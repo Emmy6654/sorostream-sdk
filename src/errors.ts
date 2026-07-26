@@ -148,6 +148,9 @@ export class SoroStreamValidationError extends SoroStreamError {
     this.field = field;
     this.actualLength = actualLength;
     this.maxLength = maxLength;
+  }
+}
+
 /**
  * Thrown by `createStream` when `strict: true` is set in {@link WriteOptions}
  * and the caller provides a `nonce` field but the deployed contract does not
@@ -202,5 +205,31 @@ export class SoroStreamRetryExhaustedError extends SoroStreamError {
     this.attemptCount = attemptCount;
     this.attempts = attempts;
     this.finalResponseBody = finalResponseBody;
+  }
+}
+
+/**
+ * Thrown by the constructor when the consumer's installed version of a peer
+ * dependency (e.g. `@stellar/stellar-sdk`) is incompatible with the range
+ * this SDK was built against. Pass `{ skipPeerCheck: true }` in the client
+ * config to skip this check. Issue #213.
+ */
+export class SoroStreamDependencyError extends SoroStreamError {
+  /** Name of the incompatible peer package, e.g. "@stellar/stellar-sdk". */
+  readonly packageName: string;
+  /** The semver range this SDK requires. */
+  readonly requiredRange: string;
+  /** The version actually installed in the consumer's environment. */
+  readonly installedVersion: string;
+
+  constructor(packageName: string, requiredRange: string, installedVersion: string) {
+    super(
+      `${packageName}@${installedVersion} is incompatible with this SDK, which requires ${packageName}@${requiredRange}. ` +
+        `Upgrade or downgrade ${packageName} to satisfy ${requiredRange}, or pass { skipPeerCheck: true } to opt out of this check.`
+    );
+    this.name = "SoroStreamDependencyError";
+    this.packageName = packageName;
+    this.requiredRange = requiredRange;
+    this.installedVersion = installedVersion;
   }
 }
