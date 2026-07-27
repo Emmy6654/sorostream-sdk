@@ -18,6 +18,7 @@ import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
+import { Telemetry } from "./telemetry.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -240,6 +241,21 @@ export interface SoroStreamClientOptions {
    * Issue #199.
    */
   adapters?: SoroStreamAdapters;
+  /**
+   * Set to `false` to opt out of any SDK telemetry now and in future releases.
+   *
+   * **As of this version no telemetry is collected.** This flag is a no-op
+   * today but will be honoured when optional instrumentation is introduced.
+   * It also disables the passive OpenTelemetry span integration even when a
+   * tracer provider is registered in the consuming application.
+   *
+   * Defaults to `true` (telemetry permitted, though nothing is sent yet).
+   *
+   * See [TELEMETRY.md](../TELEMETRY.md) for the full policy.
+   *
+   * Issue #270.
+   */
+  telemetry?: boolean;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -331,6 +347,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly networkChangedCbs = new Set<(network: Network) => void>();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  // Issue #270: telemetry opt-out flag
+  private readonly telemetryEnabled: boolean;
+  // Issue #270: OTel tracer wrapper — respects telemetryEnabled.
+  private readonly _telemetry: Telemetry;
   // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
   private readonly storageAdapter: StorageAdapter | null;
   private readonly fetchAdapter: FetchAdapter;
@@ -429,6 +449,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.auditLogEnabled = options.auditLog ?? false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
+    // Issue #270: telemetry opt-out — defaults to enabled (no-op today).
+    this.telemetryEnabled = options.telemetry !== false;
+    this._telemetry = new Telemetry(this.telemetryEnabled);
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -605,6 +628,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetwork(): Network {
     return this.network;
+  }
+
+  /**
+   * Returns whether telemetry instrumentation is enabled on this client.
+   *
+   * When `false`, no spans will be emitted to an OpenTelemetry provider
+   * even if one is registered by the consuming application. The flag is
+   * also a forward-compatibility contract: any future optional usage
+   * metrics will also be suppressed when this returns `false`.
+   *
+   * @returns `true` by default; `false` when `{ telemetry: false }` was
+   *   passed to the constructor.
+   *
+   * Issue #270.
+   */
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
+  }
+
+  /**
+   * Returns whether telemetry is enabled on this client instance.
+   *
+   * When `false`, no instrumentation data will be emitted even when an
+   * OpenTelemetry provider is registered in the application.
+   *
+   * @returns `true` by default; `false` when `{ telemetry: false }` was
+   *   passed to the constructor.
+   *
+   * Issue #270.
+   */
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
   }
 
   /**
