@@ -104,6 +104,19 @@ export {
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
+export { parseContractEvent } from "./contractEvents.js";
+export type {
+  ContractEventPayload,
+  StreamCreatedPayload,
+  WithdrawalPayload,
+  CancelledStreamPayload,
+  StreamCompletedPayload,
+  StreamToppedUpPayload,
+  StreamPausedPayload,
+  StreamResumedPayload,
+  StreamTransferredPayload,
+  UnknownEventPayload,
+} from "./contractEvents.js";
 export type {
   Stream,
   StreamStatus,
