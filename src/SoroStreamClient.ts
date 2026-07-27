@@ -18,6 +18,9 @@ import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
+import { InMemoryEventBus } from "./eventBus.js";
+import type { IEventBus } from "./eventBus.js";
+import { SoroStreamVersionError } from "./errors.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -286,7 +289,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
   private network: Network;
-  private readonly walletAdapter: WalletAdapter;
+  private walletAdapter: WalletAdapter;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
@@ -353,9 +356,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
   private readonly streamInflight = new Map<string, Promise<Stream>>();
-  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
-  /** In-flight deduplication: streamId → shared promise for the active RPC call */
-  private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
 
@@ -458,10 +458,49 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
+    }
+
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
     }
+  }
+
+  /**
+   * Hot-swaps the wallet adapter at runtime (issue #261).
+   *
+   * Preserves all read-side cache and event subscriptions. Only the signing
+   * provider is replaced. Existing pending transactions remain tied to the
+   * previous adapter.
+   *
+   * @param adapter - The new wallet adapter to use for signing.
+   * @param identifier - Optional identifier for the new adapter (emitted in the event).
+   *
+   * @example
+   * ```ts
+   * // User switches from Freighter to Ledger
+   * client.setWalletAdapter(ledgerAdapter, "ledger");
+   * ```
+   */
+  setWalletAdapter(adapter: WalletAdapter, identifier?: string): void {
+    const previousAdapter = this.walletAdapter;
+    this.walletAdapter = adapter;
+
+    // Re-register network change listener if supported
+    if (adapter.onNetworkChange) {
+      adapter.onNetworkChange((newNetwork) => {
+        if (newNetwork === this.network) return;
+        this.setNetwork(newNetwork);
+        for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
+    }
+
+    // Emit walletAdapterChanged event (issue #261)
+    this.eventBus.emit("walletAdapterChanged", {
+      adapter: adapter,
+      identifier: identifier ?? "unknown",
+      previousAdapter,
+    });
   }
 
   /**
@@ -833,13 +872,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const tx = txBuilder.setTimeout(30).build();
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASES[this.network],
-      })
-        .addOperation(operation)
-        .setTimeout(30)
-        .build();
 
       const preparedTx = await withRetry(
         () => this.withBreaker(() => this.server.prepareTransaction(tx)),
@@ -1313,7 +1345,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.withdrawn", {
@@ -1425,7 +1456,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
