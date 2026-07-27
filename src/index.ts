@@ -104,6 +104,8 @@ export {
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
+export { waitForLedger } from "./readConsistency.js";
+export type { WaitForLedgerOptions } from "./readConsistency.js";
 export type {
   Stream,
   StreamStatus,
