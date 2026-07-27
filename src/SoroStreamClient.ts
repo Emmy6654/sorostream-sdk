@@ -12,6 +12,7 @@ import {
   Memo,
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
+import { InMemoryEventBus, type IEventBus } from "./eventBus.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
@@ -77,6 +78,7 @@ import {
   DuplicateStreamError,
   FederationResolutionError,
   NonceNotSupportedError,
+  SoroStreamVersionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -353,11 +355,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
   private readonly streamInflight = new Map<string, Promise<Stream>>();
-  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
-  /** In-flight deduplication: streamId → shared promise for the active RPC call */
-  private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
+
+  /** Namespace registry: streamId → namespace (off-chain index, issue #274). */
+  private readonly namespaceRegistry = new Map<string, string>();
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
   private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
@@ -458,6 +460,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
+    }
+
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
@@ -833,13 +837,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const tx = txBuilder.setTimeout(30).build();
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASES[this.network],
-      })
-        .addOperation(operation)
-        .setTimeout(30)
-        .build();
 
       const preparedTx = await withRetry(
         () => this.withBreaker(() => this.server.prepareTransaction(tx)),
@@ -1223,6 +1220,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           "(unknown — post-creation fetch returned empty)"
         );
 
+      // Issue #274: store namespace in the off-chain registry
+      if (params.namespace) {
+        this.namespaceRegistry.set(latest.id, params.namespace);
+      }
+
       // Issue #212: notify subscribers of the custom event bus.
       this.eventBus.emit("stream.created", {
         streamId: latest.id,
@@ -1313,7 +1315,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.withdrawn", {
@@ -1425,7 +1426,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
@@ -2303,6 +2303,55 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       cursor: last ? last.id : null,
       hasMore: streams.length >= limit,
     };
+  }
+
+  /**
+   * Returns all streams matching a given namespace (issue #274).
+   *
+   * **Important:** Namespace filtering is **off-chain only**. The contract
+   * does not enforce namespace isolation — this method queries the local
+   * namespace registry that is populated when streams are created with a
+   * `namespace` parameter. Streams created without a namespace are excluded.
+   *
+   * @param namespace - The namespace string to filter by.
+   * @returns An array of streams that have been tagged with the given namespace.
+   *
+   * @example
+   * ```ts
+   * // Create a stream with a namespace
+   * await client.createStream({
+   *   recipient: "GADDR...",
+   *   token: "USDC...",
+   *   amount: 100000000n,
+   *   durationSeconds: 3600,
+   *   autoRenew: false,
+   *   namespace: "tenant-abc",
+   * });
+   *
+   * // Query streams by namespace
+   * const streams = await client.getStreamsByNamespace("tenant-abc");
+   * ```
+   */
+  async getStreamsByNamespace(namespace: string): Promise<Stream[]> {
+    const streamIds = Array.from(this.namespaceRegistry.entries())
+      .filter(([, ns]) => ns === namespace)
+      .map(([id]) => id);
+
+    if (streamIds.length === 0) return [];
+
+    const streams: Stream[] = [];
+    for (const id of streamIds) {
+      try {
+        const stream = await this.getStream(id);
+        streams.push(stream);
+      } catch {
+        // Stream may have been cancelled or is no longer accessible;
+        // remove it from the registry
+        this.namespaceRegistry.delete(id);
+      }
+    }
+
+    return streams;
   }
 
   // ── Issue #73: Stream snapshot export / import ───────────────────────────
