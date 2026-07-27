@@ -103,6 +103,11 @@ export {
   SoroStreamMemoError,
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
+export {
+  loadSorostreamConfig,
+  mergeSorostreamConfig,
+} from "./sorostream-config.js";
+export type { SorostreamConfig } from "./sorostream-config.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
 export type {
   Stream,
