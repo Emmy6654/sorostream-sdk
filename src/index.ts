@@ -103,6 +103,21 @@ export {
   SoroStreamMemoError,
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
+export {
+  isSoroStreamError,
+  isNetworkError,
+  isContractError,
+  isValidationError,
+  isAuthError,
+  matchError,
+} from "./error-guards.js";
+export type {
+  NetworkError,
+  ContractError,
+  ValidationError,
+  AuthError,
+  ErrorMatchHandlers,
+} from "./error-guards.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
 export type {
   Stream,
