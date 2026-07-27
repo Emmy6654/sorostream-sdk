@@ -125,6 +125,8 @@ import type {
   GetActivityLogOptions,
   TokenMetadata,
   MemoHash,
+  HealthCheckResult,
+  ExportStreamHistoryOptions,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
@@ -3070,7 +3072,117 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       contractId: this.contract.contractId(),
     });
   }
+
+  /**
+   * Health check method for RPC server connectivity monitoring (issue #308 / #305).
+   *
+   * @param options - Timeout configuration (default: 5000ms)
+   * @returns HealthCheckResult with rpcReachable, latencyMs, and optional error message
+   */
+  async healthCheck(options?: { timeoutMs?: number }): Promise<HealthCheckResult> {
+    const start = Date.now();
+    const timeoutMs = options?.timeoutMs ?? 5000;
+    try {
+      const getHealthPromise = this.server.getHealth();
+      let timer: any;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("RPC health check timed out")), timeoutMs);
+      });
+
+      const res = await Promise.race([getHealthPromise, timeoutPromise]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+
+      const latencyMs = Date.now() - start;
+      if (res && (res as any).status === "healthy") {
+        return { rpcReachable: true, latencyMs };
+      } else {
+        return { rpcReachable: false, latencyMs, error: (res as any)?.status || "unhealthy" };
+      }
+    } catch (err: any) {
+      const latencyMs = Date.now() - start;
+      return {
+        rpcReachable: false,
+        latencyMs,
+        error: err?.message || String(err),
+      };
+    }
+  }
+
+  /**
+   * Exports historical stream activity in JSON or NDJSON format (issue #307).
+   * Supports streaming NDJSON line-by-line to a writable stream without buffering full history in memory.
+   *
+   * @param addressOrId - Stellar address or stream ID to fetch history for
+   * @param options - Export options (format, writable stream, limit, startLedger)
+   */
+  async exportStreamHistory(
+    addressOrId: string,
+    options?: ExportStreamHistoryOptions
+  ): Promise<StreamActivityEntry[] | void> {
+    const format = options?.format ?? "json";
+    const { StreamIndexer } = await import("./indexer.js");
+    const indexer = new StreamIndexer(this.server, this.contract.contractId());
+
+    let cursor: string | undefined = undefined;
+    const records: StreamActivityEntry[] = [];
+
+    const writeRecord = (entry: StreamActivityEntry) => {
+      if (format === "ndjson" && options?.writable) {
+        const line = JSON.stringify(entry, (k, v) => (typeof v === "bigint" ? v.toString() : v)) + "\n";
+        if (typeof options.writable.write === "function") {
+          options.writable.write(line);
+        } else if (typeof options.writable.getWriter === "function") {
+          const writer = options.writable.getWriter();
+          const encoder = new TextEncoder();
+          writer.write(encoder.encode(line));
+          if (typeof writer.releaseLock === "function") {
+            writer.releaseLock();
+          }
+        }
+      } else {
+        records.push(entry);
+      }
+    };
+
+    let hasMore = true;
+    while (hasMore) {
+      const page = await indexer.getStreamHistory(addressOrId, {
+        limit: options?.limit ?? 100,
+        startLedger: options?.startLedger,
+        cursor,
+      });
+
+      for (const e of page.events) {
+        let amount = 0n;
+        if (e.type === "StreamWithdrawn") {
+          amount = e.data.amount;
+        } else if (e.type === "StreamCreated") {
+          amount = e.data.deposit;
+        }
+        const entry: StreamActivityEntry = {
+          type: e.type as StreamActivityEntry["type"],
+          timestamp: new Date(e.ledgerClosedAt).getTime(),
+          amount,
+          txHash: e.txHash,
+          ledger: e.ledger,
+        };
+        writeRecord(entry);
+      }
+
+      if (page.cursor && page.cursor !== cursor && page.events.length > 0) {
+        cursor = page.cursor;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    if (format === "json") {
+      return records;
+    }
+  }
 }
+
 
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };
