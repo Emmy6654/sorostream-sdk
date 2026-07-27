@@ -125,10 +125,12 @@ import type {
   MemoHash,
   HealthCheckResult,
   ExportStreamHistoryOptions,
+  OperationExplanation,
+  BalanceDelta,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
-import { calculateVestingSchedule, streamToJSON } from "./utils.js";
+import { calculateVestingSchedule, streamToJSON, formatUSDC } from "./utils.js";
 import { checkPeerDependencies } from "./peerDependencies.js";
 
 const RPC_URLS: Record<Network, string> = {
@@ -1212,6 +1214,25 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       }
 
       const operation = this.encoder.createStream(sender, params);
+
+      // Issue #268: explain mode — return dry-run description without submitting.
+      if (options?.explain) {
+        const durationDays = (params.durationSeconds / 86400).toFixed(1);
+        const amountUsdc = formatUSDC(params.amount);
+        return this.explainOperation(
+          operation,
+          "createStream",
+          () =>
+            `Create a stream of ${amountUsdc} USDC over ${durationDays} days ` +
+            `from ${sender} to ${params.recipient}`,
+          [sender, params.recipient, params.token],
+          () => [
+            { address: sender, token: params.token, delta: -params.amount },
+            { address: params.recipient, token: params.token, delta: params.amount },
+          ]
+        ) as unknown as { streamId: string; txHash: string };
+      }
+
       const feeBump = this.resolveFeeBump(options?.feeBump);
       const txHash = await this.buildAndSubmit(operation, signal, feeBump, "createStream", options?.memo);
 
@@ -1311,9 +1332,27 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const claimable = await this.getClaimable(params.streamId);
 
     const operation = this.encoder.withdraw(params.streamId, recipient);
+
+    // Issue #268: explain mode — return dry-run description without submitting.
+    if (options?.explain) {
+      const amountUsdc = formatUSDC(claimable);
+      // Fetch stream to get token address for balance delta.
+      const stream = await this.getStream(params.streamId).catch(() => null);
+      const tokenAddress = stream?.token ?? "(unknown token)";
+      return this.explainOperation(
+        operation,
+        "withdraw",
+        () => `Withdraw ${amountUsdc} USDC from stream ${params.streamId}`,
+        [recipient, tokenAddress],
+        () =>
+          claimable > 0n
+            ? [{ address: recipient, token: tokenAddress, delta: claimable }]
+            : []
+      ) as unknown as { txHash: string; amount: string };
+    }
+
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.withdrawn", {
@@ -1423,9 +1462,32 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<{ txHash: string }> {
     const sender = await this.walletAdapter.getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
+
+    // Issue #268: explain mode — return dry-run description without submitting.
+    if (options?.explain) {
+      const stream = await this.getStream(params.streamId).catch(() => null);
+      const tokenAddress = stream?.token ?? "(unknown token)";
+      // Estimate refund as the portion of deposit not yet streamed.
+      const now = Math.floor(Date.now() / 1000);
+      const elapsed = stream ? Math.max(0, now - stream.startTime) : 0;
+      const streamed = stream ? stream.flowRate * BigInt(elapsed) : 0n;
+      const refund = stream ? (stream.deposit > streamed ? stream.deposit - streamed : 0n) : 0n;
+      const refundUsdc = formatUSDC(refund);
+      return this.explainOperation(
+        operation,
+        "cancelStream",
+        () =>
+          `Cancel stream ${params.streamId} — refund estimated ${refundUsdc} USDC to sender ${sender}`,
+        [sender, tokenAddress],
+        () =>
+          refund > 0n
+            ? [{ address: sender, token: tokenAddress, delta: refund }]
+            : []
+      ) as unknown as { txHash: string };
+    }
+
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
@@ -1476,6 +1538,28 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       sender,
       params.amount
     );
+
+    // Issue #268: explain mode — return dry-run description without submitting.
+    if (options?.explain) {
+      const stream = await this.getStream(params.streamId).catch(() => null);
+      const tokenAddress = stream?.token ?? "(unknown token)";
+      const amountUsdc = formatUSDC(params.amount);
+      // Estimate extended duration from current flow rate
+      const additionalSeconds =
+        stream && stream.flowRate > 0n
+          ? Number(params.amount / stream.flowRate)
+          : 0;
+      const additionalDays = (additionalSeconds / 86400).toFixed(1);
+      return this.explainOperation(
+        operation,
+        "topUp",
+        () =>
+          `Top up stream ${params.streamId} with ${amountUsdc} USDC, extending duration by ~${additionalDays} days`,
+        [sender, tokenAddress],
+        () => [{ address: sender, token: tokenAddress, delta: -params.amount }]
+      ) as unknown as { txHash: string; newEndTime: Date };
+    }
+
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "topUp", options?.memo);
 
@@ -1778,6 +1862,63 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return {
       totalFee: Number(preparedTx.fee) + minResourceFee,
       minResourceFee,
+    };
+  }
+
+  // ── Issue #268: Explain mode ──────────────────────────────────────────────
+
+  /**
+   * Runs an operation in explain/dry-run mode: simulates the transaction and
+   * returns a human-readable {@link OperationExplanation} without submitting.
+   *
+   * @param operation     - The Soroban operation XDR to simulate.
+   * @param operationName - Human-readable operation name (e.g. `"createStream"`).
+   * @param buildSummary  - Callback that returns the plain-English summary string.
+   * @param affectedAddresses - Stellar addresses directly involved in the operation.
+   * @param buildDeltas   - Callback that derives expected balance changes from the sim result.
+   */
+  private async explainOperation(
+    operation: xdr.Operation,
+    operationName: string,
+    buildSummary: () => string,
+    affectedAddresses: string[],
+    buildDeltas: () => BalanceDelta[]
+  ): Promise<OperationExplanation> {
+    const publicKey = await this.walletAdapter.getPublicKey();
+    const account = await this.withBreaker(() =>
+      this.server.getAccount(publicKey)
+    );
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASES[this.network],
+    })
+      .addOperation(operation)
+      .setTimeout(30)
+      .build();
+
+    const simResult = await this.withBreaker(() =>
+      this.server.simulateTransaction(tx)
+    );
+
+    if (rpc.Api.isSimulationError(simResult)) {
+      throw new TransactionFailedError(
+        `Explain simulation failed: ${JSON.stringify((simResult as rpc.Api.SimulateTransactionErrorResponse).error)}`
+      );
+    }
+
+    const successResult = simResult as rpc.Api.SimulateTransactionSuccessResponse;
+    const minResourceFee = Number(successResult.minResourceFee ?? 0);
+    const estimatedFee = Number(BASE_FEE) + minResourceFee;
+
+    return {
+      operation: operationName,
+      summary: buildSummary(),
+      affectedAddresses: [...new Set(affectedAddresses.filter(Boolean))],
+      balanceDeltas: buildDeltas(),
+      estimatedFee,
+      minResourceFee,
+      simulationResult: simResult,
     };
   }
 

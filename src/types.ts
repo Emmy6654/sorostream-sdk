@@ -572,6 +572,86 @@ export interface WriteOptions {
    * - {@link MemoHash} (`Buffer`) — encoded as `MEMO_HASH`. Must be exactly 32 bytes.
    */
   memo?: string | MemoHash;
+  /**
+   * When `true`, run the operation in explain/dry-run mode.
+   *
+   * The method will simulate the transaction (no on-chain submission) and
+   * return an {@link OperationExplanation} object instead of the normal
+   * `{ txHash, ... }` result. The explanation includes a human-readable
+   * summary, affected addresses, expected balance changes, and the estimated
+   * network fee.
+   *
+   * If simulation fails (e.g. the contract rejects the parameters) the method
+   * throws a `TransactionFailedError` with the simulation error details.
+   *
+   * Issue #268.
+   */
+  explain?: boolean;
+}
+
+// ── Issue #268: SDK explain mode ─────────────────────────────────────────────
+
+/**
+ * A single balance change expected from a write operation.
+ * Amounts are in stroops; negative values represent outflows.
+ */
+export interface BalanceDelta {
+  /** Stellar address affected. */
+  address: string;
+  /** Token contract address (SAC). */
+  token: string;
+  /**
+   * Expected change in token balance in stroops.
+   * Negative = tokens leaving the account; positive = tokens arriving.
+   */
+  delta: bigint;
+}
+
+/**
+ * Human-readable explanation of a pending write operation, returned when
+ * `explain: true` is passed to a write method.
+ *
+ * Analogous to `terraform plan` or SQL `EXPLAIN` — shows what the operation
+ * will do without submitting it on-chain.
+ *
+ * Issue #268.
+ */
+export interface OperationExplanation {
+  /**
+   * The SDK method being explained (e.g. `"createStream"`, `"withdraw"`).
+   */
+  operation: string;
+  /**
+   * A plain-English sentence describing what the operation will do.
+   *
+   * @example "Create a stream of 100 USDC over 30 days from GABC... to GXYZ..."
+   * @example "Withdraw 12.50 USDC from stream 42"
+   * @example "Cancel stream 42 — refund estimated 87.50 USDC to sender GABC..."
+   */
+  summary: string;
+  /**
+   * All Stellar addresses that will be directly involved in the operation.
+   * Includes the sender/recipient/operator as applicable.
+   */
+  affectedAddresses: string[];
+  /**
+   * Expected balance changes per address and token.
+   * Empty when the operation has no predictable balance impact (e.g. a
+   * parameter-only update that does not move tokens).
+   */
+  balanceDeltas: BalanceDelta[];
+  /**
+   * Estimated total network fee in stroops (base fee + Soroban resource fee).
+   * Derived from a dry-run `prepareTransaction` call.
+   */
+  estimatedFee: number;
+  /** Minimum Soroban resource fee component in stroops. */
+  minResourceFee: number;
+  /**
+   * Raw Soroban simulation response for callers who want to inspect low-level
+   * resource usage (instructions, read/write bytes, etc.).
+   */
+  simulationResult: unknown;
 }
 
 // ── Contract versioning (#Issue 4) ───────────────────────────────────────────
