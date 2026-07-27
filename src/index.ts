@@ -182,5 +182,6 @@ export type {
   KmsWalletAdapterConfig,
   HealthCheckResult,
   ExportStreamHistoryOptions,
+  WalletAdapterChangedPayload,
 } from "./types.js";
 
