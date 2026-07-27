@@ -1,5 +1,5 @@
 import { Keypair, TransactionBuilder, xdr, hash, nativeToScVal } from "@stellar/stellar-sdk";
-import type { WalletAdapter, Network, MultisigSigner, PasskeyAdapterConfig } from "./types.js";
+import type { WalletAdapter, Network, MultisigSigner, PasskeyAdapterConfig, KmsWalletAdapterConfig } from "./types.js";
 
 /**
  * Configuration for a claim-delegation adapter.
@@ -484,3 +484,71 @@ export function createLedgerAdapter(config: { transport: unknown }): WalletAdapt
     },
   };
 }
+
+/**
+ * WalletAdapter implementation that delegates signing to an external KMS provider (issue #306).
+ * Private key material never enters local memory or key storage.
+ */
+export class KmsWalletAdapter implements WalletAdapter {
+  private readonly publicKey: string;
+  private readonly signFn: (payload: Uint8Array) => Promise<Uint8Array>;
+
+  constructor(config: KmsWalletAdapterConfig) {
+    if (!config.publicKey) {
+      throw new Error("KmsWalletAdapter requires a valid publicKey");
+    }
+    if (typeof config.sign !== "function") {
+      throw new Error("KmsWalletAdapter requires a sign function");
+    }
+    this.publicKey = config.publicKey;
+    this.signFn = config.sign;
+  }
+
+  async isConnected(): Promise<boolean> {
+    return true;
+  }
+
+  async getPublicKey(): Promise<string> {
+    return this.publicKey;
+  }
+
+  async signTransaction(xdrStr: string, _network: Network): Promise<string> {
+    const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, "base64");
+    const txHash = hash(txEnvelope.toXDR());
+    
+    // Delegate signing to provided async KMS function
+    const signatureBytes = await this.signFn(new Uint8Array(txHash));
+    
+    const kp = Keypair.fromPublicKey(this.publicKey);
+    const decorated = new xdr.DecoratedSignature({
+      hint: kp.signatureHint(),
+      signature: Buffer.from(signatureBytes),
+    });
+    
+    const v1 = txEnvelope.v1();
+    v1.signatures().push(decorated);
+    
+    return txEnvelope.toXDR("base64");
+  }
+}
+
+/**
+ * Creates a WalletAdapter backed by a KMS key provider (issue #306).
+ *
+ * @example
+ * ```ts
+ * const adapter = createKmsWalletAdapter({
+ *   publicKey: "G...",
+ *   async sign(payload) {
+ *     return await kmsClient.sign(payload);
+ *   }
+ * });
+ * ```
+ */
+export function createKmsWalletAdapter(config: KmsWalletAdapterConfig): WalletAdapter {
+  return new KmsWalletAdapter(config);
+}
+
+/** Alias for createKmsWalletAdapter. */
+export const createKmsAdapter = createKmsWalletAdapter;
+

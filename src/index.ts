@@ -9,6 +9,9 @@ export {
   createMultisigAdapter,
   createClaimDelegateAdapter,
   createPasskeyAdapter,
+  KmsWalletAdapter,
+  createKmsWalletAdapter,
+  createKmsAdapter,
 } from "./wallet.js";
 export type { ClaimDelegateConfig } from "./wallet.js";
 export { WebhookForwarder } from "./webhook.js";
@@ -169,4 +172,8 @@ export type {
   StreamCancelledEventPayload,
   RpcErrorEventPayload,
   SoroStreamEventMap,
+  KmsWalletAdapterConfig,
+  HealthCheckResult,
+  ExportStreamHistoryOptions,
 } from "./types.js";
+
