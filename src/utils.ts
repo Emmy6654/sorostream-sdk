@@ -1,4 +1,6 @@
 import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from "./errors.js";
+import { getDefaultWebSocketFactory } from "./adapters.js";
+import type { FetchAdapter, WebSocketFactory } from "./adapters.js";
 import type {
   PriceFeedAdapter,
   Stream,
@@ -76,7 +78,7 @@ export function formatUSDC(
   const numericValue = Number(whole) + Number(remainder) / Number(factor);
 
   return new Intl.NumberFormat(options.locale, {
-    minimumFractionDigits: options.minimumFractionDigits,
+    minimumFractionDigits: options.minimumFractionDigits ?? 2,
     maximumFractionDigits: options.maximumFractionDigits ?? decimals,
     useGrouping: options.useGrouping ?? true,
   }).format(numericValue);
@@ -161,7 +163,10 @@ export function isFederationAddress(address: string): boolean {
  * Fetches the domain's stellar.toml to discover the federation server, then queries it.
  * Throws {@link FederationResolutionError} if the server is unreachable or the address is unknown.
  */
-export async function resolveFederationAddress(federationAddress: string): Promise<string> {
+export async function resolveFederationAddress(
+  federationAddress: string,
+  fetchImpl: FetchAdapter = fetch
+): Promise<string> {
   const starIdx = federationAddress.indexOf("*");
   if (starIdx === -1) {
     throw new FederationResolutionError(federationAddress, "invalid federation address format");
@@ -173,7 +178,7 @@ export async function resolveFederationAddress(federationAddress: string): Promi
 
   let federationServer: string;
   try {
-    const tomlRes = await fetch(`https://${domain}/.well-known/stellar.toml`);
+    const tomlRes = await fetchImpl(`https://${domain}/.well-known/stellar.toml`);
     if (!tomlRes.ok) throw new Error(`HTTP ${tomlRes.status}`);
     const tomlText = await tomlRes.text();
     const match = /FEDERATION_SERVER\s*=\s*"([^"]+)"/.exec(tomlText);
@@ -187,7 +192,7 @@ export async function resolveFederationAddress(federationAddress: string): Promi
   }
 
   try {
-    const fedRes = await fetch(
+    const fedRes = await fetchImpl(
       `${federationServer}?q=${encodeURIComponent(federationAddress)}&type=name`
     );
     if (!fedRes.ok) throw new Error(`HTTP ${fedRes.status}`);
@@ -386,12 +391,20 @@ export function watchClaimableWs(
   wsUrl: string,
   streamId: string,
   onClaimable: (claimable: bigint) => void,
-  compression?: boolean | CompressionOptions
+  compression?: boolean | CompressionOptions,
+  webSocketFactory?: WebSocketFactory
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
   const compressionOpts = resolveCompression(compression);
   const payloadThreshold = compressionOpts?.threshold ?? Infinity;
+  const createWebSocket = webSocketFactory ?? getDefaultWebSocketFactory();
+  if (!createWebSocket) {
+    throw new Error(
+      "watchClaimableWs: no WebSocket implementation available. Pass `webSocketFactory` " +
+        "in environments without a global WebSocket (e.g. React Native — see @sorostream/sdk-react-native)."
+    );
+  }
 
   try {
     // Attempt to pass perMessageDeflate options for environments that support it
@@ -399,16 +412,13 @@ export function watchClaimableWs(
     if (compressionOpts) {
       try {
         const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
-        ws = new (WebSocket as unknown as new(url: string, opts: unknown) => WebSocket)(
-          wsUrl,
-          deflateOpts
-        );
+        ws = createWebSocket(wsUrl, deflateOpts);
       } catch {
         // Fall back to standard constructor when options are unsupported
-        ws = new WebSocket(wsUrl);
+        ws = createWebSocket(wsUrl);
       }
     } else {
-      ws = new WebSocket(wsUrl);
+      ws = createWebSocket(wsUrl);
     }
 
     ws.onopen = () => {
@@ -585,7 +595,8 @@ export function watchClaimable(
         baseTime = Date.now();
         emit();
       },
-      options.compression
+      options.compression,
+      options.webSocketFactory
     );
   }
 
@@ -1305,146 +1316,3 @@ export function validateStringLength(field: string, value: string): void {
     throw new SoroStreamValidationError(field, byteLength, limit);
   }
 }
-
-// ── Issue #201: Memo parsing ─────────────────────────────────────────────────
-
-/**
- * Extracts and decodes the memo from a Horizon transaction record.
- *
- * `"text"` and `"id"` memos are returned as-is (Horizon already decodes them
- * to plain strings). `"hash"` and `"return"` memos are base64-decoded into a
- * 32-byte {@link MemoHash} buffer. A record with `memo_type: "none"` (or no
- * memo at all) decodes to `{ type: "none", value: null }`.
- *
- * @param transaction - A Horizon transaction record (or the memo subset of one).
- * @returns The decoded memo type and value.
- *
- * @example
- * ```ts
- * const { type, value } = parseMemo(horizonTransaction);
- * if (type === "text") console.log("Order ref:", value);
- * ```
- */
-export function parseMemo(transaction: HorizonTransactionRecord): ParsedMemo {
-  const type = transaction.memo_type ?? "none";
-  if (type === "none" || transaction.memo === undefined) {
-    return { type: "none", value: null };
-  }
-  if (type === "hash" || type === "return") {
-    return { type, value: Buffer.from(transaction.memo, "base64") };
-  }
-  return { type, value: transaction.memo };
-}
-// ── Issue #211: Stream ID encoding / decoding ─────────────────────────────────
-
-const U64_MAX = 0xffffffffffffffffn;
-const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-const BASE58_CHAR_VALUES = new Map(
-  [...BASE58_ALPHABET].map((char, index) => [char, BigInt(index)])
-);
-
-/**
- * Encodes a u64 stream ID as a compact, URL-safe base58 string.
- *
- * Stream IDs are 64-bit unsigned integers generated by the contract, which
- * exceed `Number.MAX_SAFE_INTEGER`. Represent them as `bigint` to avoid
- * precision loss, and use this to produce a value safe to embed in URLs,
- * JSON, and databases. {@link decodeStreamId} is the exact inverse.
- *
- * @param id - The stream ID as a `bigint` (0 to 2^64 - 1).
- * @throws {RangeError} If `id` is negative or exceeds the u64 range.
- *
- * @example
- * ```ts
- * const encoded = encodeStreamId(18446744073709551615n);
- * const id = decodeStreamId(encoded); // 18446744073709551615n
- * ```
- */
-export function encodeStreamId(id: bigint): string {
-  if (id < 0n) throw new RangeError("encodeStreamId: stream id must be non-negative");
-  if (id > U64_MAX) throw new RangeError("encodeStreamId: stream id exceeds u64 range");
-
-  if (id === 0n) return BASE58_ALPHABET[0]!;
-
-  let remaining = id;
-  let encoded = "";
-  while (remaining > 0n) {
-    const digit = remaining % 58n;
-    encoded = BASE58_ALPHABET[Number(digit)] + encoded;
-    remaining /= 58n;
-  }
-  return encoded;
-}
-
-/**
- * Decodes a base58 string produced by {@link encodeStreamId} back into the
- * original u64 stream ID.
- *
- * @param encoded - The base58-encoded stream ID.
- * @returns The decoded stream ID as a `bigint`.
- * @throws {Error} If `encoded` is empty or contains a character outside the
- *   base58 alphabet.
- * @throws {RangeError} If the decoded value exceeds the u64 range.
- */
-export function decodeStreamId(encoded: string): bigint {
-  if (encoded.length === 0) {
-    throw new Error("decodeStreamId: encoded string must not be empty");
-  }
-
-  let decoded = 0n;
-  for (const char of encoded) {
-    const value = BASE58_CHAR_VALUES.get(char);
-    if (value === undefined) {
-      throw new Error(`decodeStreamId: invalid base58 character "${char}"`);
-    }
-    decoded = decoded * 58n + value;
-  }
-
-  if (decoded > U64_MAX) {
-    throw new RangeError("decodeStreamId: decoded value exceeds u64 range");
-  }
-  return decoded;
-}
-
-// ── Issue #226: String field length validation ────────────────────────────────
-
-/**
- * Maximum byte length limits for string fields passed to the contract.
- * Keys match the field names used in `CreateStreamParams` and related types.
- *
- * @example
- * ```ts
- * import { STRING_FIELD_LIMITS } from "@sorostream/sdk";
- * const limit = STRING_FIELD_LIMITS.recipient; // 64
- * ```
- */
-export const STRING_FIELD_LIMITS: Readonly<Record<string, number>> = {
-  recipient: 64,
-  token: 64,
-  metadataUri: 128,
-  description: 256,
-};
-
-/**
- * Validates that a string field does not exceed its allowed byte length.
- * Throws {@link SoroStreamValidationError} when the limit is exceeded.
- *
- * @param field - Field name (must be a key in `STRING_FIELD_LIMITS`).
- * @param value - The string value to validate.
- * @throws {SoroStreamValidationError} When the byte length exceeds the limit.
- *
- * @example
- * ```ts
- * validateStringLength("recipient", params.recipient);
- * validateStringLength("metadataUri", metadataUri); // 128 byte limit
- * ```
- */
-export function validateStringLength(field: string, value: string): void {
-  const limit = STRING_FIELD_LIMITS[field];
-  if (limit === undefined) return; // no configured limit — pass through
-  const byteLength = new TextEncoder().encode(value).byteLength;
-  if (byteLength > limit) {
-    throw new SoroStreamValidationError(field, byteLength, limit);
-  }
-}
-

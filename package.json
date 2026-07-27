@@ -2,10 +2,12 @@
   "name": "@sorostream/sdk",
   "version": "0.1.0",
   "private": true,
-  "sideEffects": false,
   "workspaces": [
+    ".",
     "packages/react",
-    "packages/cli"
+    "packages/cli",
+    "packages/react-native",
+    "packages/eslint-plugin"
   ],
   "description": "TypeScript SDK for the SoroStream payment streaming protocol on Stellar Soroban",
   "main": "./dist/index.js",
@@ -17,25 +19,10 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     },
-    "./core": {
-      "types": "./dist/core.d.ts",
-      "import": "./dist/core.mjs",
-      "require": "./dist/core.js"
-    },
     "./wallets": {
       "types": "./dist/wallets.d.ts",
       "import": "./dist/wallets.mjs",
       "require": "./dist/wallets.js"
-    },
-    "./wallet": {
-      "types": "./dist/wallets.d.ts",
-      "import": "./dist/wallets.mjs",
-      "require": "./dist/wallets.js"
-    },
-    "./batch": {
-      "types": "./dist/batch.d.ts",
-      "import": "./dist/batch.mjs",
-      "require": "./dist/batch.js"
     },
     "./mock": {
       "types": "./dist/mock.d.ts",
@@ -46,20 +33,10 @@
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.mjs",
       "require": "./dist/testing.js"
-    },
-    "./graphql": {
-      "types": "./dist/graphql.d.ts",
-      "import": "./dist/graphql.mjs",
-      "require": "./dist/graphql.js"
     }
   },
   "scripts": {
     "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts --format cjs,esm --dts --clean && npm run validate-exports",
-    "size": "size-limit",
-    "size:check": "npm run build && size-limit --why",
-    "build": "tsup src/index.ts src/core.ts src/wallets.ts src/batch.ts src/mock.ts src/testing.ts --format cjs,esm --dts --sourcemap --clean && npm run validate-exports",
-    "build:dev": "tsup src/index.ts src/core.ts src/wallets.ts src/batch.ts src/mock.ts src/testing.ts --format cjs,esm --dts --sourcemap inline --clean",
-    "build": "tsup src/index.ts src/wallets.ts src/mock.ts src/testing.ts src/graphql.ts --format cjs,esm --dts --clean && npm run validate-exports",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
@@ -67,11 +44,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:changelog": "node scripts/check-changelog-format.js",
-    "build:all": "npm run build && npm run build -w packages/react && npm run build -w packages/cli",
+    "build:all": "npm run build && npm run build -w packages/react && npm run build -w packages/cli && npm run build -w packages/react-native && npm run build -w packages/eslint-plugin",
     "docs": "typedoc",
     "validate-exports": "node scripts/validate-exports.js",
-    "check:bundle-size": "node scripts/check-bundle-size.js",
-    "analyze:sourcemaps": "source-map-explorer \"dist/*.mjs\" --html dist/bundle-report.html",
+    "test:cjs": "node scripts/cjs-smoke-test.js",
     "prepublishOnly": "npm run validate-exports"
   },
   "keywords": [
@@ -92,14 +68,9 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.1",
-    "@size-limit/preset-small-lib": "^13.0.1",
     "@types/node": "^22.0.0",
-    "esbuild": "^0.27.7",
     "fast-check": "^3.22.0",
-    "graphql": "^16.9.0",
     "prettier": "^3.3.0",
-    "size-limit": "^13.0.1",
-    "source-map-explorer": "^2.5.3",
     "tsup": "^8.0.0",
     "typedoc": "^0.28.0",
     "typescript": "^5.9.3",

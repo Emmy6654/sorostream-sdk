@@ -16,10 +16,8 @@ import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
-import { InMemoryEventBus } from "./eventBus.js";
-import type { IEventBus } from "./eventBus.js";
-import { getTransactionHistory, getAddressActivity } from "./horizon.js";
-import type { TransactionHistoryPage, TransactionHistoryOptions } from "./horizon.js";
+import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
+import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -228,36 +226,20 @@ export interface SoroStreamClientOptions {
    */
   checkDuplicate?: boolean;
   /**
-   * When true, write a JSON entry to localStorage['sorostream_audit_log']
-   * for each SDK write operation: timestamp, operation name, parameters
-   * (redacted of keys), result (success/error), and duration.
+   * When true, write a JSON entry to the `sorostream_audit_log` storage key
+   * (via `adapters.storage`, `localStorage` by default) for each SDK write
+   * operation: timestamp, operation name, parameters (redacted of keys),
+   * result (success/error), and duration.
    * Issue #227.
    */
   auditLog?: boolean;
   /**
-   * TTL in ms for cached SAC token metadata (name, symbol, decimals) returned
-   * by {@link SoroStreamClient.getTokenMetadata} (default: 600000 = 10 minutes).
-   * Issue #203.
+   * Overrides for the browser globals (`localStorage`, `WebSocket`, `fetch`)
+   * the SDK uses by default. Required in environments — like React Native —
+   * that don't provide them as globals. See `@sorostream/sdk-react-native`.
+   * Issue #199.
    */
-  tokenMetadataTtlMs?: number;
-   * Custom event bus for framework-agnostic subscription to SDK lifecycle
-   * events (`stream.created`, `stream.withdrawn`, `stream.cancelled`,
-   * `rpc.error`). Defaults to an internal {@link InMemoryEventBus} when omitted.
-   * Issue #212.
-   */
-  eventBus?: IEventBus;
-   * Called when the connected wallet switches networks mid-session (e.g.
-   * the user changes networks in the Freighter extension). The client
-   * automatically re-points itself at the new network before this fires.
-   * Equivalent to calling `client.onNetworkChanged(cb)` at construction time.
-   * Issue #215.
-   */
-  onNetworkChange?: (network: Network) => void;
-  /**
-   * Skips the `@stellar/stellar-sdk` peer dependency compatibility check
-   * that normally runs once when the client is constructed. Issue #213.
-   */
-  skipPeerCheck?: boolean;
+  adapters?: SoroStreamAdapters;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -349,6 +331,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly networkChangedCbs = new Set<(network: Network) => void>();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
+  private readonly storageAdapter: StorageAdapter | null;
+  private readonly fetchAdapter: FetchAdapter;
   /**
    * Cached result of the contract's nonce-parameter capability check.
    * `null` means the check has not been performed yet.
@@ -434,11 +419,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Default TTL of 5 seconds: short enough to stay reasonably fresh,
     // long enough to absorb bursts of concurrent reads for the same stream.
     this.claimableCache = new Cache<string, bigint>(5_000);
-    // Default TTL of 10 minutes — token metadata (name/symbol/decimals) rarely
-    // changes, so a long TTL avoids redundant RPC calls. Issue #203.
-    this.tokenMetadataCache = new Cache<string, TokenMetadata>(
-      options.tokenMetadataTtlMs ?? 600_000
-    );
     this.validateCliff = options.validateCliff ?? ((s) => {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
@@ -447,6 +427,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
     this.auditLogEnabled = options.auditLog ?? false;
+    this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
+    this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -545,9 +527,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     error?: string;
     durationMs: number;
   }): void {
-    if (!this.auditLogEnabled) return;
+    if (!this.auditLogEnabled || !this.storageAdapter) return;
     try {
-      const raw = localStorage.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+      const raw = this.storageAdapter.getItem(SoroStreamClient.AUDIT_LOG_KEY);
       const log: unknown[] = raw ? JSON.parse(raw) : [];
       // Redact keys from params (keep values for debugging)
       const redacted = entry.params ? this.redactParams(entry.params) : undefined;
@@ -564,9 +546,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       while (log.length > SoroStreamClient.AUDIT_LOG_MAX_ENTRIES) {
         log.shift();
       }
-      localStorage.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
+      this.storageAdapter.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
     } catch {
-      // localStorage may be unavailable or full — never throw
+      // storage may be unavailable or full — never throw
     }
   }
 
@@ -594,8 +576,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @returns Array of audit log entries, or empty array if unavailable.
    */
   getAuditLog(): Array<Record<string, unknown>> {
+    if (!this.storageAdapter) return [];
     try {
-      const raw = localStorage.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+      const raw = this.storageAdapter.getItem(SoroStreamClient.AUDIT_LOG_KEY);
       return raw ? JSON.parse(raw) : [];
     } catch {
       return [];
@@ -603,13 +586,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
-   * Clears all audit log entries from localStorage.
+   * Clears all audit log entries from storage.
    *
    * Issue #227.
    */
   clearAuditLog(): void {
+    if (!this.storageAdapter) return;
     try {
-      localStorage.removeItem(SoroStreamClient.AUDIT_LOG_KEY);
+      this.storageAdapter.removeItem(SoroStreamClient.AUDIT_LOG_KEY);
     } catch {
       // ignore
     }
@@ -633,35 +617,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetworkVersion(): number {
     return this.networkVersion;
-  }
-
-  /**
-   * Resolves a Stellar federation address (e.g. `"alice*example.com"`) to a
-   * raw Stellar public key, using the Stellar Federation Protocol. Shares
-   * the client's 5-minute TTL federation cache with the automatic recipient
-   * resolution performed by {@link createStream}.
-   *
-   * Unlike the standalone `resolveFederationAddress` utility (which throws),
-   * this never throws for resolution failures — it returns `null` when the
-   * address cannot be resolved, so callers can treat federation lookup as an
-   * optional, best-effort convenience.
-   *
-   * Issue #216.
-   *
-   * @param name - A federation address in `user*domain.com` format.
-   * @returns The resolved G-address, or `null` if it could not be resolved.
-   */
-  async resolveFederationAddress(name: string): Promise<string | null> {
-    const cached = this.federationCache.get(name);
-    if (cached) return cached;
-
-    try {
-      const resolved = await resolveFederationAddress(name);
-      this.federationCache.set(name, resolved);
-      return resolved;
-    } catch {
-      return null;
-    }
   }
 
   /**
@@ -1231,7 +1186,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         if (cached) {
           params = { ...params, recipient: cached };
         } else {
-          const resolved = await resolveFederationAddress(params.recipient);
+          const resolved = await resolveFederationAddress(params.recipient, this.fetchAdapter);
           this.federationCache.set(params.recipient, resolved);
           params = { ...params, recipient: resolved };
         }
@@ -2169,39 +2124,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
           )
         ),
       this.readRetry
-    ).then((result) => {
-      if (rpc.Api.isSimulationError(result)) return 0n;
-
-      const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-      if (!returnVal) return 0n;
-      const raw = BigInt(scValToNative(returnVal) as number);
-      if (raw < 0n) {
-        console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-        return 0n;
-      }
-      return raw;
-    });
-
-    // Store the in-flight promise so concurrent callers can join it.
-    this.claimableInflight.set(streamId, request);
-
-    try {
-      const claimable = await request;
-      // Cache the result for 5 seconds.
-      this.claimableCache.set(streamId, claimable);
-      return claimable;
-    } finally {
-      // Clear the in-flight entry after settlement so the next call after
-      // resolution makes a fresh request. This maintains the deduplication
-      // guarantee: each unique claimable fetch (after cache expiry) triggers
-      // exactly one RPC call.
     )
       .then((result): bigint => {
         if (rpc.Api.isSimulationError(result)) return 0n;
-        const retval = (result as rpc.Api.SimulateTransactionSuccessResponse)
-          .result?.retval;
-        if (!retval) return 0n;
-        const raw = BigInt(scValToNative(retval) as number);
+        const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+        if (!returnVal) return 0n;
+        const raw = BigInt(scValToNative(returnVal) as number);
         if (raw < 0n) {
           console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
           return 0n;
@@ -2225,131 +2153,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.claimableInflight.set(streamId, request);
 
     return request;
-  }
-
-  // ── Issue #203: Token metadata caching ────────────────────────────────────
-
-  /**
-   * Returns SAC token metadata (name, symbol, decimals) for a token contract.
-   *
-   * Results are cached in-memory per client instance with the TTL configured
-   * via `tokenMetadataTtlMs` (default 10 minutes). Concurrent callers for the
-   * same token address share a single in-flight RPC request.
-   *
-   * @param tokenAddress - The SAC token contract address.
-   * @returns The token's `{ name, symbol, decimals }`.
-   *
-   * @example
-   * ```ts
-   * const { symbol, decimals } = await client.getTokenMetadata(usdcAddress);
-   * console.log(formatUSDC(claimable, decimals), symbol);
-   * ```
-   */
-  async getTokenMetadata(tokenAddress: string): Promise<TokenMetadata> {
-    // 1. Fast path: serve from TTL cache.
-    const cached = this.tokenMetadataCache.get(tokenAddress);
-    if (cached !== undefined) return cached;
-
-    // 2. Deduplication: if a fetch for this token is already in-flight,
-    //    join it rather than launching a second one.
-    const existing = this.tokenMetadataInflight.get(tokenAddress);
-    if (existing) return existing;
-
-    // 3. No cached value and no in-flight request — start one.
-    const tokenContract = new Contract(tokenAddress);
-    const readView = async (method: string): Promise<unknown> => {
-      const result = await withRetry(
-        () => this.simulateOp(tokenContract.call(method)),
-        this.readRetry
-      );
-      if (rpc.Api.isSimulationError(result)) {
-        throw new Error(`Failed to read token ${method}(): ${result.error}`);
-      }
-      const retval = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-      return retval ? scValToNative(retval) : undefined;
-    };
-
-    const request = Promise.all([
-      readView("name"),
-      readView("symbol"),
-      readView("decimals"),
-    ])
-      .then(([name, symbol, decimals]): TokenMetadata => ({
-        name: String(name ?? ""),
-        symbol: String(symbol ?? ""),
-        decimals: Number(decimals ?? 7),
-      }))
-      .then((metadata) => {
-        // On success: populate the TTL cache so subsequent calls for this
-        // token are served without another RPC round-trip.
-        this.tokenMetadataCache.set(tokenAddress, metadata);
-        return metadata;
-      })
-      .finally(() => {
-        // Always remove the in-flight entry so future callers after TTL
-        // expiry can start a fresh request.
-        this.tokenMetadataInflight.delete(tokenAddress);
-      });
-
-    // Register before yielding so any other synchronous callers that arrive
-    // before the first await see the shared promise.
-    this.tokenMetadataInflight.set(tokenAddress, request);
-
-    return request;
-  }
-
-  /**
-   * Clears cached SAC token metadata.
-   *
-   * @param tokenAddress - Optional specific token to invalidate. If omitted,
-   *   the entire token metadata cache is cleared.
-   */
-  clearTokenCache(tokenAddress?: string): void {
-    if (tokenAddress === undefined) {
-      this.tokenMetadataCache.clear();
-      return;
-    }
-    this.tokenMetadataCache.delete(tokenAddress);
-    const request = (async () => {
-      const result = await withRetry(
-        () =>
-          this.simulateOp(
-            this.contract.call(
-              "get_claimable",
-              nativeToScVal(BigInt(streamId), { type: "u64" })
-            )
-          ),
-        this.readRetry
-      );
-
-      if (rpc.Api.isSimulationError(result)) return 0n;
-
-      const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-      if (!returnVal) return 0n;
-      const raw = BigInt(scValToNative(returnVal) as number);
-      if (raw < 0n) {
-        console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-        return 0n;
-      }
-      return raw;
-    })().finally(() => {
-      this.claimableInflight.delete(streamId);
-    });
-
-    this.claimableInflight.set(streamId, request);
-    const value = await request;
-    this.claimableCache.set(streamId, value);
-    return value;
-    })();
-
-    this.claimableInflight.set(streamId, request);
-    try {
-      const value = await request;
-      this.claimableCache.set(streamId, value);
-      return value;
-    } finally {
-      this.claimableInflight.delete(streamId);
-    }
   }
 
   /**
@@ -3183,6 +2986,32 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 }
 
+/**
+ * Factory function for constructing a {@link SoroStreamClient}. Equivalent to
+ * `new SoroStreamClient(options)` — provided so environments without a
+ * default `localStorage`/`WebSocket`/`fetch` (e.g. React Native) can supply
+ * overrides via `adapters` without reaching for the class constructor.
+ *
+ * Issue #199.
+ *
+ * @example
+ * ```ts
+ * import { createClient } from "@sorostream/sdk";
+ * import { reactNativeAdapters } from "@sorostream/sdk-react-native";
+ *
+ * const client = createClient({
+ *   network: "testnet",
+ *   contractId: "...",
+ *   walletAdapter,
+ *   adapters: reactNativeAdapters,
+ * });
+ * ```
+ */
+export function createClient<TEventData = Record<string, unknown>>(
+  options: SoroStreamClientOptions
+): SoroStreamClient<TEventData> {
+  return new SoroStreamClient<TEventData>(options);
+}
 
 // Re-export for convenience
 export type { StreamFilterCriteria, CreateStreamsParams };

@@ -24,10 +24,12 @@ export class WebhookForwarder {
   private client: SoroStreamClient;
   private config: WebhookConfig;
   private subscription: StreamSubscription | null = null;
+  private readonly fetchImpl: typeof fetch;
 
   constructor(client: SoroStreamClient, config: WebhookConfig) {
     this.client = client;
     this.config = config;
+    this.fetchImpl = config.fetch ?? fetch;
   }
 
   /**
@@ -60,7 +62,7 @@ export class WebhookForwarder {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        const response = await fetch(this.config.url, {
+        const response = await this.fetchImpl(this.config.url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

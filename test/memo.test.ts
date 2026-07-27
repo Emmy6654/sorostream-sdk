@@ -1,194 +1,110 @@
-/**
- * Tests for issue #201: structured memo support for write transactions.
- *
- * - `WriteOptions.memo` accepts a text string or a 32-byte hash Buffer.
- * - `buildAndSubmit` (used by every single-operation write method) attaches
- *   the memo to the transaction when provided, and is unaffected when omitted.
- * - `parseMemo` decodes both text and hash memos (and "no memo") from a
- *   Horizon transaction record.
- */
 import { describe, it, expect, vi } from "vitest";
-import { SoroStreamClient } from "../src/SoroStreamClient.js";
-import { parseMemo } from "../src/utils.js";
-import type { WalletAdapter } from "../src/types.js";
+import { Memo, MemoNone } from "@stellar/stellar-sdk";
+import { encodeMemo, encodeMemoHash, decodeMemo } from "../src/memo.js";
+import { SoroStreamMemoError } from "../src/errors.js";
 
-const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-const VALID_ACCOUNT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
-const VALID_RECIPIENT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
-const VALID_TOKEN = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
-
-function makeAdapter(): WalletAdapter {
-  return {
-    getPublicKey: vi.fn().mockResolvedValue(VALID_ACCOUNT),
-    signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
-    isConnected: vi.fn().mockResolvedValue(true),
-  };
-}
-
-function makeClient() {
-  return new SoroStreamClient({
-    network: "testnet",
-    contractId: VALID_CONTRACT,
-    walletAdapter: makeAdapter(),
-  });
-}
-
-describe("#201 buildMemo (private helper)", () => {
-  it("encodes a text memo", () => {
-    const client = makeClient();
-    const memo = (client as any).buildMemo("invoice-123");
+describe("encodeMemo", () => {
+  it("encodes a short text memo", () => {
+    const memo = encodeMemo("invoice-4821");
     expect(memo.type).toBe("text");
-    expect(memo.value).toBe("invoice-123");
+    expect(memo.value).toBe("invoice-4821");
   });
 
-  it("throws when a text memo exceeds 28 bytes", () => {
-    const client = makeClient();
-    const tooLong = "a".repeat(29);
-    expect(() => (client as any).buildMemo(tooLong)).toThrow(/28-byte/);
+  it("accepts text at exactly the 28-byte limit", () => {
+    const text = "a".repeat(28);
+    const memo = encodeMemo(text);
+    expect(memo.value).toBe(text);
   });
 
-  it("accepts a text memo at exactly the 28-byte limit", () => {
-    const client = makeClient();
-    const exact = "a".repeat(28);
-    expect(() => (client as any).buildMemo(exact)).not.toThrow();
+  it("throws SoroStreamMemoError for text over 28 bytes", () => {
+    const text = "a".repeat(29);
+    expect(() => encodeMemo(text)).toThrow(SoroStreamMemoError);
   });
 
-  it("encodes a 32-byte hash memo as a MEMO_HASH", () => {
-    const client = makeClient();
-    const hash = Buffer.alloc(32, 7);
-    const memo = (client as any).buildMemo(hash);
+  it("counts UTF-8 byte length, not character length", () => {
+    // Each "€" is 3 bytes in UTF-8, so 10 of them is 30 bytes — over the limit.
+    expect(() => encodeMemo("€".repeat(10))).toThrow(SoroStreamMemoError);
+  });
+});
+
+describe("encodeMemoHash", () => {
+  it("encodes a 32-byte input unchanged", () => {
+    const data = Buffer.alloc(32, 7);
+    const memo = encodeMemoHash(data);
     expect(memo.type).toBe("hash");
-    expect(Buffer.isBuffer(memo.value)).toBe(true);
-    expect(memo.value.length).toBe(32);
-    expect(memo.value.equals(hash)).toBe(true);
+    expect((memo.value as Buffer).equals(data)).toBe(true);
   });
 
-  it("throws when a hash memo is not exactly 32 bytes", () => {
-    const client = makeClient();
-    expect(() => (client as any).buildMemo(Buffer.alloc(31))).toThrow(/32 bytes/);
-    expect(() => (client as any).buildMemo(Buffer.alloc(33))).toThrow(/32 bytes/);
-  });
-});
-
-describe("#201 memo passthrough on write methods", () => {
-  it("createStream forwards options.memo to buildAndSubmit", async () => {
-    const client = makeClient();
-    vi.spyOn(client as any, "validateStreamParams").mockResolvedValue(undefined);
-    vi.spyOn(client as any, "checkAllowance").mockResolvedValue(undefined);
-    const buildSpy = vi
-      .spyOn(client as any, "buildAndSubmit")
-      .mockResolvedValue("txhash");
-    vi.spyOn(client, "getStreamsBySender").mockResolvedValue([
-      {
-        id: "1",
-        sender: VALID_ACCOUNT,
-        recipient: VALID_RECIPIENT,
-        token: VALID_TOKEN,
-        deposit: 100n,
-        flowRate: 1n,
-        startTime: 0,
-        endTime: 3600,
-        lastWithdrawTime: 0,
-        status: "Active",
-        autoRenew: false,
-      },
-    ]);
-
-    await client.createStream(
-      {
-        recipient: VALID_RECIPIENT,
-        token: VALID_TOKEN,
-        amount: 1_000_000_000n,
-        durationSeconds: 3600,
-        autoRenew: false,
-      },
-      undefined,
-      { memo: "order-42" }
-    );
-
-    expect(buildSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      undefined,
-      undefined,
-      "createStream",
-      "order-42"
-    );
+  it("pads short input to 32 bytes", () => {
+    const data = Buffer.from([1, 2, 3]);
+    const memo = encodeMemoHash(data);
+    const value = memo.value as Buffer;
+    expect(value.length).toBe(32);
+    expect(value.subarray(0, 3).equals(data)).toBe(true);
+    expect(value.subarray(3).every((b) => b === 0)).toBe(true);
   });
 
-  it("withdraw forwards options.memo to buildAndSubmit", async () => {
-    const client = makeClient();
-    vi.spyOn(client, "getClaimable").mockResolvedValue(500n);
-    const buildSpy = vi
-      .spyOn(client as any, "buildAndSubmit")
-      .mockResolvedValue("txhash");
-
-    const hashMemo = Buffer.alloc(32, 9);
-    await client.withdraw({ streamId: "1" }, undefined, { memo: hashMemo });
-
-    expect(buildSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      undefined,
-      undefined,
-      "withdraw",
-      hashMemo
-    );
+  it("truncates long input to 32 bytes and warns", () => {
+    const data = Buffer.alloc(40, 9);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const memo = encodeMemoHash(data);
+    const value = memo.value as Buffer;
+    expect(value.length).toBe(32);
+    expect(value.equals(data.subarray(0, 32))).toBe(true);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
-  it("withdraw without a memo option leaves the transaction unaffected", async () => {
-    const client = makeClient();
-    vi.spyOn(client, "getClaimable").mockResolvedValue(500n);
-    const buildSpy = vi
-      .spyOn(client as any, "buildAndSubmit")
-      .mockResolvedValue("txhash");
-
-    await client.withdraw({ streamId: "1" });
-
-    expect(buildSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      undefined,
-      undefined,
-      "withdraw",
-      undefined
-    );
+  it("accepts a Uint8Array", () => {
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const memo = encodeMemoHash(data);
+    const value = memo.value as Buffer;
+    expect(value.length).toBe(32);
+    expect(value.subarray(0, 4)).toEqual(Buffer.from(data));
   });
 });
 
-describe("#201 parseMemo", () => {
-  it("returns { type: none, value: null } when memo_type is 'none'", () => {
-    expect(parseMemo({ memo_type: "none" })).toEqual({ type: "none", value: null });
+describe("decodeMemo", () => {
+  it("returns null for a no-memo transaction", () => {
+    expect(decodeMemo(Memo.none())).toBeNull();
   });
 
-  it("returns { type: none, value: null } when memo_type is absent", () => {
-    expect(parseMemo({})).toEqual({ type: "none", value: null });
+  it("decodes a text memo", () => {
+    expect(decodeMemo(Memo.text("hello"))).toBe("hello");
   });
 
-  it("decodes a text memo as-is", () => {
-    expect(parseMemo({ memo_type: "text", memo: "order-42" })).toEqual({
-      type: "text",
-      value: "order-42",
-    });
+  it("decodes an id memo", () => {
+    expect(decodeMemo(Memo.id("12345"))).toBe("12345");
   });
 
-  it("decodes an id memo as-is", () => {
-    expect(parseMemo({ memo_type: "id", memo: "123456789" })).toEqual({
-      type: "id",
-      value: "123456789",
-    });
+  it("decodes a hash memo as a Buffer", () => {
+    const data = Buffer.alloc(32, 1);
+    const decoded = decodeMemo(Memo.hash(data));
+    expect(Buffer.isBuffer(decoded)).toBe(true);
+    expect((decoded as Buffer).equals(data)).toBe(true);
   });
 
-  it("decodes a hash memo from base64 into a 32-byte Buffer", () => {
-    const raw = Buffer.alloc(32, 3);
-    const parsed = parseMemo({ memo_type: "hash", memo: raw.toString("base64") });
-    expect(parsed.type).toBe("hash");
-    expect(Buffer.isBuffer(parsed.value)).toBe(true);
-    expect((parsed.value as Buffer).length).toBe(32);
-    expect((parsed.value as Buffer).equals(raw)).toBe(true);
+  it("decodes a return memo as a Buffer", () => {
+    const data = Buffer.alloc(32, 2);
+    const decoded = decodeMemo(Memo.return(data));
+    expect(Buffer.isBuffer(decoded)).toBe(true);
+    expect((decoded as Buffer).equals(data)).toBe(true);
   });
 
-  it("decodes a return-hash memo from base64 into a Buffer", () => {
-    const raw = Buffer.alloc(32, 5);
-    const parsed = parseMemo({ memo_type: "return", memo: raw.toString("base64") });
-    expect(parsed.type).toBe("return");
-    expect((parsed.value as Buffer).equals(raw)).toBe(true);
+  it("round-trips a memo produced by encodeMemo", () => {
+    const memo = encodeMemo("round-trip");
+    expect(decodeMemo(memo)).toBe("round-trip");
+  });
+
+  it("round-trips a memo produced by encodeMemoHash", () => {
+    const data = Buffer.from([9, 9, 9]);
+    const memo = encodeMemoHash(data);
+    const decoded = decodeMemo(memo) as Buffer;
+    expect(decoded.subarray(0, 3).equals(data)).toBe(true);
+  });
+
+  it("returns null via MemoNone constant match", () => {
+    const memo = new Memo(MemoNone);
+    expect(decodeMemo(memo)).toBeNull();
   });
 });

@@ -1,3 +1,6 @@
+import type { FetchAdapter, WebSocketFactory } from "./adapters.js";
+
+/** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
 
 // ── Event types (#1) ─────────────────────────────────────────────────────────
@@ -60,6 +63,8 @@ export interface WebhookConfig {
   headers?: Record<string, string>;
   retries?: number;
   retryDelayMs?: number;
+  /** Overrides the global `fetch` used to deliver the webhook (issue #199). */
+  fetch?: FetchAdapter;
 }
 
 /** A single payment stream as returned by the contract. */
@@ -309,6 +314,12 @@ export interface WatchClaimableOptions {
    * subscribers know values are being refreshed.
    */
   onNetworkChanged?: () => void;
+  /**
+   * Overrides the global `WebSocket` constructor used for the `wsUrl`
+   * subscription. Required in environments without a native `WebSocket`
+   * global (issue #199).
+   */
+  webSocketFactory?: WebSocketFactory;
 }
 
 

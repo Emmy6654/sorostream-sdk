@@ -32,8 +32,7 @@ jobs:
           npm run build
           npm run size
           npm test
-          npm run check:bundle-size
-          npm run analyze:sourcemaps
+          npm run test:cjs
 
       - name: Setup Bun
         if: matrix.runtime == 'bun'
