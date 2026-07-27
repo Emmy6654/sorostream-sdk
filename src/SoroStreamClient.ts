@@ -2305,6 +2305,83 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     };
   }
 
+  // ── Issue #264: Async iterators for lazy pagination ──────────────────────
+
+  /**
+   * Returns an async iterator that lazily fetches all streams for a sender
+   * address, one page at a time. Each iteration yields a single {@link Stream}.
+   *
+   * Pages are fetched on demand — only when the iterator advances beyond the
+   * current page — so a `break` or early `return` inside a `for await` loop
+   * will stop any further network requests.
+   *
+   * @param address - The sender address to query.
+   * @param pageSize - Number of streams fetched per page (default: 20).
+   *
+   * @example
+   * ```ts
+   * for await (const stream of client.streamsBySender(senderAddr)) {
+   *   console.log(stream.id);
+   *   if (stream.status === "Cancelled") break; // stops fetching further pages
+   * }
+   * ```
+   */
+  async *streamsBySender(
+    address: string,
+    pageSize = 20
+  ): AsyncIterableIterator<Stream> {
+    let cursor: string | null | undefined = undefined;
+    do {
+      const page = (await this.getStreamsBySender(address, {
+        limit: pageSize,
+        ...(cursor != null ? { cursor } : {}),
+      })) as PaginatedStreams;
+
+      for (const stream of page.streams) {
+        yield stream;
+      }
+
+      cursor = page.hasMore ? page.cursor : null;
+    } while (cursor != null);
+  }
+
+  /**
+   * Returns an async iterator that lazily fetches all streams for a recipient
+   * address, one page at a time. Each iteration yields a single {@link Stream}.
+   *
+   * Pages are fetched on demand — only when the iterator advances beyond the
+   * current page — so a `break` or early `return` inside a `for await` loop
+   * will stop any further network requests.
+   *
+   * @param address - The recipient address to query.
+   * @param pageSize - Number of streams fetched per page (default: 20).
+   *
+   * @example
+   * ```ts
+   * for await (const stream of client.streamsByRecipient(recipientAddr)) {
+   *   console.log(stream.id);
+   * }
+   * ```
+   */
+  async *streamsByRecipient(
+    address: string,
+    pageSize = 20
+  ): AsyncIterableIterator<Stream> {
+    let cursor: string | null | undefined = undefined;
+    do {
+      const page = (await this.getStreamsByRecipient(address, {
+        limit: pageSize,
+        ...(cursor != null ? { cursor } : {}),
+      })) as PaginatedStreams;
+
+      for (const stream of page.streams) {
+        yield stream;
+      }
+
+      cursor = page.hasMore ? page.cursor : null;
+    } while (cursor != null);
+  }
+
   // ── Issue #73: Stream snapshot export / import ───────────────────────────
 
   /**
