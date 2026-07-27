@@ -796,3 +796,78 @@ export interface BatchMetrics {
   /** Unix timestamp (ms) of the most recent flush, or null if none. */
   lastFlushAt: number | null;
 }
+
+// ── Issue #212: Custom event bus integration ─────────────────────────────────
+
+/** Payload emitted on the `"stream.created"` event bus event. */
+export interface StreamCreatedEventPayload {
+  streamId: string;
+  sender: string;
+  recipient: string;
+  token: string;
+  txHash: string;
+}
+
+/** Payload emitted on the `"stream.withdrawn"` event bus event. */
+export interface StreamWithdrawnEventPayload {
+  streamId: string;
+  amount: string;
+  txHash: string;
+}
+
+/** Payload emitted on the `"stream.cancelled"` event bus event. */
+export interface StreamCancelledEventPayload {
+  streamId: string;
+  txHash: string;
+}
+
+/** Payload emitted on the `"rpc.error"` event bus event. */
+export interface RpcErrorEventPayload {
+  /** Name of the client method that failed (e.g. `"createStream"`). */
+  method: string;
+  /** The underlying error thrown during submission. */
+  error: unknown;
+}
+
+/**
+ * Maps each SDK lifecycle event name emitted through {@link IEventBus} to its
+ * payload shape. Reference-only — {@link IEventBus.emit} itself stays
+ * loosely typed so any framework-agnostic bus can implement it.
+ */
+export interface SoroStreamEventMap {
+  "stream.created": StreamCreatedEventPayload;
+  "stream.withdrawn": StreamWithdrawnEventPayload;
+  "stream.cancelled": StreamCancelledEventPayload;
+  "rpc.error": RpcErrorEventPayload;
+}
+
+/** Configuration options for KmsWalletAdapter (issue #306). */
+export interface KmsWalletAdapterConfig {
+  /** The public key (Stellar address) corresponding to the KMS key. */
+  publicKey: string;
+  /** Async function that signs raw payload bytes using KMS. */
+  sign: (payload: Uint8Array) => Promise<Uint8Array>;
+}
+
+/** Result shape returned by SoroStreamClient.healthCheck (issue #308). */
+export interface HealthCheckResult {
+  /** True if RPC endpoint responded successfully within timeout. */
+  rpcReachable: boolean;
+  /** Measured round-trip latency in milliseconds. */
+  latencyMs: number;
+  /** Optional error message if RPC check failed. */
+  error?: string;
+}
+
+/** Options for exportStreamHistory (issue #307). */
+export interface ExportStreamHistoryOptions {
+  /** Output format: 'json' (array) or 'ndjson' (line-delimited stream). Defaults to 'json'. */
+  format?: "json" | "ndjson";
+  /** Target writable stream (Node.js WritableStream, browser WritableStream, or object with write()). */
+  writable?: any;
+  /** Maximum items per page fetch. Defaults to 100. */
+  limit?: number;
+  /** Starting ledger number to filter events. */
+  startLedger?: number;
+}
+
