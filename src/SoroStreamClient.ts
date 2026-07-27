@@ -156,8 +156,8 @@ export interface SoroStreamClientOptions {
   network?: Network;
   /** The deployed StreamContract address. */
   contractId: string;
-  /** Wallet adapter for signing transactions. */
-  walletAdapter: WalletAdapter;
+  /** Wallet adapter for signing transactions. Optional for read-only operations. */
+  walletAdapter?: WalletAdapter;
   /** Optional custom RPC URL (overrides default). */
   rpcUrl?: string;
   /** Optional circuit-breaker configuration for RPC calls. */
@@ -280,13 +280,25 @@ export type SimulateOnlyResult = {
  * const client = new SoroStreamClient({ network: "testnet", contractId: "...", walletAdapter });
  * const { streamId } = await client.createStream({ recipient, token, amount, durationSeconds, autoRenew });
  * ```
+ *
+ * @example
+ * ```ts
+ * // Read-only usage without wallet adapter (issue #223: lazy-loading)
+ * const client = new SoroStreamClient({ network: "testnet", contractId: "..." });
+ * const stream = await client.getStream("stream-id"); // Works without wallet adapter
+ *
+ * // Later, when you need to perform a write operation:
+ * import { createFreighterAdapter } from "@sorostream/sdk/wallets";
+ * client.setWalletAdapter(await createFreighterAdapter());
+ * await client.withdraw({ streamId: "stream-id" });
+ * ```
  */
 export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private server: rpc.Server;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
   private network: Network;
-  private readonly walletAdapter: WalletAdapter;
+  private readonly walletAdapter: WalletAdapter | undefined;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
@@ -452,12 +464,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (options.onNetworkChange) {
       this.networkChangedCbs.add(options.onNetworkChange);
     }
-    if (this.walletAdapter.onNetworkChange) {
+    if (this.walletAdapter?.onNetworkChange) {
       this.walletAdapter.onNetworkChange((newNetwork) => {
         if (newNetwork === this.network) return;
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
+    }
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
@@ -474,8 +487,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async checkContractVersion(): Promise<void> {
     try {
       const op = this.contract.call("get_version");
+      const adapter = this.requireWalletAdapter();
       const tx = new TransactionBuilder(
-        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        await this.server.getAccount(await adapter.getPublicKey()),
         { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
       )
         .addOperation(op)
@@ -749,6 +763,33 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.breaker ? this.breaker.call(fn) : fn();
   }
 
+  /**
+   * Ensures a wallet adapter is present for operations that require signing.
+   * Throws an error if no adapter was provided during client construction.
+   * Issue #223: lazy-loading wallet adapter code.
+   */
+  private requireWalletAdapter(): WalletAdapter {
+    if (!this.walletAdapter) {
+      throw new Error(
+        "This operation requires a wallet adapter. " +
+        "Pass a walletAdapter to the SoroStreamClient constructor, " +
+        "or use the lazy-loading pattern by calling setWalletAdapter() before this operation."
+      );
+    }
+    return this.walletAdapter;
+  }
+
+  /**
+   * Sets or updates the wallet adapter after client construction.
+   * This enables lazy-loading wallet adapter code for read-only applications.
+   * Issue #223.
+   *
+   * @param adapter - The wallet adapter to use for signing operations.
+   */
+  setWalletAdapter(adapter: WalletAdapter): void {
+    this.walletAdapter = adapter;
+  }
+
   // ── Issue #50: Middleware / plugin system ─────────────────────────────────
 
   /**
@@ -816,7 +857,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<string> {
     const opStart = Date.now();
     try {
-      const publicKey = await this.walletAdapter.getPublicKey();
+      const adapter = this.requireWalletAdapter();
+      const publicKey = await adapter.getPublicKey();
 
       const account = await withRetry(
         () => this.withBreaker(() => this.server.getAccount(publicKey)),
@@ -833,20 +875,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const tx = txBuilder.setTimeout(30).build();
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASES[this.network],
-      })
-        .addOperation(operation)
-        .setTimeout(30)
-        .build();
 
       const preparedTx = await withRetry(
         () => this.withBreaker(() => this.server.prepareTransaction(tx)),
         { ...this.submitRetry, signal }
       );
 
-      const signedXdr = await this.walletAdapter.signTransaction(
+      const signedXdr = await adapter.signTransaction(
         preparedTx.toXDR(),
         this.network
       );
@@ -913,7 +948,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   private async buildAndSubmitBatch(operations: xdr.Operation[]): Promise<string> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const adapter = this.requireWalletAdapter();
+    const publicKey = await adapter.getPublicKey();
 
     const account = await withRetry(
       () => this.server.getAccount(publicKey),
@@ -934,7 +970,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       this.submitRetry
     );
 
-    const signedXdr = await this.walletAdapter.signTransaction(
+    const signedXdr = await adapter.signTransaction(
       preparedTx.toXDR(),
       this.network
     );
@@ -976,7 +1012,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async simulateOp(
     operation: xdr.Operation
   ): Promise<rpc.Api.SimulateTransactionResponse> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const adapter = this.requireWalletAdapter();
+    const publicKey = await adapter.getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
@@ -1073,7 +1110,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       throw new AccountNotFoundError(params.recipient);
     }
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     try {
       await this.withBreaker(() => this.server.getAccount(sender));
     } catch {
@@ -1088,7 +1125,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   private async checkAllowance(token: string, required: bigint): Promise<void> {
     try {
-      const sender = await this.walletAdapter.getPublicKey();
+      const sender = await this.requireWalletAdapter().getPublicKey();
       const contractAddress = this.contract.contractId();
 
       const tokenContract = new Contract(token);
@@ -1192,7 +1229,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         }
       }
 
-      const sender = await this.walletAdapter.getPublicKey();
+      const sender = await this.requireWalletAdapter().getPublicKey();
 
       if (this.checkDuplicate) {
         const existingResult = await this.getStreamsBySender(sender);
@@ -1265,7 +1302,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (params.durationSeconds <= 0) throw new Error("Duration must be > 0");
     }
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
 
     const operations = paramsArray.map((params) =>
       this.encoder.createStream(sender, params)
@@ -1307,13 +1344,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string; amount: string }> {
-    const recipient = await this.walletAdapter.getPublicKey();
+    const recipient = await this.requireWalletAdapter().getPublicKey();
     const claimable = await this.getClaimable(params.streamId);
 
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.withdrawn", {
@@ -1360,7 +1396,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<BatchWithdrawPartialResult> {
     const successes: string[] = [];
     const failures: { id: string; error: Error }[] = [];
-    const recipient = await this.walletAdapter.getPublicKey();
+    const recipient = await this.requireWalletAdapter().getPublicKey();
 
     for (let i = 0; i < streamIds.length; i += batchSize) {
       const chunk = streamIds.slice(i, i + batchSize);
@@ -1421,11 +1457,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
@@ -1470,7 +1505,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions
   ): Promise<{ txHash: string; newEndTime: Date }> {
     if (params.amount <= 0n) throw new InsufficientAmountError();
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.topUp(
       params.streamId,
       sender,
@@ -1499,7 +1534,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     batchSize = 8
   ): Promise<BatchCancelResult[]> {
     const results: BatchCancelResult[] = [];
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
 
     for (let i = 0; i < streamIds.length; i += batchSize) {
       const chunk = streamIds.slice(i, i + batchSize);
@@ -1531,7 +1566,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
     if (params.newFlowRate <= 0n) throw new InsufficientAmountError();
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
@@ -1558,7 +1593,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.setOperator(
       params.streamId,
       sender,
@@ -1585,7 +1620,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const operator = await this.walletAdapter.getPublicKey();
+    const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorCancelStream(params.streamId, operator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
@@ -1610,7 +1645,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
     if (params.amount <= 0n) throw new InsufficientAmountError();
-    const operator = await this.walletAdapter.getPublicKey();
+    const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
@@ -1650,7 +1685,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       throw new Error("Ratio numerator must be less than denominator");
     }
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
 
     if (!isValidStellarAddress(params.recipientA)) {
       throw new InvalidAddressError(params.recipientA);
@@ -1693,7 +1728,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!isValidStellarAddress(params.newRecipient)) {
       throw new InvalidAddressError(params.newRecipient);
     }
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.transferStream(
       params.streamId,
       sender,
@@ -1719,7 +1754,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.pauseStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
@@ -1741,7 +1776,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.resumeStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
@@ -1753,7 +1788,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async estimateOperationFee(
     operation: xdr.Operation
   ): Promise<FeeEstimate> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const adapter = this.requireWalletAdapter();
+    const publicKey = await adapter.getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
@@ -1793,7 +1829,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
     if (params.durationSeconds <= 0) throw new Error("Duration must be > 0");
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.createStream(sender, params);
     return this.estimateOperationFee(operation);
   }
@@ -1805,7 +1841,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @returns `{ totalFee, minResourceFee }` in stroops.
    */
   async estimateWithdrawFee(params: WithdrawParams): Promise<FeeEstimate> {
-    const recipient = await this.walletAdapter.getPublicKey();
+    const recipient = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.withdraw(params.streamId, recipient);
     return this.estimateOperationFee(operation);
   }
@@ -1819,7 +1855,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   async estimateCancelStreamFee(
     params: CancelStreamParams
   ): Promise<FeeEstimate> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
     return this.estimateOperationFee(operation);
   }
@@ -1834,7 +1870,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   async estimateTopUpFee(params: TopUpParams): Promise<FeeEstimate> {
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.topUp(
       params.streamId,
       sender,
@@ -2431,7 +2467,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options: BulkCreateOptions
   ): Promise<BulkCreateResult> {
     return this.runWithMiddleware("bulkCreateStreams", [rows, options], async () => {
-      const sender = await this.walletAdapter.getPublicKey();
+      const sender = await this.requireWalletAdapter().getPublicKey();
       const defaultToken = options.token;
       const autoRenew = options.autoRenew ?? false;
       const batchSize = options.batchSize ?? 8;
