@@ -101,6 +101,7 @@ export {
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
   SoroStreamMemoError,
+  SelfStreamError,
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";

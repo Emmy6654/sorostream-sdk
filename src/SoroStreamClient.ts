@@ -18,6 +18,9 @@ import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
+import { InMemoryEventBus } from "./eventBus.js";
+import type { IEventBus } from "./eventBus.js";
+import { SoroStreamVersionError } from "./errors.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -77,6 +80,7 @@ import {
   DuplicateStreamError,
   FederationResolutionError,
   NonceNotSupportedError,
+  SelfStreamError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -353,9 +357,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
   private readonly streamInflight = new Map<string, Promise<Stream>>();
-  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
-  /** In-flight deduplication: streamId → shared promise for the active RPC call */
-  private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
 
@@ -458,6 +459,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
+    }
+
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
@@ -833,13 +836,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const tx = txBuilder.setTimeout(30).build();
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASES[this.network],
-      })
-        .addOperation(operation)
-        .setTimeout(30)
-        .build();
 
       const preparedTx = await withRetry(
         () => this.withBreaker(() => this.server.prepareTransaction(tx)),
@@ -1194,6 +1190,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
       const sender = await this.walletAdapter.getPublicKey();
 
+      // Issue #232: Prevent self-streaming (recipient === sender)
+      if (params.recipient === sender) {
+        throw new SelfStreamError();
+      }
+
       if (this.checkDuplicate) {
         const existingResult = await this.getStreamsBySender(sender);
         const existingStreams = Array.isArray(existingResult) ? existingResult : existingResult.streams;
@@ -1313,7 +1314,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.withdraw(params.streamId, recipient);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.withdrawn", {
@@ -1425,7 +1425,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream");
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
