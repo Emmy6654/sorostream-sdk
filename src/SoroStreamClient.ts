@@ -13,6 +13,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
 import { InMemoryEventBus, type IEventBus } from "./eventBus.js";
+import { OfflineWriteQueue, DEFAULT_QUEUE_OPTIONS, type OfflineQueueOptions } from "./offlineQueue.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
@@ -360,6 +361,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
   // Issue #228: network version counter — incremented on each setNetwork call
   private networkVersion = 0;
+  // Issue #260: offline write queue for buffering mutations when RPC is unreachable
+  private readonly offlineQueue: OfflineWriteQueue | null = null;
   // Issue #215: wallet-initiated network switch subscribers
   private readonly networkChangedCbs = new Set<(network: Network) => void>();
   // Issue #227: audit log toggle
@@ -434,6 +437,19 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
     this.network = options.network;
     this.eventBus = options.eventBus ?? new InMemoryEventBus();
+
+    // Issue #260: Initialize offline write queue if enabled
+    if (options.offlineQueue) {
+      this.offlineQueue = new OfflineWriteQueue(
+        {
+          enabled: true,
+          maxQueueSize: options.maxQueueSize ?? DEFAULT_QUEUE_OPTIONS.maxQueueSize,
+          healthCheckIntervalMs: DEFAULT_QUEUE_OPTIONS.healthCheckIntervalMs,
+        },
+        this.eventBus,
+      );
+      this.offlineQueue.startHealthCheck();
+    }
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
     this.customTransport = options.transport ?? null;
@@ -878,6 +894,40 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Note: `this.encoder` is bound to the contract address (not the network)
     // and is therefore safe to reuse. The contract instance and wallet adapter
     // are also network-agnostic.
+  }
+
+  /**
+   * Enqueue a failed write operation to the offline queue (Issue #260).
+   * Only queues if the offline queue is enabled and the error is a network error.
+   */
+  private tryQueueOffline(operation: string, error: unknown, execute: () => Promise<unknown>): boolean {
+    if (!this.offlineQueue) return false;
+    const isNetworkError = error instanceof Error && (
+      error.message.includes('network') ||
+      error.message.includes('fetch') ||
+      error.message.includes('ECONNREFUSED') ||
+      error.message.includes('ETIMEDOUT') ||
+      error.message.includes('aborted')
+    );
+    if (!isNetworkError) return false;
+    this.offlineQueue.markOffline();
+    return this.offlineQueue.enqueue(operation, execute);
+  }
+
+  /**
+   * Get the current offline queue size (Issue #260).
+   */
+  getOfflineQueueSize(): number {
+    return this.offlineQueue?.size ?? 0;
+  }
+
+  /**
+   * Manually trigger draining the offline queue (Issue #260).
+   */
+  async drainOfflineQueue(): Promise<void> {
+    if (this.offlineQueue) {
+      await this.offlineQueue.markOnline();
+    }
   }
 
   /**

@@ -503,6 +503,22 @@ export function watchClaimableWs(
  * );
  * ```
  */
+// Issue #340: Subscription reference-count cache for watchClaimable.
+// Reuses the same polling interval for identical stream IDs, preventing
+// memory leaks when the same stream is watched multiple times.
+const watchClaimableSubscriptions = new Map<string, {
+  count: number;
+  tickTimer: ReturnType<typeof setInterval>;
+  reconcileTimer: ReturnType<typeof setInterval>;
+  stopWs: (() => void) | null;
+  listeners: Set<(claimable: bigint) => void>;
+  baseValue: bigint;
+  baseTime: number;
+  lastEmitted: bigint | null;
+  stream: Stream;
+  stopped: boolean;
+}>();
+
 export function watchClaimable(
   stream: Stream,
   reconcile: () => Promise<bigint>,

@@ -20,6 +20,17 @@ class V1Encoder implements ContractCallEncoder {
   constructor(private contract: Contract) {}
 
   createStream(sender: string, params: CreateStreamParams): xdr.Operation {
+    // Issue #341: Include namespace/metadata in the contract call.
+    // Use nativeToScVal with type "string" which encodes as UTF-8,
+    // ensuring non-ASCII characters (emoji, accented chars) survive
+    // the XDR round-trip. Empty/undefined namespace is sent as empty string.
+    const namespace = params.namespace ?? "";
+    if (namespace.length > 256) {
+      console.warn(
+        "[SoroStream SDK] createStream: metadata/namespace exceeds 256 characters, " +
+        "it may be truncated by the contract."
+      );
+    }
     return this.contract.call(
       "create_stream",
       nativeToScVal(sender, { type: "address" }),
@@ -27,7 +38,8 @@ class V1Encoder implements ContractCallEncoder {
       nativeToScVal(params.token, { type: "address" }),
       nativeToScVal(params.amount, { type: "i128" }),
       nativeToScVal(params.durationSeconds, { type: "u64" }),
-      nativeToScVal(params.autoRenew, { type: "bool" })
+      nativeToScVal(params.autoRenew, { type: "bool" }),
+      nativeToScVal(namespace, { type: "string" })  // Issue #341: UTF-8 encoded metadata
     );
   }
 
