@@ -13,6 +13,69 @@ export interface RetryOptions {
 }
 
 /**
+ * Manages exponential backoff state for retry operations (issue #288).
+ *
+ * Backoff state is scoped per-request and resets to the base delay after
+ * each successful request. This prevents isolated failures from being
+ * penalized by previous failure streaks.
+ */
+export class RetryBackoff {
+  private readonly baseDelayMs: number;
+  private readonly maxDelayMs: number;
+  /** Current backoff attempt counter, keyed by request identifier. */
+  private readonly attemptCounts = new Map<string, number>();
+
+  constructor(options?: { baseDelayMs?: number; maxDelayMs?: number }) {
+    this.baseDelayMs = options?.baseDelayMs ?? 200;
+    this.maxDelayMs = options?.maxDelayMs ?? 5_000;
+  }
+
+  /**
+   * Records a successful request and resets the backoff for that request key.
+   * @param key - The request identifier to reset.
+   */
+  onSuccess(key: string): void {
+    this.attemptCounts.delete(key);
+  }
+
+  /**
+   * Records a failed request and returns the next backoff delay.
+   * @param key - The request identifier.
+   * @returns The delay in ms before the next retry attempt.
+   */
+  onFailure(key: string): number {
+    const attempt = this.attemptCounts.get(key) ?? 0;
+    this.attemptCounts.set(key, attempt + 1);
+    const cap = Math.min(this.maxDelayMs, this.baseDelayMs * 2 ** attempt);
+    return Math.floor(Math.random() * cap);
+  }
+
+  /**
+   * Returns the current attempt count for a request key.
+   * @param key - The request identifier.
+   * @returns The number of consecutive failures.
+   */
+  getAttemptCount(key: string): number {
+    return this.attemptCounts.get(key) ?? 0;
+  }
+
+  /**
+   * Resets the backoff state for a specific request key.
+   * @param key - The request identifier to reset.
+   */
+  reset(key: string): void {
+    this.attemptCounts.delete(key);
+  }
+
+  /**
+   * Resets all backoff state.
+   */
+  resetAll(): void {
+    this.attemptCounts.clear();
+  }
+}
+
+/**
  * Wraps an async function with configurable exponential-backoff retry and full jitter.
  *
  * Uses the AWS "full jitter" formula to spread retry load:
