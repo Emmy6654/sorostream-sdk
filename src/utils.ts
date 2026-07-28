@@ -392,10 +392,18 @@ export function watchClaimableWs(
   streamId: string,
   onClaimable: (claimable: bigint) => void,
   compression?: boolean | CompressionOptions,
-  webSocketFactory?: WebSocketFactory
+  webSocketFactory?: WebSocketFactory,
+  reconnectOptions?: { reconnect?: boolean; backoffMs?: number; maxAttempts?: number }
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectAttempts = 0;
+  let lastEmittedValue: bigint | null = null;
+  const shouldReconnect = reconnectOptions?.reconnect ?? true;
+  const backoffMs = reconnectOptions?.backoffMs ?? 100;
+  const maxAttempts = reconnectOptions?.maxAttempts ?? 10;
+
   const compressionOpts = resolveCompression(compression);
   const payloadThreshold = compressionOpts?.threshold ?? Infinity;
   const createWebSocket = webSocketFactory ?? getDefaultWebSocketFactory();
@@ -406,58 +414,70 @@ export function watchClaimableWs(
     );
   }
 
-  try {
-    // Attempt to pass perMessageDeflate options for environments that support it
-    // (e.g. Node.js ws library). Browser WebSocket ignores extra constructor args.
-    if (compressionOpts) {
-      try {
-        const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
-        ws = createWebSocket(wsUrl, deflateOpts);
-      } catch {
-        // Fall back to standard constructor when options are unsupported
+  function connect() {
+    if (stopped) return;
+    try {
+      if (compressionOpts) {
+        try {
+          const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
+          ws = createWebSocket(wsUrl, deflateOpts);
+        } catch {
+          ws = createWebSocket(wsUrl);
+        }
+      } else {
         ws = createWebSocket(wsUrl);
       }
-    } else {
-      ws = createWebSocket(wsUrl);
-    }
 
-    ws.onopen = () => {
-      if (stopped) return;
-      const msg = JSON.stringify({ type: "subscribe", streamId });
-      // Respect threshold: only rely on compression for large-enough payloads
-      if (compressionOpts && msg.length < payloadThreshold) {
+      ws.onopen = () => {
+        if (stopped) return;
+        reconnectAttempts = 0;
+        const msg = JSON.stringify({ type: "subscribe", streamId });
         ws?.send(msg);
-      } else {
-        ws?.send(msg);
-      }
-    };
+      };
 
-    ws.onmessage = (event: MessageEvent) => {
-      if (stopped) return;
-      try {
-        const data = JSON.parse(event.data as string);
-        if (data.type === "claimable" && data.streamId === streamId) {
-          onClaimable(BigInt(data.value));
+      ws.onmessage = (event: MessageEvent) => {
+        if (stopped) return;
+        try {
+          const data = JSON.parse(event.data as string);
+          if (data.type === "claimable" && data.streamId === streamId) {
+            const val = BigInt(data.value);
+            if (val !== lastEmittedValue) {
+              lastEmittedValue = val;
+              onClaimable(val);
+            }
+          }
+        } catch {
+          // swallow parse errors
         }
-      } catch {
-        // swallow parse errors
-      }
-    };
+      };
 
-    ws.onerror = () => {
-      // Connection failed or compression extension rejected by server —
-      // silently no-op; caller should provide a polling fallback.
-    };
-  } catch {
-    // WebSocket not supported in this environment
+      ws.onerror = () => {
+        // Silently swallow errors; close event will trigger reconnect if appropriate
+      };
+
+      ws.onclose = () => {
+        if (stopped) return;
+        if (shouldReconnect && reconnectAttempts < maxAttempts) {
+          reconnectAttempts++;
+          const delay = backoffMs * Math.pow(1.5, reconnectAttempts - 1);
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
+    } catch {
+      // WebSocket initialization failed
+    }
   }
+
+  connect();
 
   return () => {
     stopped = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     if (ws) {
       ws.onopen = null;
       ws.onmessage = null;
       ws.onerror = null;
+      ws.onclose = null;
       ws.close();
       ws = null;
     }
@@ -605,6 +625,62 @@ export function watchClaimable(
     clearInterval(tickTimer);
     clearInterval(reconcileTimer);
     stopWs?.();
+  };
+}
+
+/** Options for {@link watchTotalClaimable}. */
+export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
+
+/**
+ * Aggregates claimable amounts across multiple streams and emits the total sum.
+ * Updates the total whenever any individual stream's balance changes.
+ *
+ * @param streams - Array of Stream objects.
+ * @param reconciles - Array of async reconcile functions matching streams order, or a single reconcile function.
+ * @param onTotalChange - Callback invoked with the updated total claimable sum in stroops.
+ * @param options - Optional configuration options.
+ * @returns Unsubscribe function to stop watching all streams.
+ */
+export function watchTotalClaimable(
+  streams: Stream[],
+  reconciles: Array<() => Promise<bigint>> | (() => Promise<bigint>),
+  onTotalChange: (total: bigint) => void,
+  options?: WatchTotalClaimableOptions
+): () => void {
+  if (streams.length === 0) {
+    onTotalChange(0n);
+    return () => {};
+  }
+
+  const values: bigint[] = new Array(streams.length).fill(0n);
+  let lastEmittedTotal: bigint | null = null;
+
+  const updateAndEmit = () => {
+    const sum = values.reduce((acc, v) => acc + v, 0n);
+    if (sum !== lastEmittedTotal) {
+      lastEmittedTotal = sum;
+      onTotalChange(sum);
+    }
+  };
+
+  const unsubscribes = streams.map((stream, idx) => {
+    const reconcileFn = typeof reconciles === "function"
+      ? reconciles
+      : (reconciles[idx] ?? (async () => claimableNow(stream)));
+
+    return watchClaimable(
+      stream,
+      reconcileFn,
+      (val) => {
+        values[idx] = val;
+        updateAndEmit();
+      },
+      options
+    );
+  });
+
+  return () => {
+    unsubscribes.forEach((unsub) => unsub());
   };
 }
 

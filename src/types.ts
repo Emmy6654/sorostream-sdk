@@ -331,8 +331,11 @@ export interface WatchClaimableOptions {
    * subscription. Required in environments without a native `WebSocket`
    * global (issue #199).
    */
-  webSocketFactory?: WebSocketFactory;
+   webSocketFactory?: WebSocketFactory;
 }
+
+/** Options for {@link watchTotalClaimable}. */
+export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
 
 
 /**
