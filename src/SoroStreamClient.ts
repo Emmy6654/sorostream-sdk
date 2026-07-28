@@ -26,6 +26,8 @@ import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizo
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
 import { createDefaultRpcTransport } from "./transport.js";
 import type { RpcTransportAdapter } from "./transport.js";
+import { StreamMonitor } from "./stream-monitor.js";
+import type { StreamMonitorConfig } from "./stream-monitor.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -2898,6 +2900,40 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   async disconnect(): Promise<void> {
     await this.server.teardown?.();
+  }
+
+  /**
+   * Creates a background monitor that polls the given streams on a fixed
+   * interval and emits threshold-based events — `streamExpiringSoon`,
+   * `streamExpired`, `streamLowBalance`, and `streamStatusChanged` (issue #266).
+   *
+   * Centralizes what would otherwise be a hand-rolled polling loop per
+   * consumer. Call `monitor.stop()` to clear all timers when done.
+   *
+   * @param streamIds - The stream IDs to poll.
+   * @param config - Poll interval and alert thresholds.
+   * @returns A {@link StreamMonitor} instance. Subscribe via `monitor.on(...)`.
+   *
+   * @example
+   * ```ts
+   * const monitor = client.createStreamMonitor(["1", "2"], {
+   *   pollIntervalMs: 15_000,
+   *   expiryWarningMs: 60 * 60 * 1000,
+   *   lowBalanceThreshold: 1_000_000n,
+   * });
+   * monitor.on("streamExpiringSoon", ({ streamId, secondsLeft }) => { ... });
+   * // later: monitor.stop();
+   * ```
+   */
+  createStreamMonitor(streamIds: string[], config: StreamMonitorConfig = {}): StreamMonitor {
+    return new StreamMonitor(
+      streamIds,
+      {
+        getStream: (streamId) => this.getStream(streamId),
+        getClaimable: (streamId) => this.getClaimable(streamId),
+      },
+      config
+    );
   }
 
   /**
