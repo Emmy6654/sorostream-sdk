@@ -211,5 +211,6 @@ export type {
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  SoroStreamClientConfig,
 } from "./types.js";
 
