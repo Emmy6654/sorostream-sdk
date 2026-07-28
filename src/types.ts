@@ -95,6 +95,12 @@ export interface Stream {
   pausedAt?: number;
   /** Unix timestamp (seconds) before which no withdrawals are permitted. */
   lockUntil?: number;
+  /**
+   * Optional namespace for multi-tenant scoping (issue #274).
+   * Stored in the stream's metadata field. Filtering by namespace is
+   * off-chain only — the contract does not enforce isolation.
+   */
+  namespace?: string;
   /** Optional helper method for JSON serialization of BigInt fields. */
   toJSON?(): Record<string, unknown>;
 }
@@ -140,6 +146,12 @@ export interface CreateStreamParams {
    * Enforced at contract level; the SDK validates this before submission.
    */
   lockUntil?: number;
+  /**
+   * Optional namespace for multi-tenant scoping (issue #274).
+   * Stored in the stream's metadata field. Filtering by namespace is
+   * off-chain only — the contract does not enforce isolation.
+   */
+  namespace?: string;
 }
 
 /** Overrides for cloneStream. Any CreateStreamParams field may be changed before submission. */

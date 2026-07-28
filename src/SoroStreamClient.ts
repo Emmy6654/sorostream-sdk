@@ -370,6 +370,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
 
+  /** Namespace registry: streamId → namespace (off-chain index, issue #274). */
+  private readonly namespaceRegistry = new Map<string, string>();
+
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
   private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
@@ -474,6 +477,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
     }
+
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
@@ -1236,6 +1240,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         throw new StreamNotFoundError(
           "(unknown — post-creation fetch returned empty)"
         );
+
+      // Issue #274: store namespace in the off-chain registry
+      if (params.namespace) {
+        this.namespaceRegistry.set(latest.id, params.namespace);
+      }
 
       // Issue #212: notify subscribers of the custom event bus.
       this.eventBus.emit("stream.created", {
@@ -2315,6 +2324,55 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       cursor: last ? last.id : null,
       hasMore: streams.length >= limit,
     };
+  }
+
+  /**
+   * Returns all streams matching a given namespace (issue #274).
+   *
+   * **Important:** Namespace filtering is **off-chain only**. The contract
+   * does not enforce namespace isolation — this method queries the local
+   * namespace registry that is populated when streams are created with a
+   * `namespace` parameter. Streams created without a namespace are excluded.
+   *
+   * @param namespace - The namespace string to filter by.
+   * @returns An array of streams that have been tagged with the given namespace.
+   *
+   * @example
+   * ```ts
+   * // Create a stream with a namespace
+   * await client.createStream({
+   *   recipient: "GADDR...",
+   *   token: "USDC...",
+   *   amount: 100000000n,
+   *   durationSeconds: 3600,
+   *   autoRenew: false,
+   *   namespace: "tenant-abc",
+   * });
+   *
+   * // Query streams by namespace
+   * const streams = await client.getStreamsByNamespace("tenant-abc");
+   * ```
+   */
+  async getStreamsByNamespace(namespace: string): Promise<Stream[]> {
+    const streamIds = Array.from(this.namespaceRegistry.entries())
+      .filter(([, ns]) => ns === namespace)
+      .map(([id]) => id);
+
+    if (streamIds.length === 0) return [];
+
+    const streams: Stream[] = [];
+    for (const id of streamIds) {
+      try {
+        const stream = await this.getStream(id);
+        streams.push(stream);
+      } catch {
+        // Stream may have been cancelled or is no longer accessible;
+        // remove it from the registry
+        this.namespaceRegistry.delete(id);
+      }
+    }
+
+    return streams;
   }
 
   // ── Issue #73: Stream snapshot export / import ───────────────────────────
