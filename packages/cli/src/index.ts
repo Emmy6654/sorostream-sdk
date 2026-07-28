@@ -9,6 +9,7 @@ import {
   cmdClaimable,
   cmdForecast,
 } from "./commands.js";
+import { cmdAnalyze } from "./analyze.js";
 
 const program = new Command();
 
@@ -96,6 +97,21 @@ program
   .action(async (streamId) => {
     const opts = program.opts();
     await cmdForecast(opts, streamId);
+  });
+
+// --- analyze ---------------------------------------------------------------
+program
+  .command("analyze")
+  .description("Analyze bundle size and tree-shaking coverage for an entrypoint")
+  .argument("<entrypoint>", "Path to the entrypoint file to analyze")
+  .option("--html", "Generate an interactive treemap HTML file", false)
+  .option("--output-dir <dir>", "Directory for output files (default: entrypoint directory)")
+  .action(async (entrypoint, opts) => {
+    await cmdAnalyze({
+      entrypoint,
+      html: opts.html,
+      outputDir: opts.outputDir,
+    });
   });
 
 program.parse();
