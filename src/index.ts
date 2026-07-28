@@ -7,6 +7,13 @@ export type {
   SoroStreamAdapters,
 } from "./adapters.js";
 
+export { createDefaultRpcTransport } from "./transport.js";
+export type {
+  RpcTransportAdapter,
+  RpcTransportInitContext,
+  RpcTransportGetEventsRequest,
+} from "./transport.js";
+
 export { MockSoroStreamClient } from "./mock.js";
 
 export { WebhookForwarder } from "./webhook.js";
@@ -90,6 +97,7 @@ export {
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
   SoroStreamMemoError,
+  SoroStreamTransportError,
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";

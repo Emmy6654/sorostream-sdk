@@ -132,6 +132,25 @@ export class SoroStreamMemoError extends SoroStreamError {
   }
 }
 
+/**
+ * Optional error type for custom `RpcTransportAdapter` implementations to
+ * wrap a lower-level transport failure (a rejected fetch, a closed socket,
+ * an auth failure, …) before letting it propagate out of an adapter method.
+ * Not required — an adapter may throw any `Error` — but using it gives
+ * `withRetry`'s failure logs and `SoroStreamRetryExhaustedError.originalError`
+ * a consistent shape. See CUSTOM_TRANSPORT.md.
+ */
+export class SoroStreamTransportError extends SoroStreamError {
+  /** The lower-level error that caused this transport failure, if any. */
+  readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "SoroStreamTransportError";
+    this.cause = cause;
+  }
+}
+
 export class FederationResolutionError extends SoroStreamError {
   constructor(address: string, reason?: string) {
     super(`Failed to resolve federation address "${address}"${reason ? `: ${reason}` : ""}`);
@@ -238,5 +257,26 @@ export class SoroStreamDependencyError extends SoroStreamError {
     this.packageName = packageName;
     this.requiredRange = requiredRange;
     this.installedVersion = installedVersion;
+  }
+}
+
+/**
+ * Thrown when the SDK detects a contract version that is outside the
+ * supported compatibility range. Issue #209.
+ */
+export class SoroStreamVersionError extends SoroStreamError {
+  /** The detected contract version. */
+  readonly contractVersion: string;
+  /** The minimum compatible version. */
+  readonly minVersion: string;
+
+  constructor(contractVersion: string, minVersion: string) {
+    super(
+      `Contract version ${contractVersion} is below the minimum compatible version (${minVersion}). ` +
+        `Upgrade the contract or downgrade the SDK.`
+    );
+    this.name = "SoroStreamVersionError";
+    this.contractVersion = contractVersion;
+    this.minVersion = minVersion;
   }
 }

@@ -1,4 +1,5 @@
 import { rpc, scValToNative, nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import type { RpcTransportAdapter } from "./transport.js";
 
 function toBigInt(val: unknown): bigint {
   if (typeof val === "bigint") return val;
@@ -63,10 +64,10 @@ export interface PaginatedEvents {
  * over a ledger range.
  */
 export class StreamIndexer {
-  private readonly server: rpc.Server;
+  private readonly server: RpcTransportAdapter;
   private readonly contractId: string;
 
-  constructor(server: rpc.Server, contractId: string) {
+  constructor(server: RpcTransportAdapter, contractId: string) {
     this.server = server;
     this.contractId = contractId;
   }
