@@ -548,6 +548,78 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
   }
 
+  /**
+   * Checks SDK-to-contract version compatibility and returns a detailed result (issue #209).
+   *
+   * This method queries the deployed contract for its version and compares it
+   * against the SDK's minimum and maximum compatible contract versions.
+   *
+   * @returns A `CompatibilityResult` with SDK version, contract version, and compatibility status.
+   *
+   * @example
+   * ```ts
+   * const result = await client.checkContractCompatibility();
+   * console.log(`Compatible: ${result.isCompatible}`);
+   * console.log(`SDK: ${result.sdkVersion}, Contract: ${result.contractVersion}`);
+   * ```
+   */
+  async checkContractCompatibility(): Promise<import("./types.js").CompatibilityResult> {
+    const sdkVersion = "0.1.0"; // From package.json
+    const minCompatibleVersion = MIN_COMPATIBLE_CONTRACT_VERSION;
+    const maxCompatibleVersion = MAX_COMPATIBLE_CONTRACT_VERSION;
+
+    try {
+      const op = this.contract.call("get_version");
+      const tx = new TransactionBuilder(
+        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
+      )
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      const simulated = await this.server.simulateTransaction(tx);
+
+      if (rpc.Api.isSimulationSuccess(simulated) && simulated.result) {
+        const contractVersion = scValToNative(simulated.result.retval) as string;
+
+        const cmpMin = compareVersions(contractVersion, minCompatibleVersion);
+        const cmpMax = compareVersions(contractVersion, maxCompatibleVersion);
+
+        const isCompatible = cmpMin >= 0 && cmpMax <= 0;
+
+        let message: string;
+        if (cmpMin < 0) {
+          message = `Contract version ${contractVersion} is below the minimum compatible version (${minCompatibleVersion}). Upgrade the contract.`;
+        } else if (cmpMax > 0) {
+          message = `Contract version ${contractVersion} is newer than SDK maximum (${maxCompatibleVersion}). Some features may not be available.`;
+        } else {
+          message = `Contract version ${contractVersion} is within the compatible range.`;
+        }
+
+        return {
+          sdkVersion,
+          contractVersion,
+          minCompatibleVersion,
+          maxCompatibleVersion,
+          isCompatible,
+          message,
+        };
+      }
+    } catch {
+      // Contract doesn't expose get_version or simulation failed
+    }
+
+    return {
+      sdkVersion,
+      contractVersion: null,
+      minCompatibleVersion,
+      maxCompatibleVersion,
+      isCompatible: true,
+      message: "Contract version could not be determined. Assuming compatible.",
+    };
+  }
+
   // ── Issue #227: Audit log ───────────────────────────────────────────────────
 
   private static readonly AUDIT_LOG_KEY = "sorostream_audit_log";

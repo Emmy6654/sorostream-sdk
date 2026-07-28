@@ -146,6 +146,7 @@ export type {
   PriceFeedAdapter,
   FeeBumpOptions,
   ContractVersion,
+  CompatibilityResult,
   SplitStreamParams,
   SplitStreamResult,
   StreamTotals,
