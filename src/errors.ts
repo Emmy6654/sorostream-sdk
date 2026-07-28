@@ -132,6 +132,25 @@ export class SoroStreamMemoError extends SoroStreamError {
   }
 }
 
+/**
+ * Optional error type for custom `RpcTransportAdapter` implementations to
+ * wrap a lower-level transport failure (a rejected fetch, a closed socket,
+ * an auth failure, …) before letting it propagate out of an adapter method.
+ * Not required — an adapter may throw any `Error` — but using it gives
+ * `withRetry`'s failure logs and `SoroStreamRetryExhaustedError.originalError`
+ * a consistent shape. See CUSTOM_TRANSPORT.md.
+ */
+export class SoroStreamTransportError extends SoroStreamError {
+  /** The lower-level error that caused this transport failure, if any. */
+  readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "SoroStreamTransportError";
+    this.cause = cause;
+  }
+}
+
 export class FederationResolutionError extends SoroStreamError {
   constructor(address: string, reason?: string) {
     super(`Failed to resolve federation address "${address}"${reason ? `: ${reason}` : ""}`);
