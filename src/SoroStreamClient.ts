@@ -838,21 +838,23 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return;
     }
 
+    const previousNetwork = this.network;
+
     // Issue #228: increment version so active watchClaimable instances
     // detect the switch and restart polling against the new endpoint.
     this.networkVersion++;
 
-    // 1. Drop the read cache so stale stream data from the previous network
-    //    is never served from cache after the switch.
     // 1. Drop the read caches so stale stream data from the previous network
-    //    is never served from cache after the switch (issue #230).
+    //    is never served from cache after the switch (issue #230 & #342).
     this.streamCache.clear();
     this.senderCache.clear();
     this.recipientCache.clear();
+    this.federationCache.clear();
     // Issue #221: Clear in-flight deduplication maps on network switch
     this.streamInflight.clear();
     this.claimableInflight.clear();
     this.claimableCache.clear();
+    this._ledgerTimestampCache = null;
 
     // 2. Destroy the existing event poller — it's still pointing at the
     //    previous network's RPC and would otherwise emit stale events for
@@ -877,9 +879,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Reset nonce-support cache so it is re-probed on the new network.
     this._nonceSupported = null;
 
-    // Note: `this.encoder` is bound to the contract address (not the network)
-    // and is therefore safe to reuse. The contract instance and wallet adapter
-    // are also network-agnostic.
+    // Issue #342: emit cacheInvalidated debug event on network switch
+    this.eventBus.emit("cacheInvalidated", {
+      reason: "networkSwitch",
+      network: this.network,
+      previousNetwork,
+    });
   }
 
   /**
@@ -892,13 +897,26 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   clearStreamCache(streamId?: string): void {
     if (streamId === undefined) {
       this.streamCache.clear();
+      this.senderCache.clear();
+      this.recipientCache.clear();
+      this.eventBus.emit("cacheInvalidated", {
+        reason: "manual",
+        network: this.network,
+      });
       return;
     }
     // Cache keys are network-prefixed to defend against mid-flight network
     // switches. Remove entries for every known network.
     for (const key of ["mainnet", "testnet", "futurenet"] as Network[]) {
       this.streamCache.delete(`${key}:${streamId}`);
+      const pass = NETWORK_PASSPHRASES[key];
+      if (pass) this.streamCache.delete(`${pass}:${streamId}`);
     }
+    this.eventBus.emit("cacheInvalidated", {
+      reason: "manual",
+      network: this.network,
+      streamId,
+    });
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
@@ -2414,7 +2432,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${streamId}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${streamId}`;
 
     // 1. Fast path: serve from TTL cache.
     const cached = this.streamCache.get(cacheKey);
@@ -2552,9 +2571,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     sender: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
-    // Network-keyed cache for non-paginated calls (issue #230).
+    // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${sender}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${sender}`;
     if (!pagination) {
       const cached = this.senderCache.get(cacheKey);
       if (cached) return cached;
@@ -2626,9 +2646,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     recipient: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
-    // Network-keyed cache for non-paginated calls (issue #230).
+    // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${recipient}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${recipient}`;
     if (!pagination) {
       const cached = this.recipientCache.get(cacheKey);
       if (cached) return cached;

@@ -14,7 +14,7 @@ export type {
   RpcTransportGetEventsRequest,
 } from "./transport.js";
 
-export { MockSoroStreamClient } from "./mock.js";
+export { MockSoroStreamClient, SoroStreamSandbox } from "./mock.js";
 
 export { WebhookForwarder } from "./webhook.js";
 export {
@@ -150,6 +150,7 @@ export type {
   RevokeDelegateParams,
   Network,
   WalletAdapter,
+  WalletAdapterSignResult,
   FeeEstimate,
   VestingSchedulePoint,
   VestingScheduleResult,
@@ -209,6 +210,7 @@ export type {
   StreamWithdrawnEventPayload,
   StreamCancelledEventPayload,
   RpcErrorEventPayload,
+  CacheInvalidatedEventPayload,
   SoroStreamEventMap,
   KmsWalletAdapterConfig,
   HealthCheckResult,

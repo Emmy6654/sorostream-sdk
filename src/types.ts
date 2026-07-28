@@ -390,6 +390,14 @@ export interface WalletAdapter {
   onNetworkChange?(callback: (network: Network) => void): () => void;
 }
 
+/** Result shape returned when a wallet adapter signs a transaction (issue #344). */
+export interface WalletAdapterSignResult {
+  /** The signed transaction envelope XDR encoded in base64. */
+  signedXdr: string;
+  /** Optional transaction hash if calculated by the adapter. */
+  txHash?: string;
+}
+
 /** A single row for bulk stream creation. */
 export interface BulkStreamRow {
   recipient: string;
@@ -974,6 +982,15 @@ export interface SoroStreamEventMap {
   "stream.cancelled": StreamCancelledEventPayload;
   "rpc.error": RpcErrorEventPayload;
   "walletAdapterChanged": WalletAdapterChangedEventPayload;
+  "cacheInvalidated": CacheInvalidatedEventPayload;
+}
+
+/** Payload emitted when the client read cache is invalidated (issue #342). */
+export interface CacheInvalidatedEventPayload {
+  reason: "networkSwitch" | "manual" | string;
+  network: Network;
+  previousNetwork?: Network;
+  streamId?: string;
 }
 
 /** Payload emitted when the wallet adapter is hot-swapped (issue #261). */

@@ -45,6 +45,8 @@ import type {
   AddDelegateParams,
   RevokeDelegateParams,
   WithdrawParams,
+  WriteOptions,
+  OperationExplanation,
 } from "./types.js";
 import { streamToJSON } from "./utils.js";
 
@@ -107,8 +109,20 @@ export class MockSoroStreamClient {
   }
 
   async createStream(
-    params: CreateStreamParams
+    params: CreateStreamParams,
+    _signal?: AbortSignal,
+    options?: WriteOptions
   ): Promise<{ streamId: string; txHash: string }> {
+    if (options?.explain || (params as any)?.explain) {
+      return {
+        operation: "createStream",
+        summary: `Explain mode dry-run for createStream to ${params.recipient}`,
+        affectedAddresses: [this.senderKey, params.recipient],
+        balanceDeltas: [],
+        estimatedFee: 100,
+        minResourceFee: 100,
+      } as any;
+    }
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
     if (params.durationSeconds <= 0) throw new Error("Duration must be > 0");
 
@@ -144,7 +158,21 @@ export class MockSoroStreamClient {
     return { streamId: id, txHash: `mock-tx-create-${id}` };
   }
 
-  async withdraw(params: WithdrawParams): Promise<{ txHash: string; amount: string }> {
+  async withdraw(
+    params: WithdrawParams,
+    _signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string; amount: string }> {
+    if (options?.explain || (params as any)?.explain) {
+      return {
+        operation: "withdraw",
+        summary: `Explain mode dry-run for withdraw stream ${params.streamId}`,
+        affectedAddresses: [this.senderKey],
+        balanceDeltas: [],
+        estimatedFee: 100,
+        minResourceFee: 100,
+      } as any;
+    }
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
     if (stream.status !== "Active") throw new Error("Stream is not active");
@@ -187,7 +215,21 @@ export class MockSoroStreamClient {
     };
   }
 
-  async cancelStream(params: CancelStreamParams): Promise<{ txHash: string }> {
+  async cancelStream(
+    params: CancelStreamParams,
+    _signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    if (options?.explain || (params as any)?.explain) {
+      return {
+        operation: "cancelStream",
+        summary: `Explain mode dry-run for cancelStream ${params.streamId}`,
+        affectedAddresses: [this.senderKey],
+        balanceDeltas: [],
+        estimatedFee: 100,
+        minResourceFee: 100,
+      } as any;
+    }
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
     if (stream.status !== "Active") throw new Error("Stream is not active");
@@ -206,8 +248,20 @@ export class MockSoroStreamClient {
   }
 
   async topUp(
-    params: TopUpParams
+    params: TopUpParams,
+    _signal?: AbortSignal,
+    options?: WriteOptions
   ): Promise<{ txHash: string; newEndTime: Date }> {
+    if (options?.explain || (params as any)?.explain) {
+      return {
+        operation: "topUp",
+        summary: `Explain mode dry-run for topUp stream ${params.streamId}`,
+        affectedAddresses: [this.senderKey],
+        balanceDeltas: [],
+        estimatedFee: 100,
+        minResourceFee: 100,
+      } as any;
+    }
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
@@ -677,5 +731,207 @@ export class MockSoroStreamClient {
 
   getConnectionStats(): { maxConnections: number; active: number; idle: number; reused: number } {
     return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
+  }
+}
+
+// ── Issue #348: SDK Sandbox Mode ─────────────────────────────────────────────
+
+export type SandboxUnexpectedCallPolicy = "error" | "allow" | "warn";
+
+export interface SandboxCallLog {
+  method: string;
+  args: unknown[];
+  timestamp: number;
+}
+
+/**
+ * Offline, in-memory testing environment and mock client (issue #348).
+ * Serves as a drop-in replacement for {@link SoroStreamClient} in unit tests
+ * without hitting Soroban RPC endpoints.
+ */
+export class SoroStreamSandbox extends MockSoroStreamClient {
+  private callLog: SandboxCallLog[] = [];
+  private scenarios = new Map<string, (...args: any[]) => any>();
+  private unexpectedCallPolicy: SandboxUnexpectedCallPolicy = "allow";
+
+  constructor(senderKey = "GSANDBOX_SENDER") {
+    super(senderKey);
+  }
+
+  /** Configures the unexpected call handling policy. */
+  setUnexpectedCallPolicy(policy: SandboxUnexpectedCallPolicy): void {
+    this.unexpectedCallPolicy = policy;
+  }
+
+  /** Configures a custom mock handler or scenario for an SDK operation. */
+  configureScenario(method: string, handler: (...args: any[]) => any): void {
+    this.scenarios.set(method, handler);
+  }
+
+  /** Clears all registered custom scenarios. */
+  clearScenarios(): void {
+    this.scenarios.clear();
+  }
+
+  /** Returns all recorded calls made to this sandbox instance. */
+  getCalls(method?: string): SandboxCallLog[] {
+    if (method) {
+      return this.callLog.filter((c) => c.method === method);
+    }
+    return [...this.callLog];
+  }
+
+  /** Clears the recorded call log history. */
+  clearCallHistory(): void {
+    this.callLog = [];
+  }
+
+  /** Asserts that a method was called at least `times` count (default 1). */
+  assertCalled(method: string, times = 1): void {
+    const calls = this.getCalls(method);
+    if (calls.length < times) {
+      throw new Error(
+        `Expected method "${method}" to be called at least ${times} times, but was called ${calls.length} times.`
+      );
+    }
+  }
+
+  /** Asserts that a method was called with arguments matching the predicate. */
+  assertCalledWith(method: string, matcher: (args: unknown[]) => boolean): void {
+    const calls = this.getCalls(method);
+    const matched = calls.some((c) => matcher(c.args));
+    if (!matched) {
+      throw new Error(
+        `Expected method "${method}" to be called with matching arguments, but no call matched.`
+      );
+    }
+  }
+
+  private recordAndExecute<T>(
+    method: string,
+    defaultFn: () => Promise<T>,
+    args: unknown[]
+  ): Promise<T> {
+    this.callLog.push({ method, args, timestamp: Date.now() });
+
+    const scenario = this.scenarios.get(method);
+    if (scenario) {
+      return Promise.resolve(scenario(...args));
+    }
+
+    if (
+      this.unexpectedCallPolicy === "error" &&
+      !this.isDefaultOperation(method)
+    ) {
+      throw new Error(
+        `Unexpected call to unconfigured sandbox operation: "${method}"`
+      );
+    }
+
+    return defaultFn();
+  }
+
+  private isDefaultOperation(method: string): boolean {
+    return [
+      "createStream",
+      "withdraw",
+      "cancelStream",
+      "topUp",
+      "getStream",
+      "getClaimable",
+      "getStreamsBySender",
+      "getStreamsByRecipient",
+      "watchClaimable",
+      "batchCancel",
+      "updateFlowRate",
+      "pause",
+      "resume",
+      "splitStream",
+      "transferStream",
+    ].includes(method);
+  }
+
+  override async createStream(
+    params: CreateStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<any> {
+    return this.recordAndExecute(
+      "createStream",
+      () => super.createStream(params, signal, options),
+      [params, signal, options]
+    );
+  }
+
+  override async withdraw(
+    params: WithdrawParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<any> {
+    return this.recordAndExecute(
+      "withdraw",
+      () => super.withdraw(params, signal, options),
+      [params, signal, options]
+    );
+  }
+
+  override async cancelStream(
+    params: CancelStreamParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<any> {
+    return this.recordAndExecute(
+      "cancelStream",
+      () => super.cancelStream(params, signal, options),
+      [params, signal, options]
+    );
+  }
+
+  override async topUp(
+    params: TopUpParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<any> {
+    return this.recordAndExecute(
+      "topUp",
+      () => super.topUp(params, signal, options),
+      [params, signal, options]
+    );
+  }
+
+  override async getStream(streamId: string): Promise<Stream> {
+    return this.recordAndExecute("getStream", () => super.getStream(streamId), [
+      streamId,
+    ]);
+  }
+
+  override async getClaimable(streamId: string): Promise<bigint> {
+    return this.recordAndExecute(
+      "getClaimable",
+      () => super.getClaimable(streamId),
+      [streamId]
+    );
+  }
+
+  override async getStreamsBySender(
+    sender: string,
+    pagination?: PaginationParams
+  ): Promise<Stream[] | PaginatedStreams> {
+    return this.recordAndExecute(
+      "getStreamsBySender",
+      () => super.getStreamsBySender(sender, pagination),
+      [sender, pagination]
+    );
+  }
+
+  override async getStreamsByRecipient(
+    recipient: string,
+    pagination?: PaginationParams
+  ): Promise<Stream[] | PaginatedStreams> {
+    return this.recordAndExecute(
+      "getStreamsByRecipient",
+      () => super.getStreamsByRecipient(recipient, pagination),
+      [recipient, pagination]
+    );
   }
 }

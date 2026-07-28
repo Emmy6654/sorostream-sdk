@@ -114,6 +114,7 @@ export type {
   RevokeDelegateParams,
   Network,
   WalletAdapter,
+  WalletAdapterSignResult,
   FeeEstimate,
   VestingSchedulePoint,
   VestingScheduleResult,
