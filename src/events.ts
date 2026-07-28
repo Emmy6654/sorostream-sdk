@@ -1,5 +1,6 @@
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { StreamEvent, StreamEventType, StreamSubscription, BatchingOptions, BatchMetrics } from "./types.js";
+import type { RpcTransportAdapter } from "./transport.js";
 
 /**
  * Retry policy for automatic event poller reconnection on unexpected failures.
@@ -78,7 +79,7 @@ export interface PollerEntry {
  * to matching subscribers.
  */
 export class EventPoller {
-  private server: rpc.Server;
+  private server: RpcTransportAdapter;
   private contractId: string;
   private cursor: string | undefined;
   private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -108,7 +109,7 @@ export class EventPoller {
     lastFlushAt: null,
   };
 
-  constructor(server: rpc.Server, contractId: string, options?: EventPollerOptions) {
+  constructor(server: RpcTransportAdapter, contractId: string, options?: EventPollerOptions) {
     this.server = server;
     this.contractId = contractId;
     const rp = options?.retryPolicy ?? {};

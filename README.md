@@ -69,6 +69,7 @@ await client.withdraw({ streamId });
 | `clearTokenCache(tokenAddress?)` | Clears cached token metadata for one token, or all tokens when omitted |
 | `resolveFederationAddress(name)` | Resolves a federation address (`alice*example.com`) to a G-address. Cached for 5 minutes; returns `null` (never throws) if unresolvable |
 | `onNetworkChanged(cb)` | Subscribes to wallet-initiated network switches. Returns an unsubscribe function |
+| `disconnect()` | Tears down the active RPC transport via its `teardown()` hook, if any (see [CUSTOM_TRANSPORT.md](./CUSTOM_TRANSPORT.md)) |
 
 ### Utilities
 
@@ -94,6 +95,7 @@ await client.withdraw({ streamId });
 | `contractId` | â€” | Deployed stream contract address |
 | `walletAdapter` | â€” | Wallet adapter for signing |
 | `rpcUrl?` | Default per network | Custom RPC URL override; also used for network auto-detection |
+| `transport?` | Wraps `rpc.Server` at `rpcUrl` | Custom `RpcTransportAdapter` for all Soroban RPC calls — see [CUSTOM_TRANSPORT.md](./CUSTOM_TRANSPORT.md) |
 | `txTimeoutMs?` | `120000` | Max time (ms) to wait for transaction confirmation |
 | `checkDuplicate?` | `false` | Heuristic check to warn/block duplicate stream creation |
 | `tokenMetadataTtlMs?` | `600000` | TTL (ms) for cached `getTokenMetadata()` results |
@@ -242,6 +244,7 @@ console.log(`Created ${batches.length} batch(es)`);
 | [Getting Started](./GETTING_STARTED.md) | Step-by-step tutorial from installation to withdrawal |
 | [Plugins](./PLUGINS.md) | Plugin/middleware system reference with worked examples |
 | [Custom Wallet Adapters](./CUSTOM_WALLET_ADAPTERS.md) | How to build adapters for unsupported wallets |
+| [Custom Transport Adapters](./CUSTOM_TRANSPORT.md) | How to route RPC calls through your own transport layer |
 | [Migration from Stellar SDK](./MIGRATION_FROM_STELLAR_SDK.md) | Before/after mapping of common operations |
 | [Stream State Machine](./docs/state-machine.md) | Mermaid diagram of all stream states and valid / invalid transitions |
 | [Rate Limiting](./docs/rate-limiting.md) | Default polling intervals, network call frequency, and tuning advice |
