@@ -120,6 +120,8 @@ import type {
   UpdateFlowRateParams,
   SetOperatorParams,
   OperatorTopUpParams,
+  AddDelegateParams,
+  RevokeDelegateParams,
   WalletAdapter,
   WithdrawParams,
   WriteOptions,
@@ -1836,6 +1838,59 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "setOperator", options?.memo);
+    return { txHash };
+  }
+
+  /**
+   * Adds an authorised delegate address for claim/stream delegation operations.
+   */
+  async addDelegate(
+    params: AddDelegateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const delegator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.addDelegate(params.delegate, delegator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "addDelegate", options?.memo);
+    return { txHash };
+  }
+
+  /**
+   * Queries list of authorised delegates for a delegator address (or default connected wallet).
+   */
+  async getDelegates(delegator?: string): Promise<string[]> {
+    const target = delegator ?? (await this.requireWalletAdapter().getPublicKey());
+    try {
+      const operation = this.encoder.contract.call(
+        "get_delegates",
+        nativeToScVal(target, { type: "address" })
+      );
+      const sim = await this.server.simulateTransaction(
+        await this.buildUnsignedTx(operation)
+      );
+      if (rpc.Api.isSimulationSuccess(sim) && sim.result?.retval) {
+        const val = scValToNative(sim.result.retval) as string[];
+        return Array.isArray(val) ? val : [];
+      }
+    } catch {
+      // Return empty array on failure/sandbox
+    }
+    return [];
+  }
+
+  /**
+   * Revokes an authorised delegate address.
+   */
+  async revokeDelegate(
+    params: RevokeDelegateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const delegator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.revokeDelegate(params.delegate, delegator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "revokeDelegate", options?.memo);
     return { txHash };
   }
 

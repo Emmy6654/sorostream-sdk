@@ -42,6 +42,8 @@ import type {
   ResumeStreamParams,
   UpdateFlowRateParams,
   OperatorTopUpParams,
+  AddDelegateParams,
+  RevokeDelegateParams,
   WithdrawParams,
 } from "./types.js";
 import { streamToJSON } from "./utils.js";
@@ -280,6 +282,29 @@ export class MockSoroStreamClient {
   }
 
   private operators = new Map<string, string[]>();
+  private delegates = new Map<string, Set<string>>();
+
+  async addDelegate(params: AddDelegateParams): Promise<{ txHash: string }> {
+    const delegator = this.senderKey;
+    if (!this.delegates.has(delegator)) {
+      this.delegates.set(delegator, new Set());
+    }
+    this.delegates.get(delegator)!.add(params.delegate);
+    return { txHash: `mock-tx-add-delegate-${params.delegate}` };
+  }
+
+  async getDelegates(delegator = this.senderKey): Promise<string[]> {
+    const set = this.delegates.get(delegator);
+    return set ? Array.from(set) : [];
+  }
+
+  async revokeDelegate(params: RevokeDelegateParams): Promise<{ txHash: string }> {
+    const delegator = this.senderKey;
+    if (this.delegates.has(delegator)) {
+      this.delegates.get(delegator)!.delete(params.delegate);
+    }
+    return { txHash: `mock-tx-revoke-delegate-${params.delegate}` };
+  }
 
   async setOperator(
     params: SetOperatorParams

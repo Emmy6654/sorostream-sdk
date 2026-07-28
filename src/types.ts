@@ -289,6 +289,26 @@ export interface CompressionOptions {
   threshold?: number;
 }
 
+/** Reconnect policy options for WebSocket subscriptions. */
+export interface WebSocketReconnectOptions {
+  /** Max reconnect attempts before stopping (default: 5). Set to 0 to disable. */
+  maxAttempts?: number;
+  /** Base delay in ms for exponential backoff (default: 1000). */
+  baseDelayMs?: number;
+  /** Maximum delay cap in ms for exponential backoff (default: 30000). */
+  maxDelayMs?: number;
+}
+
+/** Parameters for adding a delegate. */
+export interface AddDelegateParams {
+  delegate: string;
+}
+
+/** Parameters for revoking a delegate. */
+export interface RevokeDelegateParams {
+  delegate: string;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -312,6 +332,8 @@ export interface WatchClaimableOptions {
    * Issue #188.
    */
   compression?: boolean | CompressionOptions;
+  /** Reconnect policy configuration for WebSocket connection. */
+  wsReconnectOptions?: WebSocketReconnectOptions;
   /**
    * Returns a monotonically increasing version number that increments
    * each time the client switches networks. When the version changes
