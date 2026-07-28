@@ -19,6 +19,9 @@ import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
+import { InMemoryEventBus } from "./eventBus.js";
+import type { IEventBus } from "./eventBus.js";
+import { SoroStreamVersionError } from "./errors.js";
 import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizon.js";
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
 import { createDefaultRpcTransport } from "./transport.js";
@@ -312,6 +315,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
   private network: Network;
+  private walletAdapter: WalletAdapter;
   private readonly walletAdapter: WalletAdapter | undefined;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
@@ -494,6 +498,43 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
     }
+  }
+
+  /**
+   * Hot-swaps the wallet adapter at runtime (issue #261).
+   *
+   * Preserves all read-side cache and event subscriptions. Only the signing
+   * provider is replaced. Existing pending transactions remain tied to the
+   * previous adapter.
+   *
+   * @param adapter - The new wallet adapter to use for signing.
+   * @param identifier - Optional identifier for the new adapter (emitted in the event).
+   *
+   * @example
+   * ```ts
+   * // User switches from Freighter to Ledger
+   * client.setWalletAdapter(ledgerAdapter, "ledger");
+   * ```
+   */
+  setWalletAdapter(adapter: WalletAdapter, identifier?: string): void {
+    const previousAdapter = this.walletAdapter;
+    this.walletAdapter = adapter;
+
+    // Re-register network change listener if supported
+    if (adapter.onNetworkChange) {
+      adapter.onNetworkChange((newNetwork) => {
+        if (newNetwork === this.network) return;
+        this.setNetwork(newNetwork);
+        for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
+    }
+
+    // Emit walletAdapterChanged event (issue #261)
+    this.eventBus.emit("walletAdapterChanged", {
+      adapter: adapter,
+      identifier: identifier ?? "unknown",
+      previousAdapter,
+    });
   }
 
   /**

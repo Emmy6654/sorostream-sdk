@@ -871,6 +871,17 @@ export interface SoroStreamEventMap {
   "stream.withdrawn": StreamWithdrawnEventPayload;
   "stream.cancelled": StreamCancelledEventPayload;
   "rpc.error": RpcErrorEventPayload;
+  "walletAdapterChanged": WalletAdapterChangedEventPayload;
+}
+
+/** Payload emitted when the wallet adapter is hot-swapped (issue #261). */
+export interface WalletAdapterChangedEventPayload {
+  /** The new wallet adapter. */
+  adapter: WalletAdapter;
+  /** Identifier for the new adapter. */
+  identifier: string;
+  /** The previous wallet adapter. */
+  previousAdapter: WalletAdapter;
 }
 
 /** Configuration options for KmsWalletAdapter (issue #306). */
