@@ -26,6 +26,8 @@ import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizo
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
 import { createDefaultRpcTransport } from "./transport.js";
 import type { RpcTransportAdapter } from "./transport.js";
+import { PriorityRequestQueue, createRequestQueue } from "./request-queue.js";
+import type { RequestQueueConfig, QueueStats, RateLimitDelayedPayload } from "./request-queue.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -258,6 +260,19 @@ export interface SoroStreamClientOptions {
    * Issue #199.
    */
   adapters?: SoroStreamAdapters;
+  /**
+   * Opt-in rate-limit-aware request queue with priority lanes (issue #265).
+   * When set, all RPC calls are routed through a concurrency-limited queue
+   * that prioritises write operations over reads.
+   *
+   * @example
+   * ```ts
+   * requestQueue: { maxConcurrent: 5, priorityLanes: ["write", "read"] }
+   * ```
+   *
+   * Disabled by default (opt-in).
+   */
+  requestQueue?: RequestQueueConfig;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -397,6 +412,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
+  // Issue #265: opt-in rate-limit-aware request queue with priority lanes.
+  private readonly requestQueue: PriorityRequestQueue | null;
+
   constructor(options: SoroStreamClientOptions) {
     // Issue #202: auto-detect the network from the RPC URL host when
     // `network` is not explicitly provided. An explicit `network` always
@@ -466,6 +484,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.auditLogEnabled = options.auditLog ?? false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
+    // Issue #265: opt-in rate-limit-aware request queue with priority lanes.
+    this.requestQueue = createRequestQueue(options.requestQueue);
+    if (this.requestQueue) {
+      this.requestQueue.onDelayed = (payload: RateLimitDelayedPayload) => {
+        this.eventBus.emit("rateLimitDelayed", payload);
+      };
+    }
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -997,6 +1022,24 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<string> {
     const opStart = Date.now();
     try {
+      return await this.enqueueOp("write", () =>
+        this.buildAndSubmitInner(operation, opStart, signal, feeBumpOpts, operationName, memo)
+      );
+    } catch (err) {
+      // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
+      this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
+      throw err;
+    }
+  }
+
+  private async buildAndSubmitInner(
+    operation: xdr.Operation,
+    opStart: number,
+    signal?: AbortSignal,
+    feeBumpOpts?: FeeBumpOptions,
+    operationName?: string,
+    memo?: string | MemoHash
+  ): Promise<string> {
       const adapter = this.requireWalletAdapter();
       const publicKey = await adapter.getPublicKey();
 
@@ -1076,11 +1119,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       }
 
       return result.hash;
-    } catch (err) {
-      // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
-      this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
-      throw err;
-    }
   }
 
   private resolveFeeBump(override?: FeeBumpOptions): FeeBumpOptions | undefined {
@@ -1088,6 +1126,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   private async buildAndSubmitBatch(operations: xdr.Operation[]): Promise<string> {
+    return this.enqueueOp("write", () => this.buildAndSubmitBatchInner(operations));
+  }
+
+  private async buildAndSubmitBatchInner(operations: xdr.Operation[]): Promise<string> {
     const adapter = this.requireWalletAdapter();
     const publicKey = await adapter.getPublicKey();
 
@@ -1152,19 +1194,33 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async simulateOp(
     operation: xdr.Operation
   ): Promise<rpc.Api.SimulateTransactionResponse> {
-    const adapter = this.requireWalletAdapter();
-    const publicKey = await adapter.getPublicKey();
-    const account = await this.withBreaker(() =>
-      this.server.getAccount(publicKey)
-    );
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASES[this.network],
-    })
-      .addOperation(operation)
-      .setTimeout(30)
-      .build();
-    return this.withBreaker(() => this.server.simulateTransaction(tx));
+    return this.enqueueOp("read", async () => {
+      const adapter = this.requireWalletAdapter();
+      const publicKey = await adapter.getPublicKey();
+      const account = await this.withBreaker(() =>
+        this.server.getAccount(publicKey)
+      );
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASES[this.network],
+      })
+        .addOperation(operation)
+        .setTimeout(30)
+        .build();
+      return this.withBreaker(() => this.server.simulateTransaction(tx));
+    });
+  }
+
+  /**
+   * Routes a unit of RPC work through the opt-in priority request queue
+   * (issue #265) when one is configured; otherwise runs it immediately.
+   *
+   * @param lane - `"write"` for transaction submission, `"read"` for
+   *               simulate/query calls. Write requests are drained ahead of
+   *               read requests when the queue is at capacity.
+   */
+  private enqueueOp<T>(lane: "write" | "read", fn: () => Promise<T>): Promise<T> {
+    return this.requestQueue ? this.requestQueue.enqueue(lane, fn) : fn();
   }
 
   /**
@@ -2898,6 +2954,17 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   async disconnect(): Promise<void> {
     await this.server.teardown?.();
+  }
+
+  /**
+   * Returns the current queue depth and in-flight count for each priority
+   * lane of the opt-in request queue (issue #265).
+   *
+   * @returns Live stats per lane, or an empty object when `requestQueue`
+   *          was not configured on this client.
+   */
+  getQueueStats(): QueueStats {
+    return this.requestQueue?.getStats() ?? {};
   }
 
   /**
