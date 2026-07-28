@@ -95,6 +95,12 @@ export interface Stream {
   pausedAt?: number;
   /** Unix timestamp (seconds) before which no withdrawals are permitted. */
   lockUntil?: number;
+  /**
+   * Optional namespace for multi-tenant scoping (issue #274).
+   * Stored in the stream's metadata field. Filtering by namespace is
+   * off-chain only — the contract does not enforce isolation.
+   */
+  namespace?: string;
   /** Optional helper method for JSON serialization of BigInt fields. */
   toJSON?(): Record<string, unknown>;
 }
@@ -140,6 +146,12 @@ export interface CreateStreamParams {
    * Enforced at contract level; the SDK validates this before submission.
    */
   lockUntil?: number;
+  /**
+   * Optional namespace for multi-tenant scoping (issue #274).
+   * Stored in the stream's metadata field. Filtering by namespace is
+   * off-chain only — the contract does not enforce isolation.
+   */
+  namespace?: string;
 }
 
 /** Overrides for cloneStream. Any CreateStreamParams field may be changed before submission. */
@@ -578,6 +590,26 @@ export interface WriteOptions {
 
 /** Supported contract versions for call encoding. */
 export type ContractVersion = "v1" | "v2";
+
+// ── Issue #209: Contract compatibility checking ──────────────────────────────
+
+/**
+ * Result of checking SDK-to-contract version compatibility.
+ */
+export interface CompatibilityResult {
+  /** The SDK version (from package.json). */
+  sdkVersion: string;
+  /** The deployed contract version (may be null if contract doesn't expose get_version). */
+  contractVersion: string | null;
+  /** The minimum compatible contract version. */
+  minCompatibleVersion: string;
+  /** The maximum compatible contract version. */
+  maxCompatibleVersion: string;
+  /** Whether the contract version is within the supported range. */
+  isCompatible: boolean;
+  /** Human-readable compatibility message. */
+  message: string;
+}
 
 // ── Dashboard / reporting aggregate types ────────────────────────────────────
 

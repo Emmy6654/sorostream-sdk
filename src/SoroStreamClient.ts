@@ -12,6 +12,7 @@ import {
   Memo,
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
+import { InMemoryEventBus, type IEventBus } from "./eventBus.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
@@ -21,6 +22,10 @@ import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapter
 import { InMemoryEventBus } from "./eventBus.js";
 import type { IEventBus } from "./eventBus.js";
 import { SoroStreamVersionError } from "./errors.js";
+import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizon.js";
+import { getTransactionHistory, getAddressActivity } from "./horizon.js";
+import { createDefaultRpcTransport } from "./transport.js";
+import type { RpcTransportAdapter } from "./transport.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -80,6 +85,7 @@ import {
   DuplicateStreamError,
   FederationResolutionError,
   NonceNotSupportedError,
+  SoroStreamVersionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -159,10 +165,16 @@ export interface SoroStreamClientOptions {
   network?: Network;
   /** The deployed StreamContract address. */
   contractId: string;
-  /** Wallet adapter for signing transactions. */
-  walletAdapter: WalletAdapter;
+  /** Wallet adapter for signing transactions. Optional for read-only operations. */
+  walletAdapter?: WalletAdapter;
   /** Optional custom RPC URL (overrides default). */
   rpcUrl?: string;
+  /**
+   * Optional custom transport for all Soroban RPC calls. Defaults to a
+   * thin wrapper around `@stellar/stellar-sdk`'s `rpc.Server` pointed at
+   * `rpcUrl` (or the network default). See CUSTOM_TRANSPORT.md.
+   */
+  transport?: RpcTransportAdapter;
   /** Optional circuit-breaker configuration for RPC calls. */
   circuitBreaker?: CircuitBreakerOptions;
   /** Maximum time in ms to wait for a transaction to confirm (default: 120000). */
@@ -283,13 +295,28 @@ export type SimulateOnlyResult = {
  * const client = new SoroStreamClient({ network: "testnet", contractId: "...", walletAdapter });
  * const { streamId } = await client.createStream({ recipient, token, amount, durationSeconds, autoRenew });
  * ```
+ *
+ * @example
+ * ```ts
+ * // Read-only usage without wallet adapter (issue #223: lazy-loading)
+ * const client = new SoroStreamClient({ network: "testnet", contractId: "..." });
+ * const stream = await client.getStream("stream-id"); // Works without wallet adapter
+ *
+ * // Later, when you need to perform a write operation:
+ * import { createFreighterAdapter } from "@sorostream/sdk/wallets";
+ * client.setWalletAdapter(await createFreighterAdapter());
+ * await client.withdraw({ streamId: "stream-id" });
+ * ```
  */
 export class SoroStreamClient<TEventData = Record<string, unknown>> {
-  private server: rpc.Server;
+  private server: RpcTransportAdapter;
+  /** The user-supplied transport, if any — kept across `setNetwork` calls instead of being rebuilt. */
+  private readonly customTransport: RpcTransportAdapter | null;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
   private network: Network;
   private walletAdapter: WalletAdapter;
+  private readonly walletAdapter: WalletAdapter | undefined;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
@@ -351,13 +378,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   /** TTL cache: streamId → resolved claimable amount */
-  private readonly claimableCache = new Cache<string, bigint>(5_000);
+  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
   private readonly streamInflight = new Map<string, Promise<Stream>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
+
+  /** Namespace registry: streamId → namespace (off-chain index, issue #274). */
+  private readonly namespaceRegistry = new Map<string, string>();
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
   private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
@@ -403,10 +433,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.eventBus = options.eventBus ?? new InMemoryEventBus();
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
-    this.server = new rpc.Server(
-      options.rpcUrl ?? RPC_URLS[this.network],
-      { allowHttp: false }
-    );
+    this.customTransport = options.transport ?? null;
+    this.server =
+      this.customTransport ??
+      createDefaultRpcTransport(options.rpcUrl ?? RPC_URLS[this.network]);
+    void this.server.init?.({
+      network: this.network,
+      rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
+    });
     this.txTimeoutMs = options.txTimeoutMs ?? 120_000;
     this.breaker = options.circuitBreaker
       ? new CircuitBreaker(options.circuitBreaker)
@@ -452,7 +486,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (options.onNetworkChange) {
       this.networkChangedCbs.add(options.onNetworkChange);
     }
-    if (this.walletAdapter.onNetworkChange) {
+    if (this.walletAdapter?.onNetworkChange) {
       this.walletAdapter.onNetworkChange((newNetwork) => {
         if (newNetwork === this.network) return;
         this.setNetwork(newNetwork);
@@ -513,8 +547,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async checkContractVersion(): Promise<void> {
     try {
       const op = this.contract.call("get_version");
+      const adapter = this.requireWalletAdapter();
       const tx = new TransactionBuilder(
-        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        await this.server.getAccount(await adapter.getPublicKey()),
         { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
       )
         .addOperation(op)
@@ -552,6 +587,78 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       }
       // Silently ignore other errors (e.g., contract doesn't have get_version method)
     }
+  }
+
+  /**
+   * Checks SDK-to-contract version compatibility and returns a detailed result (issue #209).
+   *
+   * This method queries the deployed contract for its version and compares it
+   * against the SDK's minimum and maximum compatible contract versions.
+   *
+   * @returns A `CompatibilityResult` with SDK version, contract version, and compatibility status.
+   *
+   * @example
+   * ```ts
+   * const result = await client.checkContractCompatibility();
+   * console.log(`Compatible: ${result.isCompatible}`);
+   * console.log(`SDK: ${result.sdkVersion}, Contract: ${result.contractVersion}`);
+   * ```
+   */
+  async checkContractCompatibility(): Promise<import("./types.js").CompatibilityResult> {
+    const sdkVersion = "0.1.0"; // From package.json
+    const minCompatibleVersion = MIN_COMPATIBLE_CONTRACT_VERSION;
+    const maxCompatibleVersion = MAX_COMPATIBLE_CONTRACT_VERSION;
+
+    try {
+      const op = this.contract.call("get_version");
+      const tx = new TransactionBuilder(
+        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
+      )
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      const simulated = await this.server.simulateTransaction(tx);
+
+      if (rpc.Api.isSimulationSuccess(simulated) && simulated.result) {
+        const contractVersion = scValToNative(simulated.result.retval) as string;
+
+        const cmpMin = compareVersions(contractVersion, minCompatibleVersion);
+        const cmpMax = compareVersions(contractVersion, maxCompatibleVersion);
+
+        const isCompatible = cmpMin >= 0 && cmpMax <= 0;
+
+        let message: string;
+        if (cmpMin < 0) {
+          message = `Contract version ${contractVersion} is below the minimum compatible version (${minCompatibleVersion}). Upgrade the contract.`;
+        } else if (cmpMax > 0) {
+          message = `Contract version ${contractVersion} is newer than SDK maximum (${maxCompatibleVersion}). Some features may not be available.`;
+        } else {
+          message = `Contract version ${contractVersion} is within the compatible range.`;
+        }
+
+        return {
+          sdkVersion,
+          contractVersion,
+          minCompatibleVersion,
+          maxCompatibleVersion,
+          isCompatible,
+          message,
+        };
+      }
+    } catch {
+      // Contract doesn't expose get_version or simulation failed
+    }
+
+    return {
+      sdkVersion,
+      contractVersion: null,
+      minCompatibleVersion,
+      maxCompatibleVersion,
+      isCompatible: true,
+      message: "Contract version could not be determined. Assuming compatible.",
+    };
   }
 
   // ── Issue #227: Audit log ───────────────────────────────────────────────────
@@ -751,11 +858,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     // 3. Update the network and rebuild the RPC server for the new endpoint.
+    //    A custom transport is kept (not replaced) and just re-`init`ed with
+    //    the new network/rpcUrl — the adapter author decides how to react.
     this.network = network;
-    this.server = new rpc.Server(
-      options?.rpcUrl ?? RPC_URLS[network],
-      { allowHttp: false }
-    );
+    const rpcUrl = options?.rpcUrl ?? RPC_URLS[network];
+    if (this.customTransport) {
+      void this.customTransport.init?.({ network, rpcUrl });
+    } else {
+      this.server = createDefaultRpcTransport(rpcUrl);
+      void this.server.init?.({ network, rpcUrl });
+    }
 
     // Reset nonce-support cache so it is re-probed on the new network.
     this._nonceSupported = null;
@@ -786,6 +898,33 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
     return this.breaker ? this.breaker.call(fn) : fn();
+  }
+
+  /**
+   * Ensures a wallet adapter is present for operations that require signing.
+   * Throws an error if no adapter was provided during client construction.
+   * Issue #223: lazy-loading wallet adapter code.
+   */
+  private requireWalletAdapter(): WalletAdapter {
+    if (!this.walletAdapter) {
+      throw new Error(
+        "This operation requires a wallet adapter. " +
+        "Pass a walletAdapter to the SoroStreamClient constructor, " +
+        "or use the lazy-loading pattern by calling setWalletAdapter() before this operation."
+      );
+    }
+    return this.walletAdapter;
+  }
+
+  /**
+   * Sets or updates the wallet adapter after client construction.
+   * This enables lazy-loading wallet adapter code for read-only applications.
+   * Issue #223.
+   *
+   * @param adapter - The wallet adapter to use for signing operations.
+   */
+  setWalletAdapter(adapter: WalletAdapter): void {
+    this.walletAdapter = adapter;
   }
 
   // ── Issue #50: Middleware / plugin system ─────────────────────────────────
@@ -855,7 +994,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<string> {
     const opStart = Date.now();
     try {
-      const publicKey = await this.walletAdapter.getPublicKey();
+      const adapter = this.requireWalletAdapter();
+      const publicKey = await adapter.getPublicKey();
 
       const account = await withRetry(
         () => this.withBreaker(() => this.server.getAccount(publicKey)),
@@ -878,7 +1018,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         { ...this.submitRetry, signal }
       );
 
-      const signedXdr = await this.walletAdapter.signTransaction(
+      const signedXdr = await adapter.signTransaction(
         preparedTx.toXDR(),
         this.network
       );
@@ -945,7 +1085,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   private async buildAndSubmitBatch(operations: xdr.Operation[]): Promise<string> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const adapter = this.requireWalletAdapter();
+    const publicKey = await adapter.getPublicKey();
 
     const account = await withRetry(
       () => this.server.getAccount(publicKey),
@@ -966,7 +1107,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       this.submitRetry
     );
 
-    const signedXdr = await this.walletAdapter.signTransaction(
+    const signedXdr = await adapter.signTransaction(
       preparedTx.toXDR(),
       this.network
     );
@@ -1008,7 +1149,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async simulateOp(
     operation: xdr.Operation
   ): Promise<rpc.Api.SimulateTransactionResponse> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const adapter = this.requireWalletAdapter();
+    const publicKey = await adapter.getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
@@ -1105,7 +1247,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       throw new AccountNotFoundError(params.recipient);
     }
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     try {
       await this.withBreaker(() => this.server.getAccount(sender));
     } catch {
@@ -1120,7 +1262,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   private async checkAllowance(token: string, required: bigint): Promise<void> {
     try {
-      const sender = await this.walletAdapter.getPublicKey();
+      const sender = await this.requireWalletAdapter().getPublicKey();
       const contractAddress = this.contract.contractId();
 
       const tokenContract = new Contract(token);
@@ -1224,7 +1366,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         }
       }
 
-      const sender = await this.walletAdapter.getPublicKey();
+      const sender = await this.requireWalletAdapter().getPublicKey();
 
       if (this.checkDuplicate) {
         const existingResult = await this.getStreamsBySender(sender);
@@ -1254,6 +1396,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         throw new StreamNotFoundError(
           "(unknown — post-creation fetch returned empty)"
         );
+
+      // Issue #274: store namespace in the off-chain registry
+      if (params.namespace) {
+        this.namespaceRegistry.set(latest.id, params.namespace);
+      }
 
       // Issue #212: notify subscribers of the custom event bus.
       this.eventBus.emit("stream.created", {
@@ -1297,7 +1444,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (params.durationSeconds <= 0) throw new Error("Duration must be > 0");
     }
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
 
     const operations = paramsArray.map((params) =>
       this.encoder.createStream(sender, params)
@@ -1339,7 +1486,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string; amount: string }> {
-    const recipient = await this.walletAdapter.getPublicKey();
+    const recipient = await this.requireWalletAdapter().getPublicKey();
     const claimable = await this.getClaimable(params.streamId);
 
     const operation = this.encoder.withdraw(params.streamId, recipient);
@@ -1391,7 +1538,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<BatchWithdrawPartialResult> {
     const successes: string[] = [];
     const failures: { id: string; error: Error }[] = [];
-    const recipient = await this.walletAdapter.getPublicKey();
+    const recipient = await this.requireWalletAdapter().getPublicKey();
 
     for (let i = 0; i < streamIds.length; i += batchSize) {
       const chunk = streamIds.slice(i, i + batchSize);
@@ -1452,7 +1599,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
@@ -1500,7 +1647,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions
   ): Promise<{ txHash: string; newEndTime: Date }> {
     if (params.amount <= 0n) throw new InsufficientAmountError();
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.topUp(
       params.streamId,
       sender,
@@ -1529,7 +1676,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     batchSize = 8
   ): Promise<BatchCancelResult[]> {
     const results: BatchCancelResult[] = [];
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
 
     for (let i = 0; i < streamIds.length; i += batchSize) {
       const chunk = streamIds.slice(i, i + batchSize);
@@ -1561,7 +1708,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
     if (params.newFlowRate <= 0n) throw new InsufficientAmountError();
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
@@ -1588,7 +1735,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.setOperator(
       params.streamId,
       sender,
@@ -1615,7 +1762,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const operator = await this.walletAdapter.getPublicKey();
+    const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorCancelStream(params.streamId, operator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
@@ -1640,7 +1787,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
     if (params.amount <= 0n) throw new InsufficientAmountError();
-    const operator = await this.walletAdapter.getPublicKey();
+    const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
@@ -1680,7 +1827,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       throw new Error("Ratio numerator must be less than denominator");
     }
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
 
     if (!isValidStellarAddress(params.recipientA)) {
       throw new InvalidAddressError(params.recipientA);
@@ -1723,7 +1870,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!isValidStellarAddress(params.newRecipient)) {
       throw new InvalidAddressError(params.newRecipient);
     }
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.transferStream(
       params.streamId,
       sender,
@@ -1749,7 +1896,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.pauseStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
@@ -1771,7 +1918,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     signal?: AbortSignal,
     options?: WriteOptions
   ): Promise<{ txHash: string }> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.resumeStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
     const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
@@ -1783,7 +1930,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async estimateOperationFee(
     operation: xdr.Operation
   ): Promise<FeeEstimate> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const adapter = this.requireWalletAdapter();
+    const publicKey = await adapter.getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
@@ -1823,7 +1971,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
     if (params.durationSeconds <= 0) throw new Error("Duration must be > 0");
 
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.createStream(sender, params);
     return this.estimateOperationFee(operation);
   }
@@ -1835,7 +1983,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @returns `{ totalFee, minResourceFee }` in stroops.
    */
   async estimateWithdrawFee(params: WithdrawParams): Promise<FeeEstimate> {
-    const recipient = await this.walletAdapter.getPublicKey();
+    const recipient = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.withdraw(params.streamId, recipient);
     return this.estimateOperationFee(operation);
   }
@@ -1849,7 +1997,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   async estimateCancelStreamFee(
     params: CancelStreamParams
   ): Promise<FeeEstimate> {
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.cancelStream(params.streamId, sender);
     return this.estimateOperationFee(operation);
   }
@@ -1864,7 +2012,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   async estimateTopUpFee(params: TopUpParams): Promise<FeeEstimate> {
     if (params.amount <= 0n) throw new Error("Amount must be > 0");
-    const sender = await this.walletAdapter.getPublicKey();
+    const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.topUp(
       params.streamId,
       sender,
@@ -2335,6 +2483,55 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     };
   }
 
+  /**
+   * Returns all streams matching a given namespace (issue #274).
+   *
+   * **Important:** Namespace filtering is **off-chain only**. The contract
+   * does not enforce namespace isolation — this method queries the local
+   * namespace registry that is populated when streams are created with a
+   * `namespace` parameter. Streams created without a namespace are excluded.
+   *
+   * @param namespace - The namespace string to filter by.
+   * @returns An array of streams that have been tagged with the given namespace.
+   *
+   * @example
+   * ```ts
+   * // Create a stream with a namespace
+   * await client.createStream({
+   *   recipient: "GADDR...",
+   *   token: "USDC...",
+   *   amount: 100000000n,
+   *   durationSeconds: 3600,
+   *   autoRenew: false,
+   *   namespace: "tenant-abc",
+   * });
+   *
+   * // Query streams by namespace
+   * const streams = await client.getStreamsByNamespace("tenant-abc");
+   * ```
+   */
+  async getStreamsByNamespace(namespace: string): Promise<Stream[]> {
+    const streamIds = Array.from(this.namespaceRegistry.entries())
+      .filter(([, ns]) => ns === namespace)
+      .map(([id]) => id);
+
+    if (streamIds.length === 0) return [];
+
+    const streams: Stream[] = [];
+    for (const id of streamIds) {
+      try {
+        const stream = await this.getStream(id);
+        streams.push(stream);
+      } catch {
+        // Stream may have been cancelled or is no longer accessible;
+        // remove it from the registry
+        this.namespaceRegistry.delete(id);
+      }
+    }
+
+    return streams;
+  }
+
   // ── Issue #73: Stream snapshot export / import ───────────────────────────
 
   /**
@@ -2461,7 +2658,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options: BulkCreateOptions
   ): Promise<BulkCreateResult> {
     return this.runWithMiddleware("bulkCreateStreams", [rows, options], async () => {
-      const sender = await this.walletAdapter.getPublicKey();
+      const sender = await this.requireWalletAdapter().getPublicKey();
       const defaultToken = options.token;
       const autoRenew = options.autoRenew ?? false;
       const batchSize = options.batchSize ?? 8;
@@ -2544,6 +2741,17 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   // ── Utility ───────────────────────────────────────────────────────────────
 
   /**
+   * Tears down the active RPC transport by calling its optional
+   * `teardown()` hook. Only meaningful for a custom `transport` that holds
+   * open resources (sockets, timers, …) — the default transport has nothing
+   * to release. Safe to call even if no custom transport was configured.
+   * See CUSTOM_TRANSPORT.md.
+   */
+  async disconnect(): Promise<void> {
+    await this.server.teardown?.();
+  }
+
+  /**
    * Returns the circuit breaker guarding RPC calls, if one was configured.
    * @returns The active `CircuitBreaker`, or `null` if none was configured.
    */
@@ -2599,7 +2807,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Seed lastRecipient on first tick
     void poll();
     let timer: ReturnType<typeof setInterval> | null = null;
- timer = setInterval(poll, intervalMs);
+    timer = setInterval(poll, intervalMs);
 
     return () => {
       stopped = true;
