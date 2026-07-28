@@ -7,19 +7,15 @@ export type {
   SoroStreamAdapters,
 } from "./adapters.js";
 
+export { createDefaultRpcTransport } from "./transport.js";
+export type {
+  RpcTransportAdapter,
+  RpcTransportInitContext,
+  RpcTransportGetEventsRequest,
+} from "./transport.js";
+
 export { MockSoroStreamClient } from "./mock.js";
 
-export {
-  createFreighterAdapter,
-  connectWallet,
-  createMultisigAdapter,
-  createClaimDelegateAdapter,
-  createPasskeyAdapter,
-  KmsWalletAdapter,
-  createKmsWalletAdapter,
-  createKmsAdapter,
-} from "./wallet.js";
-export type { ClaimDelegateConfig } from "./wallet.js";
 export { WebhookForwarder } from "./webhook.js";
 export {
   toStroops,
@@ -70,7 +66,7 @@ export type { SerializedStream } from "./serialization.js";
 export { getTransactionHistory, getAddressActivity } from "./horizon.js";
 export type { StreamTransaction, TransactionHistoryPage, TransactionHistoryOptions } from "./horizon.js";
 export { CircuitBreaker } from "./circuitBreaker.js";
-export { withRetry } from "./retry.js";
+export { withRetry, RetryBackoff } from "./retry.js";
 export type { RetryOptions } from "./retry.js";
 export type { CircuitState, CircuitBreakerOptions } from "./circuitBreaker.js";
 export { ConnectionPool } from "./connectionPool.js";
@@ -102,6 +98,7 @@ export {
   SoroStreamRetryExhaustedError,
   SoroStreamMemoError,
   SelfStreamError,
+  SoroStreamTransportError,
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
 export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
@@ -150,6 +147,7 @@ export type {
   PriceFeedAdapter,
   FeeBumpOptions,
   ContractVersion,
+  CompatibilityResult,
   SplitStreamParams,
   SplitStreamResult,
   StreamTotals,
