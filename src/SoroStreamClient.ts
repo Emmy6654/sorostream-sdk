@@ -12,6 +12,7 @@ import {
   Memo,
 } from "@stellar/stellar-sdk";
 import { EventPoller } from "./events.js";
+import { InMemoryEventBus, type IEventBus } from "./eventBus.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
@@ -20,6 +21,8 @@ import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js"
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
 import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizon.js";
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
+import { createDefaultRpcTransport } from "./transport.js";
+import type { RpcTransportAdapter } from "./transport.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -163,6 +166,12 @@ export interface SoroStreamClientOptions {
   walletAdapter: WalletAdapter;
   /** Optional custom RPC URL (overrides default). */
   rpcUrl?: string;
+  /**
+   * Optional custom transport for all Soroban RPC calls. Defaults to a
+   * thin wrapper around `@stellar/stellar-sdk`'s `rpc.Server` pointed at
+   * `rpcUrl` (or the network default). See CUSTOM_TRANSPORT.md.
+   */
+  transport?: RpcTransportAdapter;
   /** Optional circuit-breaker configuration for RPC calls. */
   circuitBreaker?: CircuitBreakerOptions;
   /** Maximum time in ms to wait for a transaction to confirm (default: 120000). */
@@ -285,7 +294,9 @@ export type SimulateOnlyResult = {
  * ```
  */
 export class SoroStreamClient<TEventData = Record<string, unknown>> {
-  private server: rpc.Server;
+  private server: RpcTransportAdapter;
+  /** The user-supplied transport, if any — kept across `setNetwork` calls instead of being rebuilt. */
+  private readonly customTransport: RpcTransportAdapter | null;
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
   private network: Network;
@@ -351,14 +362,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
   /** TTL cache: streamId → resolved claimable amount */
-  private readonly claimableCache = new Cache<string, bigint>(5_000);
+  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
   private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
   private readonly streamInflight = new Map<string, Promise<Stream>>();
-  private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
-  /** In-flight deduplication: streamId → shared promise for the active RPC call */
-  private readonly claimableInflight = new Map<string, Promise<bigint>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
 
@@ -406,10 +414,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.eventBus = options.eventBus ?? new InMemoryEventBus();
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
-    this.server = new rpc.Server(
-      options.rpcUrl ?? RPC_URLS[this.network],
-      { allowHttp: false }
-    );
+    this.customTransport = options.transport ?? null;
+    this.server =
+      this.customTransport ??
+      createDefaultRpcTransport(options.rpcUrl ?? RPC_URLS[this.network]);
+    void this.server.init?.({
+      network: this.network,
+      rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
+    });
     this.txTimeoutMs = options.txTimeoutMs ?? 120_000;
     this.breaker = options.circuitBreaker
       ? new CircuitBreaker(options.circuitBreaker)
@@ -461,6 +473,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
+    }
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
@@ -715,11 +728,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     // 3. Update the network and rebuild the RPC server for the new endpoint.
+    //    A custom transport is kept (not replaced) and just re-`init`ed with
+    //    the new network/rpcUrl — the adapter author decides how to react.
     this.network = network;
-    this.server = new rpc.Server(
-      options?.rpcUrl ?? RPC_URLS[network],
-      { allowHttp: false }
-    );
+    const rpcUrl = options?.rpcUrl ?? RPC_URLS[network];
+    if (this.customTransport) {
+      void this.customTransport.init?.({ network, rpcUrl });
+    } else {
+      this.server = createDefaultRpcTransport(rpcUrl);
+      void this.server.init?.({ network, rpcUrl });
+    }
 
     // Reset nonce-support cache so it is re-probed on the new network.
     this._nonceSupported = null;
@@ -2508,6 +2526,17 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   // ── Utility ───────────────────────────────────────────────────────────────
 
   /**
+   * Tears down the active RPC transport by calling its optional
+   * `teardown()` hook. Only meaningful for a custom `transport` that holds
+   * open resources (sockets, timers, …) — the default transport has nothing
+   * to release. Safe to call even if no custom transport was configured.
+   * See CUSTOM_TRANSPORT.md.
+   */
+  async disconnect(): Promise<void> {
+    await this.server.teardown?.();
+  }
+
+  /**
    * Returns the circuit breaker guarding RPC calls, if one was configured.
    * @returns The active `CircuitBreaker`, or `null` if none was configured.
    */
@@ -2563,7 +2592,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Seed lastRecipient on first tick
     void poll();
     let timer: ReturnType<typeof setInterval> | null = null;
- timer = setInterval(poll, intervalMs);
+    timer = setInterval(poll, intervalMs);
 
     return () => {
       stopped = true;
