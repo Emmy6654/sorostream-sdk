@@ -26,6 +26,8 @@ import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizo
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
 import { createDefaultRpcTransport } from "./transport.js";
 import type { RpcTransportAdapter } from "./transport.js";
+import { createRpcCompatTransport } from "./rpc-compat.js";
+import type { RpcVersion, RpcVersionDetectedPayload } from "./rpc-compat.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -258,6 +260,18 @@ export interface SoroStreamClientOptions {
    * Issue #199.
    */
   adapters?: SoroStreamAdapters;
+  /**
+   * Soroban RPC protocol version preference (issue #272).
+   * - `"auto"` (default): probes the endpoint on first use and adapts automatically.
+   * - `"v1"`: always use JSON-RPC 2.0 wire format.
+   * - `"v2"`: always use RPC v2 REST-style endpoints.
+   *
+   * When set, the client wraps the transport in a compatibility layer and
+   * emits a `rpcVersionDetected` event once the version is known.
+   *
+   * Only takes effect when no explicit `transport` is provided.
+   */
+  rpcVersion?: RpcVersion;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -397,6 +411,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
+  // Issue #272: detected RPC version (set after first probe or explicit override)
+  private detectedRpcVersion: "v1" | "v2" | null = null;
+
   constructor(options: SoroStreamClientOptions) {
     // Issue #202: auto-detect the network from the RPC URL host when
     // `network` is not explicitly provided. An explicit `network` always
@@ -439,7 +456,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.customTransport = options.transport ?? null;
     this.server =
       this.customTransport ??
-      createDefaultRpcTransport(options.rpcUrl ?? RPC_URLS[this.network]);
+      createRpcCompatTransport(options.rpcUrl ?? RPC_URLS[this.network], {
+        // Issue #272: "auto" is the default so existing integrations pick up
+        // RPC v2 support transparently without any config change.
+        rpcVersion: options.rpcVersion ?? "auto",
+        onVersionDetected: (payload: RpcVersionDetectedPayload) => {
+          this.detectedRpcVersion = payload.version;
+          this.eventBus.emit("rpcVersionDetected", payload);
+        },
+      });
     void this.server.init?.({
       network: this.network,
       rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
