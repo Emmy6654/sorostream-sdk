@@ -16,17 +16,6 @@ export type {
 
 export { MockSoroStreamClient } from "./mock.js";
 
-export {
-  createFreighterAdapter,
-  connectWallet,
-  createMultisigAdapter,
-  createClaimDelegateAdapter,
-  createPasskeyAdapter,
-  KmsWalletAdapter,
-  createKmsWalletAdapter,
-  createKmsAdapter,
-} from "./wallet.js";
-export type { ClaimDelegateConfig } from "./wallet.js";
 export { WebhookForwarder } from "./webhook.js";
 export {
   toStroops,

@@ -54,3 +54,43 @@ describe.skipIf(!distBuilt)("sub-path exports resolve in both module formats", (
     expect(existsSync(path.join(distDir, `${base}.d.ts`))).toBe(true);
   });
 });
+
+// ── Issue #223: Lazy-loading wallet adapter code ────────────────────────────────
+//
+// Verifies that importing from the main @sorostream/sdk entry point does not
+// pull in wallet adapter code, enabling read-only applications to avoid the
+// initialization cost of wallet dependencies.
+
+describe.skipIf(!distBuilt)("lazy-loading: main index excludes wallet code", () => {
+  let bundle: string;
+
+  beforeAll(async () => {
+    const result = await esbuild.build({
+      stdin: {
+        contents: `import { SoroStreamClient } from ${JSON.stringify(path.join(distDir, "index.mjs"))};\nconsole.log(SoroStreamClient);`,
+        resolveDir: distDir,
+      },
+      bundle: true,
+      write: false,
+      format: "esm",
+      platform: "node",
+    });
+    bundle = result.outputFiles[0]!.text;
+  });
+
+  it("does not include wallet adapter source", () => {
+    expect(bundle).not.toMatch(/createFreighterAdapter|createPasskeyAdapter|createMultisigAdapter|createClaimDelegateAdapter|createKeypairAdapter/);
+  });
+
+  it("does not reference the freighter or ledger packages", () => {
+    expect(bundle).not.toMatch(/@stellar\/freighter-api|@ledgerhq/);
+  });
+
+  it("does include the core client", () => {
+    expect(bundle).toMatch(/SoroStreamClient/);
+  });
+
+  it("does include read-only utilities", () => {
+    expect(bundle).toMatch(/getStream|getClaimable/);
+  });
+});
