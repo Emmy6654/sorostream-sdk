@@ -85,6 +85,7 @@ import {
   DuplicateStreamError,
   FederationResolutionError,
   NonceNotSupportedError,
+  SelfStreamError,
   SoroStreamVersionError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
@@ -1367,6 +1368,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       }
 
       const sender = await this.requireWalletAdapter().getPublicKey();
+
+      // Issue #232: Prevent self-streaming (recipient === sender)
+      if (params.recipient === sender) {
+        throw new SelfStreamError();
+      }
 
       if (this.checkDuplicate) {
         const existingResult = await this.getStreamsBySender(sender);

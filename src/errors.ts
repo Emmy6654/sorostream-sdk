@@ -261,6 +261,16 @@ export class SoroStreamDependencyError extends SoroStreamError {
 }
 
 /**
+ * Thrown when a stream creation request uses the same address for both sender
+ * and recipient. Self-streaming is not supported by the contract.
+ */
+export class SelfStreamError extends SoroStreamError {
+  constructor() {
+    super(
+      "Cannot create a stream where the recipient is the same as the sender. " +
+        "Use a different recipient address."
+    );
+    this.name = "SelfStreamError";
  * Thrown when the SDK detects a contract version that is outside the
  * supported compatibility range. Issue #209.
  */

@@ -97,6 +97,7 @@ export {
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
   SoroStreamMemoError,
+  SelfStreamError,
   SoroStreamTransportError,
 } from "./errors.js";
 export { checkPeerDependencies } from "./peerDependencies.js";
