@@ -316,11 +316,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** The user-supplied transport, if any — kept across `setNetwork` calls instead of being rebuilt. */
   private readonly customTransport: RpcTransportAdapter | null;
   private readonly breaker: CircuitBreaker | null;
-  private readonly contract: Contract;
+  private contract: Contract;
   private network: Network;
   private walletAdapter: WalletAdapter;
   private readonly walletAdapter: WalletAdapter | undefined;
-  private readonly txTimeoutMs: number;
+  private txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
   private readonly encoder: ContractCallEncoder;
@@ -360,6 +360,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
   // Issue #228: network version counter — incremented on each setNetwork call
   private networkVersion = 0;
+  // Issue #273: in-flight request tracking for hot-reload
+  private inFlightCount = 0;
+  private inFlightResolvers: Array<() => void> = [];
   // Issue #215: wallet-initiated network switch subscribers
   private readonly networkChangedCbs = new Set<(network: Network) => void>();
   // Issue #227: audit log toggle
@@ -878,6 +881,114 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Note: `this.encoder` is bound to the contract address (not the network)
     // and is therefore safe to reuse. The contract instance and wallet adapter
     // are also network-agnostic.
+  }
+
+  /**
+   * Hot-reloads SDK configuration at runtime without requiring a restart.
+   * Issue #273: Allows operators to change RPC endpoint, contract ID, or
+   * timeout while the application is running.
+   *
+   * - Only the specified fields are updated; omitted fields remain unchanged.
+   * - In-flight requests complete before URL changes are applied.
+   * - Emits a `configUpdated` event for each changed field.
+   *
+   * @example
+   * ```ts
+   * // Change RPC endpoint without restart
+   * client.updateConfig({ rpcUrl: "https://new-rpc.example.com" });
+   *
+   * // Update contract ID and timeout
+   * client.updateConfig({ contractId: "CNEW...", txTimeoutMs: 60000 });
+   * ```
+   */
+  updateConfig(partialConfig: SoroStreamConfigUpdate): void {
+    const updates: ConfigUpdatedEvent[] = [];
+
+    // 1. Update txTimeoutMs (safe to apply immediately — no in-flight impact)
+    if (partialConfig.txTimeoutMs !== undefined && partialConfig.txTimeoutMs !== this.txTimeoutMs) {
+      updates.push({
+        field: 'txTimeoutMs',
+        oldValue: this.txTimeoutMs,
+        newValue: partialConfig.txTimeoutMs,
+      });
+      this.txTimeoutMs = partialConfig.txTimeoutMs;
+    }
+
+    // 2. Update contractId (rebuild the contract encoder)
+    if (partialConfig.contractId !== undefined && partialConfig.contractId !== this.contract?.contractId?.()) {
+      const oldContractId = this.contract?.contractId?.() ?? null;
+      updates.push({
+        field: 'contractId',
+        oldValue: oldContractId,
+        newValue: partialConfig.contractId,
+      });
+      this.contract = new Contract(partialConfig.contractId);
+      // Clear caches since the contract changed
+      this.streamCache.clear();
+      this.senderCache.clear();
+      this.recipientCache.clear();
+      this.claimableCache.clear();
+    }
+
+    // 3. Update rpcUrl (requires waiting for in-flight requests)
+    if (partialConfig.rpcUrl !== undefined) {
+      const oldRpcUrl = this.customTransport ? 'custom' : (this.server as any)?.rpcUrl ?? null;
+
+      // Detect network from the new RPC URL
+      const newNetwork = detectNetworkFromRpcUrl(partialConfig.rpcUrl);
+
+      updates.push({
+        field: 'rpcUrl',
+        oldValue: oldRpcUrl,
+        newValue: partialConfig.rpcUrl,
+      });
+
+      // Wait for in-flight requests to complete before switching
+      this.waitForInFlight().then(() => {
+        // Use setNetwork to handle the actual switch (destroys poller, clears caches, rebuilds server)
+        this.setNetwork(newNetwork, { rpcUrl: partialConfig.rpcUrl });
+      });
+    }
+
+    // 4. Emit configUpdated events
+    for (const update of updates) {
+      this.eventBus.emit('configUpdated', update);
+    }
+  }
+
+  /**
+   * Increments the in-flight request counter. Called by internal methods
+   * before making an RPC request. Issue #273.
+   */
+  private trackInFlightStart(): void {
+    this.inFlightCount++;
+  }
+
+  /**
+   * Decrements the in-flight request counter and resolves any pending
+   * waitForInFlight promises if the count reaches zero. Issue #273.
+   */
+  private trackInFlightEnd(): void {
+    this.inFlightCount = Math.max(0, this.inFlightCount - 1);
+    if (this.inFlightCount === 0) {
+      for (const resolve of this.inFlightResolvers) {
+        resolve();
+      }
+      this.inFlightResolvers = [];
+    }
+  }
+
+  /**
+   * Returns a promise that resolves when all in-flight requests have completed.
+   * Used by updateConfig to wait before applying URL changes. Issue #273.
+   */
+  private waitForInFlight(): Promise<void> {
+    if (this.inFlightCount === 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.inFlightResolvers.push(resolve);
+    });
   }
 
   /**

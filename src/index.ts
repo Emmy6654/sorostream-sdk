@@ -1,5 +1,5 @@
 export { SoroStreamClient, createClient } from "./SoroStreamClient.js";
-export type { SoroStreamClientOptions, SimulateOnlyResult } from "./SoroStreamClient.js";
+export type { SoroStreamClientOptions, SimulateOnlyResult, SoroStreamConfigUpdate, ConfigUpdatedEvent } from "./SoroStreamClient.js";
 export type {
   StorageAdapter,
   WebSocketFactory,
