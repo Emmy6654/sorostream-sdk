@@ -1275,3 +1275,79 @@ export function deserializeStreamFromJSON(json: string): import("./types.js").St
   return stream;
 }
 
+// ── Stream ID encoding / decoding (base58, URL-safe) ──────────────────────
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_MAP: Record<string, number> = {};
+for (let i = 0; i < BASE58_ALPHABET.length; i++) {
+  BASE58_MAP[BASE58_ALPHABET[i]!] = i;
+}
+
+const U64_MAX = (1n << 64n) - 1n;
+
+/**
+ * Encodes a bigint stream ID as a URL-safe base58 string.
+ *
+ * @param id - A non-negative bigint fitting in a u64 (0 … 2^64-1).
+ * @returns A base58-encoded string using the alphanumeric alphabet.
+ * @throws {RangeError} If `id` is negative or exceeds u64 range.
+ */
+export function encodeStreamId(id: bigint): string {
+  if (id < 0n || id > U64_MAX) {
+    throw new RangeError(`encodeStreamId: id must be in range 0..${U64_MAX.toString()}, got ${id.toString()}`);
+  }
+  if (id === 0n) return "1";
+  let n = id;
+  let result = "";
+  while (n > 0n) {
+    const remainder = Number(n % 58n);
+    n = n / 58n;
+    result = BASE58_ALPHABET[remainder]! + result;
+  }
+  return result;
+}
+
+/**
+ * Decodes a base58-encoded stream ID string back to a bigint.
+ *
+ * @param encoded - A base58-encoded string.
+ * @returns The decoded bigint value.
+ * @throws {RangeError} If the decoded value exceeds u64 range.
+ * @throws {Error} If the string is empty or contains invalid base58 characters.
+ */
+export function decodeStreamId(encoded: string): bigint {
+  if (encoded.length === 0) {
+    throw new Error("decodeStreamId: empty string");
+  }
+  let result = 0n;
+  for (const ch of encoded) {
+    const digit = BASE58_MAP[ch];
+    if (digit === undefined) {
+      throw new Error(`decodeStreamId: invalid base58 character '${ch}'`);
+    }
+    result = result * 58n + BigInt(digit);
+  }
+  if (result > U64_MAX) {
+    throw new RangeError(`decodeStreamId: decoded value exceeds u64 range`);
+  }
+  return result;
+}
+
+// ── Memo parsing ─────────────────────────────────────────────────────────
+
+/**
+ * Parses a raw memo value (from a JSON/JS object) into a Stellar Memo object.
+ * Accepts string (text), hex string (hash), or null/undefined (none).
+ *
+ * @param value - The raw memo value.
+ * @returns A Stellar Memo object, or Memo-none if null/undefined.
+ */
+export function parseMemo(value: string | null | undefined): import("@stellar/stellar-sdk").Memo {
+  const { Memo } = require("@stellar/stellar-sdk");
+  if (value == null || value === "") return Memo.none();
+  if (/^[0-9a-fA-F]{64}$/.test(value)) {
+    return Memo.hash(Buffer.from(value, "hex"));
+  }
+  return Memo.text(value);
+}
+

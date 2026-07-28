@@ -259,3 +259,24 @@ export class SoroStreamDependencyError extends SoroStreamError {
     this.installedVersion = installedVersion;
   }
 }
+
+/**
+ * Thrown when the SDK detects a contract version that is outside the
+ * supported compatibility range. Issue #209.
+ */
+export class SoroStreamVersionError extends SoroStreamError {
+  /** The detected contract version. */
+  readonly contractVersion: string;
+  /** The minimum compatible version. */
+  readonly minVersion: string;
+
+  constructor(contractVersion: string, minVersion: string) {
+    super(
+      `Contract version ${contractVersion} is below the minimum compatible version (${minVersion}). ` +
+        `Upgrade the contract or downgrade the SDK.`
+    );
+    this.name = "SoroStreamVersionError";
+    this.contractVersion = contractVersion;
+    this.minVersion = minVersion;
+  }
+}
