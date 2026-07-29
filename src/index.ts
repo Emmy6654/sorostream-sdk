@@ -211,5 +211,16 @@ export type {
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  PortfolioStats,
+  TransactionFeeBumpedEventPayload,
+  FeeBumpMonitoringOptions,
+  PluginRegistryEntry,
+  IPluginRegistry,
+  RecipientValidation,
 } from "./types.js";
+
+export { RecipientValidationError } from "./errors.js";
+export { PluginRegistry } from "./pluginRegistry.js";
+export { getPortfolioStats } from "./portfolioAnalytics.js";
+export { scheduleFeeBumpMonitor } from "./feeBump.js";
 

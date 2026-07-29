@@ -994,3 +994,108 @@ export interface ExportStreamHistoryOptions {
   startLedger?: number;
 }
 
+// ── Issue #336: Portfolio analytics ───────────────────────────────────────────
+
+/** Aggregated portfolio statistics for all streams of a single address. */
+export interface PortfolioStats {
+  /** Number of active, non-expired streams where the address is the sender. */
+  activeSentCount: number;
+  /** Number of active, non-expired streams where the address is the recipient. */
+  activeReceivedCount: number;
+  /** Sum of currently claimable amounts across all active received streams (stroops). */
+  totalClaimable: bigint;
+  /** Estimated total monthly outflow from active sent streams (stroops). */
+  totalMonthlyOutflow: bigint;
+  /** Estimated total monthly inflow from active received streams (stroops). */
+  totalMonthlyInflow: bigint;
+}
+
+// ── Issue #337: Auto fee bump ─────────────────────────────────────────────────
+
+/** Payload emitted on the `"transaction.feeBumped"` event bus event. */
+export interface TransactionFeeBumpedEventPayload {
+  /** Hash of the original transaction. */
+  originalTxHash: string;
+  /** Fee (in stroops) on the original transaction. */
+  originalFee: number;
+  /** Fee (in stroops) on the fee-bumped resubmission. */
+  bumpedFee: number;
+  /** Hash of the fee-bumped transaction, if resubmission succeeded. */
+  newTxHash?: string;
+}
+
+/** Configuration for automatic fee bump behaviour (issue #337). */
+export interface FeeBumpMonitoringOptions {
+  /**
+   * Fraction of the transaction TTL after which a fee bump is triggered.
+   * Default: 0.8 (80% of TTL). Must be between 0 and 1.
+   */
+  expiryThreshold?: number;
+  /** Factor by which to multiply the current fee. Default: 2 (double). */
+  feeMultiplier?: number;
+  /** Enable or disable automatic fee bumping (default: false / opt-in). */
+  enabled?: boolean;
+}
+
+// ── Issue #338: Plugin registry ──────────────────────────────────────────────
+
+/**
+ * A single entry in the plugin registry with ordering metadata.
+ */
+export interface PluginRegistryEntry {
+  /** The plugin instance. */
+  plugin: SoroStreamPlugin;
+  /** Optional unique name for ordering constraints. */
+  name?: string;
+  /**
+   * Plugin names that MUST execute before this plugin.
+   * The registry uses these to compute a topological sort.
+   */
+  before?: string[];
+  /**
+   * Plugin names that MUST execute after this plugin.
+   * The registry uses these to compute a topological sort.
+   */
+  after?: string[];
+}
+
+/**
+ * Manages the execution order of registered middleware plugins.
+ *
+ * Exposed as `client.pluginRegistry` (issue #338). Plugins registered via
+ * the registry are executed in the order determined by `before`/`after`
+ * constraints before the legacy flat list (i.e. the plugin registry runs
+ * first, then legacy `use()`-registered plugins).
+ */
+export interface IPluginRegistry {
+  /**
+   * Registers a plugin with optional ordering constraints.
+   * Throws an error if a circular dependency is detected.
+   */
+  register(plugin: SoroStreamPlugin, constraints?: { name?: string; before?: string; after?: string }): void;
+  /**
+   * Returns the current execution order of all registered plugins.
+   */
+  list(): SoroStreamPlugin[];
+  /**
+   * Unregisters a plugin by reference.
+   * Returns `true` if the plugin was found and removed.
+   */
+  unregister(plugin: SoroStreamPlugin): boolean;
+}
+
+// ── Issue #339: Recipient validation ─────────────────────────────────────────
+
+/** Result of a recipient address + trustline validation check. */
+export interface RecipientValidation {
+  /** Whether the recipient account has an active trustline for the given token. */
+  hasTrustline: boolean;
+  /** Whether the recipient address exists on the network. */
+  accountExists: boolean;
+  /**
+   * Human-readable warnings explaining each detected issue.
+   * Empty when both `hasTrustline` and `accountExists` are true.
+   */
+  warnings: string[];
+}
+

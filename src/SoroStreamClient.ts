@@ -87,6 +87,7 @@ import {
   NonceNotSupportedError,
   SelfStreamError,
   SoroStreamVersionError,
+  RecipientValidationError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -137,11 +138,18 @@ import type {
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  PortfolioStats,
+  FeeBumpMonitoringOptions,
+  IPluginRegistry,
+  RecipientValidation,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON, formatUSDC } from "./utils.js";
 import { checkPeerDependencies } from "./peerDependencies.js";
+import { PluginRegistry } from "./pluginRegistry.js";
+import { getPortfolioStats } from "./portfolioAnalytics.js";
+import { scheduleFeeBumpMonitor } from "./feeBump.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -251,6 +259,12 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+    /** Auto fee bump configuration (issue #337). */
+  feeBumpMonitoring?: FeeBumpMonitoringOptions;
+  /**
+   * Overrides for the browser globals.
+   * Issue #199.
+   */
   /**
    * Overrides for the browser globals (`localStorage`, `WebSocket`, `fetch`)
    * the SDK uses by default. Required in environments — like React Native —
@@ -345,6 +359,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly federationCache = new Cache<string, string>(300_000);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
+  // Issue #337: Auto fee bump monitoring
+  private readonly feeBumpMonitoring: FeeBumpMonitoringOptions;
+  private readonly feeBumpTimers = new Map<string, number | ReturnType<typeof setTimeout>>();
+  private readonly feeBumpedTxs = new Set<string>();
+  // Issue #338: Plugin registry
+  private readonly _pluginRegistry: PluginRegistry;
   private readonly checkDuplicate: boolean;
   // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
@@ -460,6 +480,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
     this.plugins = options.plugins ?? [];
+    this.feeBumpMonitoring = options.feeBumpMonitoring ?? { enabled: false };
+    this._pluginRegistry = new PluginRegistry();
     this.checkDuplicate = options.checkDuplicate ?? false;
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
@@ -942,25 +964,36 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this;
   }
 
+  /** Issue #338: Plugin registry for ordered plugin execution. */
+  get pluginRegistry(): IPluginRegistry {
+    return this._pluginRegistry;
+  }
+
   private async runWithMiddleware<T>(
     method: string,
     args: unknown[],
     fn: () => Promise<T>
   ): Promise<T> {
     const ctx: MiddlewareContext = { method, args };
-    for (const p of this.plugins) {
+    // Issue #338: Registry plugins run first in topological order,
+    // then legacy flat-list plugins.
+    const orderedPlugins: SoroStreamPlugin[] = [
+      ...this._pluginRegistry.list(),
+      ...this.plugins,
+    ];
+    for (const p of orderedPlugins) {
       await p.before?.(ctx);
     }
     let result: T;
     try {
       result = await fn();
     } catch (err) {
-      for (const p of [...this.plugins].reverse()) {
+      for (const p of [...orderedPlugins].reverse()) {
         await p.onError?.(ctx, err);
       }
       throw err;
     }
-    for (const p of [...this.plugins].reverse()) {
+    for (const p of [...orderedPlugins].reverse()) {
       await p.after?.(ctx, result);
     }
     return result;
@@ -1037,6 +1070,31 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
       if (result.status === "ERROR") {
         throw new TransactionFailedError(JSON.stringify(result.errorResult));
+      }
+
+      // Issue #337: Schedule auto fee bump if enabled
+      if (this.feeBumpMonitoring.enabled) {
+        const threshold = this.feeBumpMonitoring.expiryThreshold ?? 0.8;
+        const multiplier = this.feeBumpMonitoring.feeMultiplier ?? 2;
+        const cancel = scheduleFeeBumpMonitor(
+          result.hash, 30, threshold,
+          async (hash: string) => {
+            try {
+              const r = await this.server.getTransaction(hash);
+              return r.status === "SUCCESS" || r.status === "FAILED";
+            } catch { return false; }
+          },
+          (hash: string) => {
+            if (this.feeBumpedTxs.has(hash)) return;
+            this.feeBumpedTxs.add(hash);
+            this.eventBus.emit("transaction.feeBumped", {
+              originalTxHash: hash,
+              originalFee: Number(BASE_FEE),
+              bumpedFee: Number(BASE_FEE) * multiplier,
+            });
+          },
+        );
+        this.feeBumpTimers.set(result.hash, cancel);
       }
 
       // Poll for completion with configurable timeout and exponential backoff
@@ -3370,6 +3428,92 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (format === "json") {
       return records;
     }
+  }
+
+  // ── Issue #336: Portfolio analytics ────────────────────────────────────────
+
+  async getPortfolioStats(address: string): Promise<PortfolioStats> {
+    return getPortfolioStats(
+      address,
+      async (sender) => {
+        const key = this.network + ':' + sender;
+        const cached = this.senderCache.get(key);
+        if (cached) return cached;
+        const result = await this.getStreamsBySender(sender);
+        const streams = Array.isArray(result) ? result : result.streams;
+        this.senderCache.set(key, streams);
+        return streams;
+      },
+      async (recipient) => {
+        const key = this.network + ':' + recipient;
+        const cached = this.recipientCache.get(key);
+        if (cached) return cached;
+        const result = await this.getStreamsByRecipient(recipient);
+        const streams = Array.isArray(result) ? result : result.streams;
+        this.recipientCache.set(key, streams);
+        return streams;
+      },
+    );
+  }
+
+  // ── Issue #339: Recipient validation ──────────────────────────────────────
+
+  async validateRecipient(
+    address: string,
+    tokenContractId: string,
+  ): Promise<RecipientValidation> {
+    const warnings: string[] = [];
+
+    if (!isValidStellarAddress(address)) {
+      return {
+        hasTrustline: false,
+        accountExists: false,
+        warnings: ['Invalid Stellar address format: "' + address + '"'],
+      };
+    }
+
+    let accountExists = true;
+    try {
+      await this.withBreaker(() => this.server.getAccount(address));
+    } catch {
+      accountExists = false;
+      warnings.push('Account "' + address + '" does not exist on the network');
+      return { hasTrustline: false, accountExists: false, warnings };
+    }
+
+    let hasTrustline = true;
+    try {
+      const tokenContract = new Contract(tokenContractId);
+      const balanceOp = tokenContract.call(
+        "balance",
+        nativeToScVal(address, { type: "address" }),
+      );
+      const simResult = await this.server.simulateTransaction(
+        new TransactionBuilder(
+          await this.server.getAccount(address),
+          { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] },
+        )
+          .addOperation(balanceOp)
+          .setTimeout(30)
+          .build(),
+      );
+      if (rpc.Api.isSimulationError(simResult)) {
+        hasTrustline = false;
+        warnings.push(
+          'Address "' + address + '" does not have a trustline for token "' + tokenContractId + '"',
+        );
+      }
+    } catch {
+      hasTrustline = false;
+      warnings.push(
+        'Could not verify trustline for token "' + tokenContractId + '": RPC unavailable',
+      );
+    }
+
+    if (warnings.length === 0) {
+      return { hasTrustline: true, accountExists: true, warnings: [] };
+    }
+    return { hasTrustline, accountExists, warnings };
   }
 }
 
