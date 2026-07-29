@@ -15,6 +15,8 @@ export type {
 } from "./transport.js";
 
 export { MockSoroStreamClient } from "./mock.js";
+export { SoroStreamSandbox, SandboxUnexpectedCallError } from "./sandbox.js";
+export type { ScenarioMap, SandboxOptions } from "./sandbox.js";
 
 export { WebhookForwarder } from "./webhook.js";
 export {
