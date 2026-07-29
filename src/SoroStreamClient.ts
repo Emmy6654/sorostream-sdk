@@ -19,8 +19,6 @@ import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
-import { InMemoryEventBus } from "./eventBus.js";
-import type { IEventBus } from "./eventBus.js";
 import { SoroStreamVersionError } from "./errors.js";
 import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizon.js";
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
@@ -86,7 +84,6 @@ import {
   FederationResolutionError,
   NonceNotSupportedError,
   SelfStreamError,
-  SoroStreamVersionError,
   RecipientValidationError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
@@ -259,8 +256,16 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
-    /** Auto fee bump configuration (issue #337). */
+  /** Auto fee bump configuration (issue #337). */
   feeBumpMonitoring?: FeeBumpMonitoringOptions;
+  /** Skip peer dependency check at construction (issue #213). */
+  skipPeerCheck?: boolean;
+  /** Custom event bus for SDK lifecycle events (issue #212). */
+  eventBus?: IEventBus;
+  /** Callback invoked when the wallet adapter reports a network change (issue #215). */
+  onNetworkChange?: (network: Network) => void;
+  /** Skip contract version compatibility check at construction (issue #209). */
+  skipVersionCheck?: boolean;
   /**
    * Overrides for the browser globals.
    * Issue #199.
@@ -332,8 +337,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly breaker: CircuitBreaker | null;
   private readonly contract: Contract;
   private network: Network;
-  private walletAdapter: WalletAdapter;
-  private readonly walletAdapter: WalletAdapter | undefined;
+  private walletAdapter: WalletAdapter | undefined;
   private readonly txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
@@ -361,7 +365,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly plugins: SoroStreamPlugin[] = [];
   // Issue #337: Auto fee bump monitoring
   private readonly feeBumpMonitoring: FeeBumpMonitoringOptions;
-  private readonly feeBumpTimers = new Map<string, number | ReturnType<typeof setTimeout>>();
+  private readonly feeBumpTimers = new Map<string, (() => void) | number | ReturnType<typeof setTimeout>>();
   private readonly feeBumpedTxs = new Set<string>();
   // Issue #338: Plugin registry
   private readonly _pluginRegistry: PluginRegistry;
@@ -413,7 +417,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly namespaceRegistry = new Map<string, string>();
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
-  private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
+  private readonly tokenMetadataCache: Cache<string, TokenMetadata> = new Cache<string, TokenMetadata>(300_000);
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
@@ -452,7 +456,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!options.skipPeerCheck) {
       checkPeerDependencies();
     }
-    this.network = options.network;
     this.eventBus = options.eventBus ?? new InMemoryEventBus();
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
@@ -637,7 +640,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     try {
       const op = this.contract.call("get_version");
       const tx = new TransactionBuilder(
-        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        await this.server.getAccount(await this.requireWalletAdapter().getPublicKey()),
         { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
       )
         .addOperation(op)
@@ -939,17 +942,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       );
     }
     return this.walletAdapter;
-  }
-
-  /**
-   * Sets or updates the wallet adapter after client construction.
-   * This enables lazy-loading wallet adapter code for read-only applications.
-   * Issue #223.
-   *
-   * @param adapter - The wallet adapter to use for signing operations.
-   */
-  setWalletAdapter(adapter: WalletAdapter): void {
-    this.walletAdapter = adapter;
   }
 
   // ── Issue #50: Middleware / plugin system ─────────────────────────────────
@@ -2128,7 +2120,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     affectedAddresses: string[],
     buildDeltas: () => BalanceDelta[]
   ): Promise<OperationExplanation> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const publicKey = await this.requireWalletAdapter().getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
