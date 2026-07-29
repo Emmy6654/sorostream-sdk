@@ -1,5 +1,6 @@
 export { SoroStreamClient, createClient } from "./SoroStreamClient.js";
 export type { SoroStreamClientOptions, SimulateOnlyResult } from "./SoroStreamClient.js";
+export { BatchBuilder } from "./batchBuilder.js";
 export type {
   StorageAdapter,
   WebSocketFactory,

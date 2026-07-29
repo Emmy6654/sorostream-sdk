@@ -11,6 +11,7 @@ import {
   FeeBumpTransaction,
   Memo,
 } from "@stellar/stellar-sdk";
+import { BatchBuilder } from "./batchBuilder.js";
 import { EventPoller } from "./events.js";
 import { InMemoryEventBus, type IEventBus } from "./eventBus.js";
 import { Cache } from "./cache.js";
@@ -258,6 +259,13 @@ export interface SoroStreamClientOptions {
    * Issue #199.
    */
   adapters?: SoroStreamAdapters;
+  /**
+   * TTL in ms for the fee estimation cache (issue #333).
+   * Fee estimates are cached per operation type so repeated calls avoid
+   * redundant `prepareTransaction` round-trips. Set to `0` to disable caching.
+   * Default: 30000 (30 seconds).
+   */
+  feeEstimationCacheTtlMs?: number;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -466,6 +474,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.auditLogEnabled = options.auditLog ?? false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
+    this.feeEstimationCacheTtlMs = options.feeEstimationCacheTtlMs ?? 30_000;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -874,6 +883,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     // Reset nonce-support cache so it is re-probed on the new network.
     this._nonceSupported = null;
+
+    // Issue #333: invalidate fee estimation cache on network switch since
+    // resource costs may differ across networks.
+    this.feeEstimationCache?.clear();
 
     // Note: `this.encoder` is bound to the contract address (not the network)
     // and is therefore safe to reuse. The contract instance and wallet adapter
@@ -3306,6 +3319,216 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @param addressOrId - Stellar address or stream ID to fetch history for
    * @param options - Export options (format, writable stream, limit, startLedger)
    */
+  // ── Issue #330: Streaming balance aggregator ─────────────────────────────
+
+  /**
+   * Watches the total claimable amount across all streams for a given recipient
+   * address. Polls on a configurable interval and emits the new total whenever
+   * any stream's claimable amount changes.
+   *
+   * @param address - The recipient Stellar address to aggregate claimable for.
+   * @param options - Optional configuration.
+   * @param options.intervalMs - Polling interval in ms (default: 5000).
+   * @returns An object with `unsubscribe()` to stop polling and `on(cb)` to
+   *   register a callback that receives the total claimable bigint.
+   *
+   * @example
+   * ```ts
+   * const watcher = client.watchTotalClaimable("GADDR...");
+   * watcher.on((total) => console.log("Total claimable:", total));
+   * // later:
+   * watcher.unsubscribe();
+   * ```
+   */
+  watchTotalClaimable(
+    address: string,
+    options?: { intervalMs?: number }
+  ): { unsubscribe: () => void; on: (cb: (total: bigint) => void) => void } {
+    const intervalMs = options?.intervalMs ?? 5_000;
+    const callbacks = new Set<(total: bigint) => void>();
+    let lastTotal: bigint | undefined = undefined;
+    let handle: ReturnType<typeof setInterval> | null = null;
+    let active = true;
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const result = await this.getStreamsByRecipient(address);
+        const streams = Array.isArray(result) ? result : result.streams;
+
+        if (streams.length === 0) {
+          const newTotal = 0n;
+          if (lastTotal !== newTotal) {
+            lastTotal = newTotal;
+            for (const cb of callbacks) cb(newTotal);
+          }
+          return;
+        }
+
+        const amounts = await Promise.all(
+          streams.map((s) => this.getClaimable(s.id).catch(() => 0n))
+        );
+        const newTotal = amounts.reduce((sum, a) => sum + a, 0n);
+        if (lastTotal !== newTotal) {
+          lastTotal = newTotal;
+          for (const cb of callbacks) cb(newTotal);
+        }
+      } catch {
+        // Transient RPC errors — silent, next poll will retry
+      }
+    };
+
+    // Kick off immediately then schedule repeating polls
+    void poll();
+    handle = setInterval(() => { void poll(); }, intervalMs);
+
+    return {
+      unsubscribe: () => {
+        active = false;
+        if (handle !== null) {
+          clearInterval(handle);
+          handle = null;
+        }
+        callbacks.clear();
+      },
+      on: (cb: (total: bigint) => void) => {
+        callbacks.add(cb);
+        // Emit the last known total immediately if available
+        if (lastTotal !== undefined) cb(lastTotal);
+      },
+    };
+  }
+
+  // ── Issue #333: Fee estimation cache ─────────────────────────────────────
+
+  /** Cache for fee estimation results. Key = operation type string. */
+  private feeEstimationCache: Cache<string, FeeEstimate> | null = null;
+  private feeEstimationCacheTtlMs: number = 30_000;
+
+  /**
+   * Estimates the fee for the given operation type, with caching.
+   * The cache key is the operation type name (not specific parameter values).
+   * Cache is invalidated after `feeEstimationCacheTtlMs` ms or on network change.
+   *
+   * @param operationType - A string key identifying the operation type (e.g. "createStream").
+   * @param buildOperation - Factory that returns the XDR operation to simulate.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  private async estimateFeeWithCache(
+    operationType: string,
+    buildOperation: () => Promise<xdr.Operation>
+  ): Promise<FeeEstimate> {
+    const ttl = this.feeEstimationCacheTtlMs;
+    if (ttl === 0) {
+      // Caching disabled — always call through
+      return this.estimateOperationFee(await buildOperation());
+    }
+    if (!this.feeEstimationCache) {
+      this.feeEstimationCache = new Cache<string, FeeEstimate>(ttl);
+    }
+    const cached = this.feeEstimationCache.get(operationType);
+    if (cached) return cached;
+
+    const result = await this.estimateOperationFee(await buildOperation());
+    this.feeEstimationCache.set(operationType, result, ttl);
+    return result;
+  }
+
+  // ── Issue #334: Delegation SDK helpers ────────────────────────────────────
+
+  /**
+   * Grants a delegate address permission to act on behalf of the stream owner
+   * for the given stream. Delegates can perform actions such as withdrawing or
+   * managing the stream subject to contract-level enforcement.
+   *
+   * @param streamId - ID of the stream to add a delegate to.
+   * @param delegateAddress - Stellar address to grant delegation rights to.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected.
+   */
+  async addDelegate(
+    streamId: string,
+    delegateAddress: string
+  ): Promise<{ txHash: string }> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.contract.call(
+      "add_delegate",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(delegateAddress, { type: "address" })
+    );
+    const txHash = await this.buildAndSubmit(operation, undefined, undefined, "addDelegate");
+    return { txHash };
+  }
+
+  /**
+   * Revokes a previously granted delegate's permission on a stream.
+   *
+   * @param streamId - ID of the stream to revoke the delegate from.
+   * @param delegateAddress - Stellar address whose delegation rights to revoke.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected.
+   */
+  async revokeDelegate(
+    streamId: string,
+    delegateAddress: string
+  ): Promise<{ txHash: string }> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.contract.call(
+      "revoke_delegate",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(delegateAddress, { type: "address" })
+    );
+    const txHash = await this.buildAndSubmit(operation, undefined, undefined, "revokeDelegate");
+    return { txHash };
+  }
+
+  /**
+   * Returns the list of delegate addresses currently registered for a stream.
+   *
+   * @param streamId - ID of the stream to query delegates for.
+   * @returns Array of Stellar addresses that are active delegates for the stream.
+   */
+  async getDelegates(streamId: string): Promise<string[]> {
+    const result = await withRetry(
+      () =>
+        this.simulateOp(
+          this.contract.call(
+            "get_delegates",
+            nativeToScVal(BigInt(streamId), { type: "u64" })
+          )
+        ),
+      this.readRetry
+    );
+
+    if (rpc.Api.isSimulationError(result)) return [];
+    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+    if (!returnVal) return [];
+    const raw = scValToNative(returnVal);
+    if (!Array.isArray(raw)) return [];
+    return raw.map(String);
+  }
+
+  // ── Issue #335: Batch builder factory ─────────────────────────────────────
+
+  /**
+   * Returns a new {@link BatchBuilder} for constructing and submitting
+   * multi-stream atomic operations in a single transaction.
+   *
+   * @example
+   * ```ts
+   * const { txHash, results } = await client.batch()
+   *   .createStream({ recipient, token, amount, durationSeconds, autoRenew: false })
+   *   .withdraw("stream-1")
+   *   .cancelStream("stream-2")
+   *   .submit();
+   * ```
+   */
+  batch(): BatchBuilder {
+    return new BatchBuilder(this);
+  }
+
   async exportStreamHistory(
     addressOrId: string,
     options?: ExportStreamHistoryOptions
