@@ -122,6 +122,8 @@ import type {
   UpdateFlowRateParams,
   SetOperatorParams,
   OperatorTopUpParams,
+  AddDelegateParams,
+  RevokeDelegateParams,
   WalletAdapter,
   WithdrawParams,
   WriteOptions,
@@ -861,17 +863,18 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return;
     }
 
+    const previousNetwork = this.network;
+
     // Issue #228: increment version so active watchClaimable instances
     // detect the switch and restart polling against the new endpoint.
     this.networkVersion++;
 
-    // 1. Drop the read cache so stale stream data from the previous network
-    //    is never served from cache after the switch.
     // 1. Drop the read caches so stale stream data from the previous network
-    //    is never served from cache after the switch (issue #230).
+    //    is never served from cache after the switch (issue #230 & #342).
     this.streamCache.clear();
     this.senderCache.clear();
     this.recipientCache.clear();
+    this.federationCache.clear();
     // Issue #221: Clear in-flight deduplication maps on network switch
     this.streamInflight.clear();
     this.claimableInflight.clear();
@@ -902,9 +905,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Reset nonce-support cache so it is re-probed on the new network.
     this._nonceSupported = null;
 
-    // Note: `this.encoder` is bound to the contract address (not the network)
-    // and is therefore safe to reuse. The contract instance and wallet adapter
-    // are also network-agnostic.
+    // Issue #342: emit cacheInvalidated debug event on network switch
+    this.eventBus.emit("cacheInvalidated", {
+      reason: "networkSwitch",
+      network: this.network,
+      previousNetwork,
+    });
   }
 
   /**
@@ -917,13 +923,26 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   clearStreamCache(streamId?: string): void {
     if (streamId === undefined) {
       this.streamCache.clear();
+      this.senderCache.clear();
+      this.recipientCache.clear();
+      this.eventBus.emit("cacheInvalidated", {
+        reason: "manual",
+        network: this.network,
+      });
       return;
     }
     // Cache keys are network-prefixed to defend against mid-flight network
     // switches. Remove entries for every known network.
     for (const key of ["mainnet", "testnet", "futurenet"] as Network[]) {
       this.streamCache.delete(`${key}:${streamId}`);
+      const pass = NETWORK_PASSPHRASES[key];
+      if (pass) this.streamCache.delete(`${pass}:${streamId}`);
     }
+    this.eventBus.emit("cacheInvalidated", {
+      reason: "manual",
+      network: this.network,
+      streamId,
+    });
   }
 
   // ── Issue #271: Read-your-own-writes (RYOW) helpers ───────────────────────
@@ -1913,6 +1932,59 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
+   * Adds an authorised delegate address for claim/stream delegation operations.
+   */
+  async addDelegate(
+    params: AddDelegateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const delegator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.addDelegate(params.delegate, delegator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "addDelegate", options?.memo);
+    return { txHash };
+  }
+
+  /**
+   * Queries list of authorised delegates for a delegator address (or default connected wallet).
+   */
+  async getDelegates(delegator?: string): Promise<string[]> {
+    const target = delegator ?? (await this.requireWalletAdapter().getPublicKey());
+    try {
+      const operation = this.encoder.contract.call(
+        "get_delegates",
+        nativeToScVal(target, { type: "address" })
+      );
+      const sim = await this.server.simulateTransaction(
+        await this.buildUnsignedTx(operation)
+      );
+      if (rpc.Api.isSimulationSuccess(sim) && sim.result?.retval) {
+        const val = scValToNative(sim.result.retval) as string[];
+        return Array.isArray(val) ? val : [];
+      }
+    } catch {
+      // Return empty array on failure/sandbox
+    }
+    return [];
+  }
+
+  /**
+   * Revokes an authorised delegate address.
+   */
+  async revokeDelegate(
+    params: RevokeDelegateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const delegator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.revokeDelegate(params.delegate, delegator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "revokeDelegate", options?.memo);
+    return { txHash };
+  }
+
+  /**
    * Cancels a stream as an authorised operator, on behalf of the sender.
    *
    * @param params - Operator cancel parameters.
@@ -2432,7 +2504,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${streamId}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${streamId}`;
 
     // Issue #271: if a prior write has been recorded for this stream, wait for
     // the confirmed ledger before serving data — this guarantees the read is
@@ -2575,9 +2648,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     sender: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
-    // Network-keyed cache for non-paginated calls (issue #230).
+    // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${sender}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${sender}`;
     if (!pagination) {
       const cached = this.senderCache.get(cacheKey);
       if (cached) return cached;
@@ -2649,9 +2723,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     recipient: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
-    // Network-keyed cache for non-paginated calls (issue #230).
+    // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${recipient}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${recipient}`;
     if (!pagination) {
       const cached = this.recipientCache.get(cacheKey);
       if (cached) return cached;

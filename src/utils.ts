@@ -8,6 +8,7 @@ import type {
   TokenAggregate,
   VestingScheduleResult,
   WatchClaimableOptions,
+  WebSocketReconnectOptions,
   FormatUSDCOptions,
   StreamDrift,
   ReconcileStreamOptions,
@@ -616,7 +617,8 @@ export function watchClaimable(
         emit();
       },
       options.compression,
-      options.webSocketFactory
+      options.webSocketFactory,
+      options.wsReconnectOptions
     );
   }
 
@@ -939,6 +941,84 @@ export function totalValueStreamed(streams: Stream[]): StreamTotals {
     totalClaimable,
     totalClaimed,
     totalRemaining,
+  };
+}
+
+/**
+ * Subscribes to claimable balance updates across multiple streams and emits the total sum.
+ *
+ * @param streams - List of streams to watch.
+ * @param reconcileMapOrCb - Optional function/map returning claimable per stream or the total change callback.
+ * @param onTotalChange - Callback invoked with the updated total claimable sum.
+ * @param options - Optional WatchClaimableOptions.
+ * @returns Unsubscribe function to stop watching all streams.
+ */
+export function watchTotalClaimable(
+  streams: Stream[],
+  reconcileMapOrCb?: ((streamId: string) => Promise<bigint>) | Record<string, () => Promise<bigint>> | ((total: bigint) => void),
+  onTotalChange?: (total: bigint) => void,
+  options?: WatchClaimableOptions
+): () => void {
+  let callback: (total: bigint) => void;
+  let reconcileFn: (stream: Stream) => Promise<bigint>;
+
+  if (typeof reconcileMapOrCb === "function" && !onTotalChange) {
+    callback = reconcileMapOrCb as (total: bigint) => void;
+    reconcileFn = async (s) => claimableNow(s);
+  } else if (typeof reconcileMapOrCb === "function") {
+    const fn = reconcileMapOrCb as (streamId: string) => Promise<bigint>;
+    callback = onTotalChange!;
+    reconcileFn = async (s) => fn(s.id);
+  } else if (reconcileMapOrCb && typeof reconcileMapOrCb === "object") {
+    const map = reconcileMapOrCb as Record<string, () => Promise<bigint>>;
+    callback = onTotalChange!;
+    reconcileFn = async (s) => (map[s.id] ? map[s.id]!() : claimableNow(s));
+  } else {
+    callback = onTotalChange ?? (() => {});
+    reconcileFn = async (s) => claimableNow(s);
+  }
+
+  if (streams.length === 0) {
+    callback(0n);
+    return () => {};
+  }
+
+  const values: Map<string, bigint> = new Map();
+  for (const s of streams) {
+    values.set(s.id, claimableNow(s));
+  }
+
+  let lastTotal: bigint | null = null;
+
+  function calculateAndEmitTotal() {
+    let sum = 0n;
+    for (const val of values.values()) {
+      sum += val;
+    }
+    if (sum !== lastTotal) {
+      lastTotal = sum;
+      callback(sum);
+    }
+  }
+
+  calculateAndEmitTotal();
+
+  const unsubscribes = streams.map((stream) => {
+    return watchClaimable(
+      stream,
+      () => reconcileFn(stream),
+      (val) => {
+        values.set(stream.id, val);
+        calculateAndEmitTotal();
+      },
+      options
+    );
+  });
+
+  return () => {
+    for (const unsub of unsubscribes) {
+      unsub();
+    }
   };
 }
 

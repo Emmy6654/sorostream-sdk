@@ -167,3 +167,54 @@ describe("getStreamsBySender latency", () => {
     { iterations: ITERATIONS, time: 0 }
   );
 });
+
+// ── WebSocket vs. HTTP Polling Event Subscription Latency ─────────────────────
+
+describe("Event subscription latency — WebSocket vs. HTTP polling (100 events)", () => {
+  bench(
+    "WebSocket transport event subscription — 100 events",
+    async () => {
+      // Mock WebSocket server emitting 100 simulated events
+      const listeners = new Set<(msg: string) => void>();
+      const mockWsFactory = () =>
+        ({
+          onopen: null as (() => void) | null,
+          onmessage: null as ((event: { data: string }) => void) | null,
+          send: () => {},
+          close: () => {},
+        } as unknown as WebSocket);
+
+      const ws = mockWsFactory();
+      let receivedCount = 0;
+      const donePromise = new Promise<void>((resolve) => {
+        ws.onmessage = () => {
+          receivedCount++;
+          if (receivedCount >= ITERATIONS) resolve();
+        };
+      });
+
+      for (let i = 0; i < ITERATIONS; i++) {
+        ws.onmessage?.({ data: JSON.stringify({ type: "claimable", streamId: "1", value: "100" }) });
+      }
+      await donePromise;
+    },
+    { iterations: 1, time: 0 }
+  );
+
+  bench(
+    "HTTP polling transport event subscription — 100 events",
+    async () => {
+      let receivedCount = 0;
+      const pollServer = async () => {
+        return { events: [{ value: "100" }] };
+      };
+
+      for (let i = 0; i < ITERATIONS; i++) {
+        const res = await pollServer();
+        if (res.events.length > 0) receivedCount++;
+      }
+      expect(receivedCount).toBe(ITERATIONS);
+    },
+    { iterations: 1, time: 0 }
+  );
+});

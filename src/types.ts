@@ -292,6 +292,26 @@ export interface CompressionOptions {
   threshold?: number;
 }
 
+/** Reconnect policy options for WebSocket subscriptions. */
+export interface WebSocketReconnectOptions {
+  /** Max reconnect attempts before stopping (default: 5). Set to 0 to disable. */
+  maxAttempts?: number;
+  /** Base delay in ms for exponential backoff (default: 1000). */
+  baseDelayMs?: number;
+  /** Maximum delay cap in ms for exponential backoff (default: 30000). */
+  maxDelayMs?: number;
+}
+
+/** Parameters for adding a delegate. */
+export interface AddDelegateParams {
+  delegate: string;
+}
+
+/** Parameters for revoking a delegate. */
+export interface RevokeDelegateParams {
+  delegate: string;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -315,6 +335,8 @@ export interface WatchClaimableOptions {
    * Issue #188.
    */
   compression?: boolean | CompressionOptions;
+  /** Reconnect policy configuration for WebSocket connection. */
+  wsReconnectOptions?: WebSocketReconnectOptions;
   /**
    * Returns a monotonically increasing version number that increments
    * each time the client switches networks. When the version changes
@@ -372,6 +394,14 @@ export interface WalletAdapter {
    * keypair adapters, multisig adapters, etc.) simply omit this method.
    */
   onNetworkChange?(callback: (network: Network) => void): () => void;
+}
+
+/** Result shape returned when a wallet adapter signs a transaction (issue #344). */
+export interface WalletAdapterSignResult {
+  /** The signed transaction envelope XDR encoded in base64. */
+  signedXdr: string;
+  /** Optional transaction hash if calculated by the adapter. */
+  txHash?: string;
 }
 
 /** A single row for bulk stream creation. */
@@ -981,6 +1011,15 @@ export interface SoroStreamEventMap {
   "stream.cancelled": StreamCancelledEventPayload;
   "rpc.error": RpcErrorEventPayload;
   "walletAdapterChanged": WalletAdapterChangedEventPayload;
+  "cacheInvalidated": CacheInvalidatedEventPayload;
+}
+
+/** Payload emitted when the client read cache is invalidated (issue #342). */
+export interface CacheInvalidatedEventPayload {
+  reason: "networkSwitch" | "manual" | string;
+  network: Network;
+  previousNetwork?: Network;
+  streamId?: string;
 }
 
 /** Payload emitted when the wallet adapter is hot-swapped (issue #261). */
