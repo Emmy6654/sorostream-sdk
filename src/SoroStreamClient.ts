@@ -413,6 +413,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   >();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  // Issue #270: telemetry opt-out flag
+  private readonly telemetryEnabled: boolean;
+  // Issue #270: OTel tracer wrapper — respects telemetryEnabled.
+  private readonly _telemetry: Telemetry;
   // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
   private readonly storageAdapter: StorageAdapter | null;
   private readonly fetchAdapter: FetchAdapter;
@@ -825,6 +829,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetwork(): Network {
     return this.network;
+  }
+
+  /**
+   * Returns whether telemetry instrumentation is enabled on this client.
+   *
+   * When `false`, no spans will be emitted to an OpenTelemetry provider
+   * even if one is registered by the consuming application. The flag is
+   * also a forward-compatibility contract: any future optional usage
+   * metrics will also be suppressed when this returns `false`.
+   *
+   * @returns `true` by default; `false` when `{ telemetry: false }` was
+   *   passed to the constructor.
+   *
+   * Issue #270.
+   */
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
+  }
+
+  /**
+   * Returns whether telemetry is enabled on this client instance.
+   *
+   * When `false`, no instrumentation data will be emitted even when an
+   * OpenTelemetry provider is registered in the application.
+   *
+   * @returns `true` by default; `false` when `{ telemetry: false }` was
+   *   passed to the constructor.
+   *
+   * Issue #270.
+   */
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
   }
 
   /**
