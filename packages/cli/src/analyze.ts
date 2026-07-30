@@ -4,123 +4,114 @@ import * as esbuild from "esbuild";
 import * as fs from "fs";
 import * as path from "path";
 
-const program = new Command();
+export interface AnalyzeOptions {
+  entrypoint: string;
+  html: boolean;
+  outputDir?: string;
+}
 
-program
-  .name("sorostream-analyze")
-  .description("Bundle analysis CLI — reports module sizes and tree-shaking coverage")
-  .version("0.1.0");
+interface ModuleInfo {
+  path: string;
+  size: number;
+}
 
-program
-  .command("analyze")
-  .description("Analyze bundle size and tree-shaking coverage for an entrypoint")
-  .argument("<entrypoint>", "Path to the entrypoint file to analyze")
-  .option("--html", "Generate an interactive treemap HTML file", false)
-  .option("--output-dir <dir>", "Directory for output files (default: entrypoint directory)")
-  .action(async (entrypoint: string, opts: { html: boolean; outputDir?: string }) => {
-    const entrypointPath = path.resolve(entrypoint);
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+}
 
-    if (!fs.existsSync(entrypointPath)) {
-      console.error(`Error: Entrypoint file not found: ${entrypointPath}`);
-      process.exit(1);
-    }
+export async function cmdAnalyze(opts: AnalyzeOptions): Promise<void> {
+  const entrypointPath = path.resolve(opts.entrypoint);
 
-    console.log(`Analyzing bundle for: ${entrypointPath}`);
+  if (!fs.existsSync(entrypointPath)) {
+    throw new Error(`Entrypoint file not found: ${entrypointPath}`);
+  }
 
-    const result = await esbuild.build({
-      entryPoints: [entrypointPath],
-      bundle: true,
-      write: false,
-      metafile: true,
-      platform: "browser",
-      format: "esm",
-      target: "es2020",
-      minify: false,
-      treeShaking: true,
-      logLevel: "silent",
-    });
+  console.log(`Analyzing bundle for: ${entrypointPath}`);
 
-    const metafile = result.metafile;
-    if (!metafile) {
-      console.error("Error: Failed to generate metafile");
-      process.exit(1);
-    }
+  const result = await esbuild.build({
+    entryPoints: [entrypointPath],
+    bundle: true,
+    write: false,
+    metafile: true,
+    platform: "browser",
+    format: "esm",
+    target: "es2020",
+    minify: false,
+    treeShaking: true,
+    logLevel: "silent",
+  });
 
-    interface ModuleInfo {
-      path: string;
-      size: number;
-    }
+  const metafile = result.metafile;
+  if (!metafile) {
+    throw new Error("Failed to generate metafile");
+  }
 
-    const modules: ModuleInfo[] = [];
-    let totalSize = 0;
+  const modules: ModuleInfo[] = [];
+  let totalSize = 0;
 
-    for (const [filePath, info] of Object.entries(metafile.inputs)) {
-      const size = info.bytes;
-      totalSize += size;
-      modules.push({ path: filePath, size });
-    }
+  for (const [filePath, info] of Object.entries(metafile.inputs)) {
+    const size = info.bytes;
+    totalSize += size;
+    modules.push({ path: filePath, size });
+  }
 
-    modules.sort((a, b) => b.size - a.size);
+  modules.sort((a, b) => b.size - a.size);
 
-    function formatBytes(bytes: number): string {
-      if (bytes === 0) return "0 B";
-      const k = 1024;
-      const sizes = ["B", "KB", "MB", "GB"];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-    }
+  // Markdown report
+  const lines: string[] = [];
+  lines.push("# Bundle Analysis Report");
+  lines.push("");
+  lines.push(`**Entrypoint:** \`${entrypointPath}\``);
+  lines.push(`**Generated:** ${new Date().toISOString()}`);
+  lines.push(`**Total Size:** ${formatBytes(totalSize)}`);
+  lines.push("");
+  lines.push("## Module Breakdown");
+  lines.push("");
+  lines.push("| Module | Size | % of Total |");
+  lines.push("|--------|------|------------|");
 
-    // Markdown report
-    const lines: string[] = [];
-    lines.push("# Bundle Analysis Report");
-    lines.push("");
-    lines.push(`**Entrypoint:** \`${entrypointPath}\``);
-    lines.push(`**Generated:** ${new Date().toISOString()}`);
-    lines.push(`**Total Size:** ${formatBytes(totalSize)}`);
-    lines.push("");
-    lines.push("## Module Breakdown");
-    lines.push("");
-    lines.push("| Module | Size | % of Total |");
-    lines.push("|--------|------|------------|");
+  for (const mod of modules.slice(0, 30)) {
+    const percent = ((mod.size / totalSize) * 100).toFixed(1);
+    lines.push(`| \`${mod.path}\` | ${formatBytes(mod.size)} | ${percent}% |`);
+  }
 
-    for (const mod of modules.slice(0, 30)) {
-      const percent = ((mod.size / totalSize) * 100).toFixed(1);
-      lines.push(`| \`${mod.path}\` | ${formatBytes(mod.size)} | ${percent}% |`);
-    }
+  if (modules.length > 30) {
+    lines.push(`| ... and ${modules.length - 30} more modules | | |`);
+  }
 
-    if (modules.length > 30) {
-      lines.push(`| ... and ${modules.length - 30} more modules | | |`);
-    }
+  lines.push("");
+  lines.push("## Summary");
+  lines.push("");
+  lines.push(`- **Total Modules:** ${modules.length}`);
+  lines.push(`- **Total Bundle Size:** ${formatBytes(totalSize)}`);
+  if (modules.length > 0 && modules[0]) {
+    lines.push(`- **Largest Module:** \`${modules[0].path}\` (${formatBytes(modules[0].size)})`);
+  }
 
-    lines.push("");
-    lines.push("## Summary");
-    lines.push("");
-    lines.push(`- **Total Modules:** ${modules.length}`);
-    lines.push(`- **Total Bundle Size:** ${formatBytes(totalSize)}`);
-    if (modules.length > 0) {
-      lines.push(`- **Largest Module:** \`${modules[0].path}\` (${formatBytes(modules[0].size)})`);
-    }
+  const markdown = lines.join("\n");
+  console.log("\n" + markdown);
 
-    const markdown = lines.join("\n");
-    console.log("\n" + markdown);
+  // HTML treemap
+  if (opts.html) {
+    const outputDir = opts.outputDir || path.dirname(entrypointPath);
+    const htmlPath = path.join(outputDir, "bundle-treemap.html");
 
-    // HTML treemap
-    if (opts.html) {
-      const outputDir = opts.outputDir || path.dirname(entrypointPath);
-      const htmlPath = path.join(outputDir, "bundle-treemap.html");
+    const topModules = modules.slice(0, 30);
+    const maxSize = topModules[0]?.size ?? 1;
 
-      const topModules = modules.slice(0, 30);
-      const maxSize = topModules[0]?.size || 1;
-
-      const items = topModules.map((mod) => {
-        const width = Math.max(20, (mod.size / maxSize) * 100);
-        const shortPath = path.basename(mod.path);
-        return `      <div class="module-bar" style="width: ${width}%" title="${mod.path} (${formatBytes(mod.size)})">
+    const items = topModules.map((mod) => {
+      const width = Math.max(20, (mod.size / maxSize) * 100);
+      const shortPath = path.basename(mod.path);
+      return `      <div class="module-bar" style="width: ${width}%" title="${mod.path} (${formatBytes(mod.size)})">
         <span>${shortPath} (${formatBytes(mod.size)})</span>
       </div>`;
-      }).join("\n");
+    }).join("\n");
 
-      const html = `<!DOCTYPE html>
+    const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -154,9 +145,35 @@ ${items}
 </body>
 </html>`;
 
-      fs.writeFileSync(htmlPath, html);
-      console.log(`\nHTML treemap saved to: ${htmlPath}`);
-    }
-  });
+    fs.writeFileSync(htmlPath, html);
+    console.log(`\nHTML treemap saved to: ${htmlPath}`);
+  }
+}
 
-program.parse();
+// Standalone CLI entrypoint when run directly
+const isMainModule = process.argv[1] && (
+  process.argv[1].endsWith("analyze.js") ||
+  process.argv[1].endsWith("analyze.ts") ||
+  process.argv[1].endsWith("sorostream-analyze")
+);
+
+if (isMainModule) {
+  const program = new Command();
+
+  program
+    .name("sorostream-analyze")
+    .description("Bundle analysis CLI — reports module sizes and tree-shaking coverage")
+    .version("0.1.0");
+
+  program
+    .command("analyze")
+    .description("Analyze bundle size and tree-shaking coverage for an entrypoint")
+    .argument("<entrypoint>", "Path to the entrypoint file to analyze")
+    .option("--html", "Generate an interactive treemap HTML file", false)
+    .option("--output-dir <dir>", "Directory for output files (default: entrypoint directory)")
+    .action(async (entrypoint: string, opts: { html: boolean; outputDir?: string }) => {
+      await cmdAnalyze({ entrypoint, html: opts.html, outputDir: opts.outputDir });
+    });
+
+  program.parse();
+}

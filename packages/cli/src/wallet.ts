@@ -24,7 +24,7 @@ export function createKeypairAdapter(secretKey: string): WalletAdapter {
     async signTransaction(xdr: string, network: Network): Promise<string> {
       const tx = TransactionBuilder.fromXDR(
         xdr,
-        NETWORK_PASSPHRASES[network]
+        NETWORK_PASSPHRASES[network]!,
       );
       tx.sign(keypair);
       return tx.toXDR();

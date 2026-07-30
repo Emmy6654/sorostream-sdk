@@ -11,21 +11,23 @@ import {
   FeeBumpTransaction,
   Memo,
 } from "@stellar/stellar-sdk";
+import { BatchBuilder } from "./batchBuilder.js";
 import { EventPoller } from "./events.js";
 import { InMemoryEventBus, type IEventBus } from "./eventBus.js";
+import { OfflineWriteQueue, DEFAULT_QUEUE_OPTIONS, type OfflineQueueOptions } from "./offlineQueue.js";
 import { Cache } from "./cache.js";
 import { isValidStellarAddress, isFederationAddress, resolveFederationAddress, validateStringLength, detectNetworkFromRpcUrl } from "./utils.js";
 import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
-import { InMemoryEventBus } from "./eventBus.js";
-import type { IEventBus } from "./eventBus.js";
 import { SoroStreamVersionError } from "./errors.js";
 import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizon.js";
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
 import { createDefaultRpcTransport } from "./transport.js";
 import type { RpcTransportAdapter } from "./transport.js";
+import { StreamMonitor } from "./stream-monitor.js";
+import type { StreamMonitorConfig } from "./stream-monitor.js";
 
 // Default read-cache TTL for stream lookups. Matches the EventPoller's 5s
 // poll interval so that without an explicit `setNetwork` call, a stream read
@@ -86,7 +88,7 @@ import {
   FederationResolutionError,
   NonceNotSupportedError,
   SelfStreamError,
-  SoroStreamVersionError,
+  RecipientValidationError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -120,6 +122,8 @@ import type {
   UpdateFlowRateParams,
   SetOperatorParams,
   OperatorTopUpParams,
+  AddDelegateParams,
+  RevokeDelegateParams,
   WalletAdapter,
   WithdrawParams,
   WriteOptions,
@@ -137,11 +141,18 @@ import type {
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  PortfolioStats,
+  FeeBumpMonitoringOptions,
+  IPluginRegistry,
+  RecipientValidation,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON, formatUSDC } from "./utils.js";
 import { checkPeerDependencies } from "./peerDependencies.js";
+import { PluginRegistry } from "./pluginRegistry.js";
+import { getPortfolioStats } from "./portfolioAnalytics.js";
+import { scheduleFeeBumpMonitor } from "./feeBump.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -251,6 +262,20 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /** Auto fee bump configuration (issue #337). */
+  feeBumpMonitoring?: FeeBumpMonitoringOptions;
+  /** Skip peer dependency check at construction (issue #213). */
+  skipPeerCheck?: boolean;
+  /** Custom event bus for SDK lifecycle events (issue #212). */
+  eventBus?: IEventBus;
+  /** Callback invoked when the wallet adapter reports a network change (issue #215). */
+  onNetworkChange?: (network: Network) => void;
+  /** Skip contract version compatibility check at construction (issue #209). */
+  skipVersionCheck?: boolean;
+  /**
+   * Overrides for the browser globals.
+   * Issue #199.
+   */
   /**
    * Overrides for the browser globals (`localStorage`, `WebSocket`, `fetch`)
    * the SDK uses by default. Required in environments — like React Native —
@@ -259,20 +284,16 @@ export interface SoroStreamClientOptions {
    */
   adapters?: SoroStreamAdapters;
   /**
-   * Set to `false` to opt out of any SDK telemetry now and in future releases.
+   * Maximum time in milliseconds to wait for the RPC to report the
+   * write-confirmed ledger before a subsequent read (read-your-own-writes
+   * consistency). Defaults to 10 000 ms (10 seconds).
    *
-   * **As of this version no telemetry is collected.** This flag is a no-op
-   * today but will be honoured when optional instrumentation is introduced.
-   * It also disables the passive OpenTelemetry span integration even when a
-   * tracer provider is registered in the consuming application.
+   * When set to `0`, the RYOW wait is skipped and reads proceed immediately
+   * (pre-existing behaviour).
    *
-   * Defaults to `true` (telemetry permitted, though nothing is sent yet).
-   *
-   * See [TELEMETRY.md](../TELEMETRY.md) for the full policy.
-   *
-   * Issue #270.
+   * Issue #271.
    */
-  telemetry?: boolean;
+  ryowTimeoutMs?: number;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -331,11 +352,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** The user-supplied transport, if any — kept across `setNetwork` calls instead of being rebuilt. */
   private readonly customTransport: RpcTransportAdapter | null;
   private readonly breaker: CircuitBreaker | null;
-  private readonly contract: Contract;
+  private contract: Contract;
   private network: Network;
   private walletAdapter: WalletAdapter;
   private readonly walletAdapter: WalletAdapter | undefined;
-  private readonly txTimeoutMs: number;
+  private txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
   private readonly encoder: ContractCallEncoder;
@@ -360,6 +381,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly federationCache = new Cache<string, string>(300_000);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
+  // Issue #337: Auto fee bump monitoring
+  private readonly feeBumpMonitoring: FeeBumpMonitoringOptions;
+  private readonly feeBumpTimers = new Map<string, (() => void) | number | ReturnType<typeof setTimeout>>();
+  private readonly feeBumpedTxs = new Set<string>();
+  // Issue #338: Plugin registry
+  private readonly _pluginRegistry: PluginRegistry;
   private readonly checkDuplicate: boolean;
   // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
@@ -375,8 +402,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly batchingOptions: import("./types.js").BatchingOptions | undefined;
   // Issue #228: network version counter — incremented on each setNetwork call
   private networkVersion = 0;
+  // Issue #273: in-flight request tracking for hot-reload
+  private inFlightCount = 0;
+  private inFlightResolvers: Array<() => void> = [];
   // Issue #215: wallet-initiated network switch subscribers
   private readonly networkChangedCbs = new Set<(network: Network) => void>();
+  // Issue #261: wallet adapter hot-swap subscribers
+  private readonly walletAdapterChangedCbs = new Set<
+    (payload: WalletAdapterChangedPayload) => void
+  >();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
   // Issue #270: telemetry opt-out flag
@@ -399,6 +433,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
+  // Issue #271: read-your-own-writes consistency
+  // Maps streamId → confirmed ledger sequence of the last mutation for that stream.
+  private readonly _lastWriteLedger = new Map<string, number>();
+  // The configured RYOW wait timeout (0 = disabled).
+  private readonly ryowTimeoutMs: number;
+
   /** TTL cache: streamId → resolved claimable amount */
   private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
@@ -412,7 +452,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly namespaceRegistry = new Map<string, string>();
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
-  private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
+  private readonly tokenMetadataCache: Cache<string, TokenMetadata> = new Cache<string, TokenMetadata>(300_000);
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
@@ -451,8 +491,20 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!options.skipPeerCheck) {
       checkPeerDependencies();
     }
-    this.network = options.network;
     this.eventBus = options.eventBus ?? new InMemoryEventBus();
+
+    // Issue #260: Initialize offline write queue if enabled
+    if (options.offlineQueue) {
+      this.offlineQueue = new OfflineWriteQueue(
+        {
+          enabled: true,
+          maxQueueSize: options.maxQueueSize ?? DEFAULT_QUEUE_OPTIONS.maxQueueSize,
+          healthCheckIntervalMs: DEFAULT_QUEUE_OPTIONS.healthCheckIntervalMs,
+        },
+        this.eventBus,
+      );
+      this.offlineQueue.startHealthCheck();
+    }
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
     this.customTransport = options.transport ?? null;
@@ -479,15 +531,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
     this.plugins = options.plugins ?? [];
+    this.feeBumpMonitoring = options.feeBumpMonitoring ?? { enabled: false };
+    this._pluginRegistry = new PluginRegistry();
     this.checkDuplicate = options.checkDuplicate ?? false;
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
     this.auditLogEnabled = options.auditLog ?? false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
-    // Issue #270: telemetry opt-out — defaults to enabled (no-op today).
-    this.telemetryEnabled = options.telemetry !== false;
-    this._telemetry = new Telemetry(this.telemetryEnabled);
+    // Issue #271: RYOW timeout (0 = disabled for zero-overhead backward compat)
+    this.ryowTimeoutMs = options.ryowTimeoutMs ?? 10_000;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -637,7 +690,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     try {
       const op = this.contract.call("get_version");
       const tx = new TransactionBuilder(
-        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        await this.server.getAccount(await this.requireWalletAdapter().getPublicKey()),
         { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
       )
         .addOperation(op)
@@ -890,21 +943,24 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return;
     }
 
+    const previousNetwork = this.network;
+
     // Issue #228: increment version so active watchClaimable instances
     // detect the switch and restart polling against the new endpoint.
     this.networkVersion++;
 
-    // 1. Drop the read cache so stale stream data from the previous network
-    //    is never served from cache after the switch.
     // 1. Drop the read caches so stale stream data from the previous network
-    //    is never served from cache after the switch (issue #230).
+    //    is never served from cache after the switch (issue #230 & #342).
     this.streamCache.clear();
     this.senderCache.clear();
     this.recipientCache.clear();
+    this.federationCache.clear();
     // Issue #221: Clear in-flight deduplication maps on network switch
     this.streamInflight.clear();
     this.claimableInflight.clear();
     this.claimableCache.clear();
+    // Issue #271: clear pending RYOW ledger records — they are network-specific.
+    this._lastWriteLedger.clear();
 
     // 2. Destroy the existing event poller — it's still pointing at the
     //    previous network's RPC and would otherwise emit stale events for
@@ -929,9 +985,154 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Reset nonce-support cache so it is re-probed on the new network.
     this._nonceSupported = null;
 
-    // Note: `this.encoder` is bound to the contract address (not the network)
-    // and is therefore safe to reuse. The contract instance and wallet adapter
-    // are also network-agnostic.
+    // Issue #342: emit cacheInvalidated debug event on network switch
+    this.eventBus.emit("cacheInvalidated", {
+      reason: "networkSwitch",
+      network: this.network,
+      previousNetwork,
+    });
+  }
+
+  /**
+   * Hot-reloads SDK configuration at runtime without requiring a restart.
+   * Issue #273: Allows operators to change RPC endpoint, contract ID, or
+   * timeout while the application is running.
+   *
+   * - Only the specified fields are updated; omitted fields remain unchanged.
+   * - In-flight requests complete before URL changes are applied.
+   * - Emits a `configUpdated` event for each changed field.
+   *
+   * @example
+   * ```ts
+   * // Change RPC endpoint without restart
+   * client.updateConfig({ rpcUrl: "https://new-rpc.example.com" });
+   *
+   * // Update contract ID and timeout
+   * client.updateConfig({ contractId: "CNEW...", txTimeoutMs: 60000 });
+   * ```
+   */
+  updateConfig(partialConfig: SoroStreamConfigUpdate): void {
+    const updates: ConfigUpdatedEvent[] = [];
+
+    // 1. Update txTimeoutMs (safe to apply immediately — no in-flight impact)
+    if (partialConfig.txTimeoutMs !== undefined && partialConfig.txTimeoutMs !== this.txTimeoutMs) {
+      updates.push({
+        field: 'txTimeoutMs',
+        oldValue: this.txTimeoutMs,
+        newValue: partialConfig.txTimeoutMs,
+      });
+      this.txTimeoutMs = partialConfig.txTimeoutMs;
+    }
+
+    // 2. Update contractId (rebuild the contract encoder)
+    if (partialConfig.contractId !== undefined && partialConfig.contractId !== this.contract?.contractId?.()) {
+      const oldContractId = this.contract?.contractId?.() ?? null;
+      updates.push({
+        field: 'contractId',
+        oldValue: oldContractId,
+        newValue: partialConfig.contractId,
+      });
+      this.contract = new Contract(partialConfig.contractId);
+      // Clear caches since the contract changed
+      this.streamCache.clear();
+      this.senderCache.clear();
+      this.recipientCache.clear();
+      this.claimableCache.clear();
+    }
+
+    // 3. Update rpcUrl (requires waiting for in-flight requests)
+    if (partialConfig.rpcUrl !== undefined) {
+      const oldRpcUrl = this.customTransport ? 'custom' : (this.server as any)?.rpcUrl ?? null;
+
+      // Detect network from the new RPC URL
+      const newNetwork = detectNetworkFromRpcUrl(partialConfig.rpcUrl);
+
+      updates.push({
+        field: 'rpcUrl',
+        oldValue: oldRpcUrl,
+        newValue: partialConfig.rpcUrl,
+      });
+
+      // Wait for in-flight requests to complete before switching
+      this.waitForInFlight().then(() => {
+        // Use setNetwork to handle the actual switch (destroys poller, clears caches, rebuilds server)
+        this.setNetwork(newNetwork, { rpcUrl: partialConfig.rpcUrl });
+      });
+    }
+
+    // 4. Emit configUpdated events
+    for (const update of updates) {
+      this.eventBus.emit('configUpdated', update);
+    }
+  }
+
+  /**
+   * Increments the in-flight request counter. Called by internal methods
+   * before making an RPC request. Issue #273.
+   */
+  private trackInFlightStart(): void {
+    this.inFlightCount++;
+  }
+
+  /**
+   * Decrements the in-flight request counter and resolves any pending
+   * waitForInFlight promises if the count reaches zero. Issue #273.
+   */
+  private trackInFlightEnd(): void {
+    this.inFlightCount = Math.max(0, this.inFlightCount - 1);
+    if (this.inFlightCount === 0) {
+      for (const resolve of this.inFlightResolvers) {
+        resolve();
+      }
+      this.inFlightResolvers = [];
+    }
+  }
+
+  /**
+   * Returns a promise that resolves when all in-flight requests have completed.
+   * Used by updateConfig to wait before applying URL changes. Issue #273.
+   */
+  private waitForInFlight(): Promise<void> {
+    if (this.inFlightCount === 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.inFlightResolvers.push(resolve);
+    });
+  }
+
+  /**
+   * Enqueue a failed write operation to the offline queue (Issue #260).
+   * Only queues if the offline queue is enabled and the error is a network error.
+   */
+  private tryQueueOffline(operation: string, error: unknown, execute: () => Promise<unknown>): boolean {
+    if (!this.offlineQueue) return false;
+    const isNetworkError = error instanceof Error && (
+      error.message.includes('network') ||
+      error.message.includes('fetch') ||
+      error.message.includes('ECONNREFUSED') ||
+      error.message.includes('ETIMEDOUT') ||
+      error.message.includes('aborted')
+    );
+    if (!isNetworkError) return false;
+    this.offlineQueue.markOffline();
+    return this.offlineQueue.enqueue(operation, execute);
+  }
+
+  /**
+   * Get the current offline queue size (Issue #260).
+   */
+  getOfflineQueueSize(): number {
+    return this.offlineQueue?.size ?? 0;
+  }
+
+  /**
+   * Manually trigger draining the offline queue (Issue #260).
+   */
+  async drainOfflineQueue(): Promise<void> {
+    if (this.offlineQueue) {
+      await this.offlineQueue.markOnline();
+    }
   }
 
   /**
@@ -944,13 +1145,65 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   clearStreamCache(streamId?: string): void {
     if (streamId === undefined) {
       this.streamCache.clear();
+      this.senderCache.clear();
+      this.recipientCache.clear();
+      this.eventBus.emit("cacheInvalidated", {
+        reason: "manual",
+        network: this.network,
+      });
       return;
     }
     // Cache keys are network-prefixed to defend against mid-flight network
     // switches. Remove entries for every known network.
     for (const key of ["mainnet", "testnet", "futurenet"] as Network[]) {
       this.streamCache.delete(`${key}:${streamId}`);
+      const pass = NETWORK_PASSPHRASES[key];
+      if (pass) this.streamCache.delete(`${pass}:${streamId}`);
     }
+    this.eventBus.emit("cacheInvalidated", {
+      reason: "manual",
+      network: this.network,
+      streamId,
+    });
+  }
+
+  // ── Issue #271: Read-your-own-writes (RYOW) helpers ───────────────────────
+
+  /**
+   * Records the confirmed ledger sequence for a stream after a successful
+   * write mutation. Subsequent {@link getStream} calls for the same stream
+   * will wait for the RPC to reach this ledger before returning data,
+   * ensuring callers never observe stale pre-write state.
+   *
+   * @param streamId - The stream that was mutated.
+   * @param ledger   - The ledger sequence returned by the confirmed transaction.
+   */
+  private _recordWriteLedger(streamId: string, ledger: number): void {
+    if (ledger <= 0 || this.ryowTimeoutMs === 0) return;
+    this._lastWriteLedger.set(streamId, ledger);
+  }
+
+  /**
+   * If a previous write has been recorded for `streamId`, waits until the
+   * Soroban RPC reports a ledger at or above the write's confirmed sequence
+   * before the subsequent read proceeds.  Clears the record once the wait
+   * succeeds so later reads are not penalised.
+   *
+   * No-op when:
+   * - No write has been recorded for the stream.
+   * - `ryowTimeoutMs` is 0 (RYOW disabled).
+   */
+  private async _waitForStreamLedger(streamId: string): Promise<void> {
+    if (this.ryowTimeoutMs === 0) return;
+    const target = this._lastWriteLedger.get(streamId);
+    if (target === undefined) return;
+
+    await waitForLedger(this.server, target, {
+      timeoutMs: this.ryowTimeoutMs,
+    });
+
+    // Only clear once we successfully reached the target.
+    this._lastWriteLedger.delete(streamId);
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
@@ -973,17 +1226,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.walletAdapter;
   }
 
-  /**
-   * Sets or updates the wallet adapter after client construction.
-   * This enables lazy-loading wallet adapter code for read-only applications.
-   * Issue #223.
-   *
-   * @param adapter - The wallet adapter to use for signing operations.
-   */
-  setWalletAdapter(adapter: WalletAdapter): void {
-    this.walletAdapter = adapter;
-  }
-
   // ── Issue #50: Middleware / plugin system ─────────────────────────────────
 
   /**
@@ -996,25 +1238,36 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this;
   }
 
+  /** Issue #338: Plugin registry for ordered plugin execution. */
+  get pluginRegistry(): IPluginRegistry {
+    return this._pluginRegistry;
+  }
+
   private async runWithMiddleware<T>(
     method: string,
     args: unknown[],
     fn: () => Promise<T>
   ): Promise<T> {
     const ctx: MiddlewareContext = { method, args };
-    for (const p of this.plugins) {
+    // Issue #338: Registry plugins run first in topological order,
+    // then legacy flat-list plugins.
+    const orderedPlugins: SoroStreamPlugin[] = [
+      ...this._pluginRegistry.list(),
+      ...this.plugins,
+    ];
+    for (const p of orderedPlugins) {
       await p.before?.(ctx);
     }
     let result: T;
     try {
       result = await fn();
     } catch (err) {
-      for (const p of [...this.plugins].reverse()) {
+      for (const p of [...orderedPlugins].reverse()) {
         await p.onError?.(ctx, err);
       }
       throw err;
     }
-    for (const p of [...this.plugins].reverse()) {
+    for (const p of [...orderedPlugins].reverse()) {
       await p.after?.(ctx, result);
     }
     return result;
@@ -1048,7 +1301,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     feeBumpOpts?: FeeBumpOptions,
     operationName?: string,
     memo?: string | MemoHash
-  ): Promise<string> {
+  ): Promise<{ txHash: string; ledger: number }> {
     const opStart = Date.now();
     try {
       const adapter = this.requireWalletAdapter();
@@ -1093,6 +1346,31 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         throw new TransactionFailedError(JSON.stringify(result.errorResult));
       }
 
+      // Issue #337: Schedule auto fee bump if enabled
+      if (this.feeBumpMonitoring.enabled) {
+        const threshold = this.feeBumpMonitoring.expiryThreshold ?? 0.8;
+        const multiplier = this.feeBumpMonitoring.feeMultiplier ?? 2;
+        const cancel = scheduleFeeBumpMonitor(
+          result.hash, 30, threshold,
+          async (hash: string) => {
+            try {
+              const r = await this.server.getTransaction(hash);
+              return r.status === "SUCCESS" || r.status === "FAILED";
+            } catch { return false; }
+          },
+          (hash: string) => {
+            if (this.feeBumpedTxs.has(hash)) return;
+            this.feeBumpedTxs.add(hash);
+            this.eventBus.emit("transaction.feeBumped", {
+              originalTxHash: hash,
+              originalFee: Number(BASE_FEE),
+              bumpedFee: Number(BASE_FEE) * multiplier,
+            });
+          },
+        );
+        this.feeBumpTimers.set(result.hash, cancel);
+      }
+
       // Poll for completion with configurable timeout and exponential backoff
       const startTime = Date.now();
       let delay = 500;
@@ -1129,7 +1407,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         });
       }
 
-      return result.hash;
+      // Issue #271: capture confirmed ledger for RYOW consistency.
+      const confirmedLedger: number =
+        (response as unknown as { ledger?: number }).ledger ?? 0;
+
+      return { txHash: result.hash, ledger: confirmedLedger };
     } catch (err) {
       // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
       this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
@@ -1468,7 +1750,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       }
 
       const feeBump = this.resolveFeeBump(options?.feeBump);
-      const txHash = await this.buildAndSubmit(operation, signal, feeBump, "createStream", options?.memo);
+      const { txHash, ledger } = await this.buildAndSubmit(operation, signal, feeBump, "createStream", options?.memo);
 
       const result = await this.getStreamsBySender(sender);
       const streams = Array.isArray(result) ? result : result.streams;
@@ -1800,7 +2082,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "topUp", options?.memo);
+    const { txHash, ledger } = await this.buildAndSubmit(operation, signal, feeBump, "topUp", options?.memo);
+
+    // Issue #271: record the confirmed ledger for RYOW consistency.
+    this._recordWriteLedger(params.streamId, ledger);
 
     // Fetch fresh on-chain state and cache it so immediate getStream() calls
     // reflect the topped-up balance without stale data.
@@ -1857,7 +2142,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
     return { txHash };
   }
 
@@ -1889,7 +2174,60 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.approved
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "setOperator", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "setOperator", options?.memo);
+    return { txHash };
+  }
+
+  /**
+   * Adds an authorised delegate address for claim/stream delegation operations.
+   */
+  async addDelegate(
+    params: AddDelegateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const delegator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.addDelegate(params.delegate, delegator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "addDelegate", options?.memo);
+    return { txHash };
+  }
+
+  /**
+   * Queries list of authorised delegates for a delegator address (or default connected wallet).
+   */
+  async getDelegates(delegator?: string): Promise<string[]> {
+    const target = delegator ?? (await this.requireWalletAdapter().getPublicKey());
+    try {
+      const operation = this.encoder.contract.call(
+        "get_delegates",
+        nativeToScVal(target, { type: "address" })
+      );
+      const sim = await this.server.simulateTransaction(
+        await this.buildUnsignedTx(operation)
+      );
+      if (rpc.Api.isSimulationSuccess(sim) && sim.result?.retval) {
+        const val = scValToNative(sim.result.retval) as string[];
+        return Array.isArray(val) ? val : [];
+      }
+    } catch {
+      // Return empty array on failure/sandbox
+    }
+    return [];
+  }
+
+  /**
+   * Revokes an authorised delegate address.
+   */
+  async revokeDelegate(
+    params: RevokeDelegateParams,
+    signal?: AbortSignal,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    const delegator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.revokeDelegate(params.delegate, delegator);
+    const feeBump = this.resolveFeeBump(options?.feeBump);
+    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "revokeDelegate", options?.memo);
     return { txHash };
   }
 
@@ -1911,7 +2249,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorCancelStream(params.streamId, operator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
     return { txHash };
   }
 
@@ -1936,7 +2274,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
     return { txHash };
   }
 
@@ -1984,7 +2322,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const operation = this.encoder.splitStream(sender, params);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "splitStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "splitStream", options?.memo);
 
     const result = await this.getStreamsBySender(sender);
     const streams = Array.isArray(result) ? result : result.streams;
@@ -2023,7 +2361,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.newRecipient
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "transferStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "transferStream", options?.memo);
     return { txHash };
   }
 
@@ -2045,7 +2383,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.pauseStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
     return { txHash };
   }
 
@@ -2067,7 +2405,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.resumeStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
     return { txHash };
   }
 
@@ -2124,7 +2462,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     affectedAddresses: string[],
     buildDeltas: () => BalanceDelta[]
   ): Promise<OperationExplanation> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const publicKey = await this.requireWalletAdapter().getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
@@ -2413,7 +2751,13 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${streamId}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${streamId}`;
+
+    // Issue #271: if a prior write has been recorded for this stream, wait for
+    // the confirmed ledger before serving data — this guarantees the read is
+    // not stale relative to the mutation (read-your-own-writes consistency).
+    await this._waitForStreamLedger(streamId);
 
     // 1. Fast path: serve from TTL cache.
     const cached = this.streamCache.get(cacheKey);
@@ -2551,9 +2895,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     sender: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
-    // Network-keyed cache for non-paginated calls (issue #230).
+    // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${sender}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${sender}`;
     if (!pagination) {
       const cached = this.senderCache.get(cacheKey);
       if (cached) return cached;
@@ -2625,9 +2970,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     recipient: string,
     pagination?: PaginationParams
   ): Promise<Stream[] | PaginatedStreams> {
-    // Network-keyed cache for non-paginated calls (issue #230).
+    // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const cacheKey = `${networkAtCallTime}:${recipient}`;
+    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
+    const cacheKey = `${passphrase}:${recipient}`;
     if (!pagination) {
       const cached = this.recipientCache.get(cacheKey);
       if (cached) return cached;
@@ -2892,7 +3238,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
                 durationSeconds: row.durationSeconds,
                 autoRenew,
               });
-              const txHash = await this.buildAndSubmit(operation, undefined, undefined, "bulkCreateStreams");
+              const { txHash } = await this.buildAndSubmit(operation, undefined, undefined, "bulkCreateStreams");
 
               const result = await this.getStreamsBySender(sender);
               const streams = Array.isArray(result) ? result : result.streams;
@@ -2952,6 +3298,40 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   async disconnect(): Promise<void> {
     await this.server.teardown?.();
+  }
+
+  /**
+   * Creates a background monitor that polls the given streams on a fixed
+   * interval and emits threshold-based events — `streamExpiringSoon`,
+   * `streamExpired`, `streamLowBalance`, and `streamStatusChanged` (issue #266).
+   *
+   * Centralizes what would otherwise be a hand-rolled polling loop per
+   * consumer. Call `monitor.stop()` to clear all timers when done.
+   *
+   * @param streamIds - The stream IDs to poll.
+   * @param config - Poll interval and alert thresholds.
+   * @returns A {@link StreamMonitor} instance. Subscribe via `monitor.on(...)`.
+   *
+   * @example
+   * ```ts
+   * const monitor = client.createStreamMonitor(["1", "2"], {
+   *   pollIntervalMs: 15_000,
+   *   expiryWarningMs: 60 * 60 * 1000,
+   *   lowBalanceThreshold: 1_000_000n,
+   * });
+   * monitor.on("streamExpiringSoon", ({ streamId, secondsLeft }) => { ... });
+   * // later: monitor.stop();
+   * ```
+   */
+  createStreamMonitor(streamIds: string[], config: StreamMonitorConfig = {}): StreamMonitor {
+    return new StreamMonitor(
+      streamIds,
+      {
+        getStream: (streamId) => this.getStream(streamId),
+        getClaimable: (streamId) => this.getClaimable(streamId),
+      },
+      config
+    );
   }
 
   /**
@@ -3098,6 +3478,113 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   onNetworkChanged(cb: (network: Network) => void): () => void {
     this.networkChangedCbs.add(cb);
     return () => this.networkChangedCbs.delete(cb);
+  }
+
+  // ── Issue #261: Wallet adapter hot-swap ──────────────────────────────────
+
+  /**
+   * Replaces the active signing adapter without re-initialising the client.
+   *
+   * After the swap:
+   * - **All read-side caches are preserved** — previously fetched stream data
+   *   remains available and will continue to serve cache hits until TTL expiry.
+   * - **All active event subscriptions remain active** — no re-subscription
+   *   is required after the swap.
+   * - **Pending transactions** submitted via the old adapter are not affected;
+   *   they continue using the XDR that was already signed before the swap.
+   * - The \`"wallet.adapterChanged"\` event is emitted through the client's event
+   *   bus, and any callbacks registered via {@link onWalletAdapterChanged} are
+   *   called synchronously before this method returns.
+   *
+   * If the new adapter exposes an \`onNetworkChange\` hook, it is registered so
+   * that automatic network-switch handling continues to work.
+   *
+   * @param adapter - The new wallet adapter to use for all future signing.
+   * @returns A promise that resolves once the swap is complete and the
+   *   \`wallet.adapterChanged\` event has been emitted.
+   *
+   * @example
+   * ```ts
+   * // User picks Ledger after starting with Freighter
+   * const ledgerAdapter = createLedgerAdapter({ transport });
+   * await client.setWalletAdapter(ledgerAdapter);
+   * // client is now signing with Ledger; caches and subscriptions intact
+   * ```
+   *
+   * Issue #261.
+   */
+  async setWalletAdapter(adapter: WalletAdapter): Promise<void> {
+    // Resolve public keys before the swap so the event payload is accurate.
+    let previousPublicKey: string | null = null;
+    try {
+      previousPublicKey = await this.walletAdapter.getPublicKey();
+    } catch {
+      // Previous adapter may already be disconnected — tolerate gracefully.
+    }
+
+    let newPublicKey: string | null = null;
+    try {
+      newPublicKey = await adapter.getPublicKey();
+    } catch {
+      // New adapter might not be connected yet — tolerate gracefully.
+    }
+
+    // Replace the signing provider.
+    this.walletAdapter = adapter;
+
+    // Re-wire automatic network-change detection for the new adapter.
+    if (adapter.onNetworkChange) {
+      adapter.onNetworkChange((newNetwork) => {
+        if (newNetwork === this.network) return;
+        this.setNetwork(newNetwork);
+        for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
+    }
+
+    const payload: WalletAdapterChangedPayload = {
+      previousPublicKey,
+      newPublicKey,
+    };
+
+    // Notify framework-agnostic event-bus listeners.
+    this.eventBus.emit("wallet.adapterChanged", payload);
+
+    // Notify direct subscribers registered via onWalletAdapterChanged().
+    for (const cb of this.walletAdapterChangedCbs) {
+      cb(payload);
+    }
+  }
+
+  /**
+   * Subscribes to wallet adapter hot-swap notifications.
+   *
+   * The callback fires immediately after {@link setWalletAdapter} completes
+   * and receives a {@link WalletAdapterChangedPayload} containing the previous
+   * and new adapter public keys.
+   *
+   * Returns an unsubscribe function — call it to stop receiving notifications.
+   *
+   * @param cb - Invoked with the swap payload each time the adapter changes.
+   * @returns An unsubscribe function.
+   *
+   * @example
+   * ```ts
+   * const unsub = client.onWalletAdapterChanged(({ previousPublicKey, newPublicKey }) => {
+   *   console.log(\`Wallet changed: \${previousPublicKey} → \${newPublicKey}\`);
+   *   updateUiWalletIndicator(newPublicKey);
+   * });
+   *
+   * // Later, when you no longer need notifications:
+   * unsub();
+   * ```
+   *
+   * Issue #261.
+   */
+  onWalletAdapterChanged(
+    cb: (payload: WalletAdapterChangedPayload) => void
+  ): () => void {
+    this.walletAdapterChangedCbs.add(cb);
+    return () => this.walletAdapterChangedCbs.delete(cb);
   }
 
   // ── Issue #187: Event batching ────────────────────────────────────────────
@@ -3360,6 +3847,216 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @param addressOrId - Stellar address or stream ID to fetch history for
    * @param options - Export options (format, writable stream, limit, startLedger)
    */
+  // ── Issue #330: Streaming balance aggregator ─────────────────────────────
+
+  /**
+   * Watches the total claimable amount across all streams for a given recipient
+   * address. Polls on a configurable interval and emits the new total whenever
+   * any stream's claimable amount changes.
+   *
+   * @param address - The recipient Stellar address to aggregate claimable for.
+   * @param options - Optional configuration.
+   * @param options.intervalMs - Polling interval in ms (default: 5000).
+   * @returns An object with `unsubscribe()` to stop polling and `on(cb)` to
+   *   register a callback that receives the total claimable bigint.
+   *
+   * @example
+   * ```ts
+   * const watcher = client.watchTotalClaimable("GADDR...");
+   * watcher.on((total) => console.log("Total claimable:", total));
+   * // later:
+   * watcher.unsubscribe();
+   * ```
+   */
+  watchTotalClaimable(
+    address: string,
+    options?: { intervalMs?: number }
+  ): { unsubscribe: () => void; on: (cb: (total: bigint) => void) => void } {
+    const intervalMs = options?.intervalMs ?? 5_000;
+    const callbacks = new Set<(total: bigint) => void>();
+    let lastTotal: bigint | undefined = undefined;
+    let handle: ReturnType<typeof setInterval> | null = null;
+    let active = true;
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const result = await this.getStreamsByRecipient(address);
+        const streams = Array.isArray(result) ? result : result.streams;
+
+        if (streams.length === 0) {
+          const newTotal = 0n;
+          if (lastTotal !== newTotal) {
+            lastTotal = newTotal;
+            for (const cb of callbacks) cb(newTotal);
+          }
+          return;
+        }
+
+        const amounts = await Promise.all(
+          streams.map((s) => this.getClaimable(s.id).catch(() => 0n))
+        );
+        const newTotal = amounts.reduce((sum, a) => sum + a, 0n);
+        if (lastTotal !== newTotal) {
+          lastTotal = newTotal;
+          for (const cb of callbacks) cb(newTotal);
+        }
+      } catch {
+        // Transient RPC errors — silent, next poll will retry
+      }
+    };
+
+    // Kick off immediately then schedule repeating polls
+    void poll();
+    handle = setInterval(() => { void poll(); }, intervalMs);
+
+    return {
+      unsubscribe: () => {
+        active = false;
+        if (handle !== null) {
+          clearInterval(handle);
+          handle = null;
+        }
+        callbacks.clear();
+      },
+      on: (cb: (total: bigint) => void) => {
+        callbacks.add(cb);
+        // Emit the last known total immediately if available
+        if (lastTotal !== undefined) cb(lastTotal);
+      },
+    };
+  }
+
+  // ── Issue #333: Fee estimation cache ─────────────────────────────────────
+
+  /** Cache for fee estimation results. Key = operation type string. */
+  private feeEstimationCache: Cache<string, FeeEstimate> | null = null;
+  private feeEstimationCacheTtlMs: number = 30_000;
+
+  /**
+   * Estimates the fee for the given operation type, with caching.
+   * The cache key is the operation type name (not specific parameter values).
+   * Cache is invalidated after `feeEstimationCacheTtlMs` ms or on network change.
+   *
+   * @param operationType - A string key identifying the operation type (e.g. "createStream").
+   * @param buildOperation - Factory that returns the XDR operation to simulate.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  private async estimateFeeWithCache(
+    operationType: string,
+    buildOperation: () => Promise<xdr.Operation>
+  ): Promise<FeeEstimate> {
+    const ttl = this.feeEstimationCacheTtlMs;
+    if (ttl === 0) {
+      // Caching disabled — always call through
+      return this.estimateOperationFee(await buildOperation());
+    }
+    if (!this.feeEstimationCache) {
+      this.feeEstimationCache = new Cache<string, FeeEstimate>(ttl);
+    }
+    const cached = this.feeEstimationCache.get(operationType);
+    if (cached) return cached;
+
+    const result = await this.estimateOperationFee(await buildOperation());
+    this.feeEstimationCache.set(operationType, result, ttl);
+    return result;
+  }
+
+  // ── Issue #334: Delegation SDK helpers ────────────────────────────────────
+
+  /**
+   * Grants a delegate address permission to act on behalf of the stream owner
+   * for the given stream. Delegates can perform actions such as withdrawing or
+   * managing the stream subject to contract-level enforcement.
+   *
+   * @param streamId - ID of the stream to add a delegate to.
+   * @param delegateAddress - Stellar address to grant delegation rights to.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected.
+   */
+  async addDelegate(
+    streamId: string,
+    delegateAddress: string
+  ): Promise<{ txHash: string }> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.contract.call(
+      "add_delegate",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(delegateAddress, { type: "address" })
+    );
+    const txHash = await this.buildAndSubmit(operation, undefined, undefined, "addDelegate");
+    return { txHash };
+  }
+
+  /**
+   * Revokes a previously granted delegate's permission on a stream.
+   *
+   * @param streamId - ID of the stream to revoke the delegate from.
+   * @param delegateAddress - Stellar address whose delegation rights to revoke.
+   * @returns `{ txHash }` — confirming transaction hash.
+   * @throws {TransactionFailedError} If the transaction is rejected.
+   */
+  async revokeDelegate(
+    streamId: string,
+    delegateAddress: string
+  ): Promise<{ txHash: string }> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.contract.call(
+      "revoke_delegate",
+      nativeToScVal(BigInt(streamId), { type: "u64" }),
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(delegateAddress, { type: "address" })
+    );
+    const txHash = await this.buildAndSubmit(operation, undefined, undefined, "revokeDelegate");
+    return { txHash };
+  }
+
+  /**
+   * Returns the list of delegate addresses currently registered for a stream.
+   *
+   * @param streamId - ID of the stream to query delegates for.
+   * @returns Array of Stellar addresses that are active delegates for the stream.
+   */
+  async getDelegates(streamId: string): Promise<string[]> {
+    const result = await withRetry(
+      () =>
+        this.simulateOp(
+          this.contract.call(
+            "get_delegates",
+            nativeToScVal(BigInt(streamId), { type: "u64" })
+          )
+        ),
+      this.readRetry
+    );
+
+    if (rpc.Api.isSimulationError(result)) return [];
+    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+    if (!returnVal) return [];
+    const raw = scValToNative(returnVal);
+    if (!Array.isArray(raw)) return [];
+    return raw.map(String);
+  }
+
+  // ── Issue #335: Batch builder factory ─────────────────────────────────────
+
+  /**
+   * Returns a new {@link BatchBuilder} for constructing and submitting
+   * multi-stream atomic operations in a single transaction.
+   *
+   * @example
+   * ```ts
+   * const { txHash, results } = await client.batch()
+   *   .createStream({ recipient, token, amount, durationSeconds, autoRenew: false })
+   *   .withdraw("stream-1")
+   *   .cancelStream("stream-2")
+   *   .submit();
+   * ```
+   */
+  batch(): BatchBuilder {
+    return new BatchBuilder(this);
+  }
+
   async exportStreamHistory(
     addressOrId: string,
     options?: ExportStreamHistoryOptions
@@ -3424,6 +4121,99 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (format === "json") {
       return records;
     }
+  }
+
+  /**
+   * Adds a delegate to the caller's account on the contract.
+   *
+   * @param delegate - The address to authorize as a delegate.
+   * @param options - Optional write parameters (memo, feeBump, signal).
+   * @returns Object containing the confirming transaction hash.
+   */
+  async addDelegate(
+    delegate: string,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    return this.runWithMiddleware("addDelegate", [delegate], async () => {
+      validateStringLength("delegate", delegate);
+      if (!isValidStellarAddress(delegate)) {
+        throw new InvalidAddressError(delegate);
+      }
+      const sender = await this.requireWalletAdapter().getPublicKey();
+      const operation = this.encoder.addDelegate(sender, delegate);
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const txHash = await this.buildAndSubmit(
+        operation,
+        options?.signal,
+        feeBump,
+        "addDelegate",
+        options?.memo
+      );
+      return { txHash };
+    });
+  }
+
+  /**
+   * Queries delegates authorized for a delegator address.
+   *
+   * @param delegator - The delegator address to query. Defaults to the connected wallet public key.
+   * @returns Array of authorized delegate addresses.
+   */
+  async getDelegates(delegator?: string): Promise<string[]> {
+    return this.runWithMiddleware("getDelegates", [delegator], async () => {
+      const target =
+        delegator ??
+        (this.walletAdapter ? await this.walletAdapter.getPublicKey() : undefined);
+      if (!target) {
+        throw new Error(
+          "Delegator address required when no wallet adapter is present"
+        );
+      }
+      validateStringLength("delegator", target);
+      if (!isValidStellarAddress(target)) {
+        throw new InvalidAddressError(target);
+      }
+      const operation = this.contract.call(
+        "get_delegates",
+        nativeToScVal(target, { type: "address" })
+      );
+      const result = await this.simulateOp(operation);
+      if (rpc.Api.isSimulationSuccess(result) && result.result) {
+        const delegates = scValToNative(result.result.retval) as string[];
+        return Array.isArray(delegates) ? delegates : [];
+      }
+      return [];
+    });
+  }
+
+  /**
+   * Revokes a delegate from the caller's account on the contract.
+   *
+   * @param delegate - The address to revoke delegation from.
+   * @param options - Optional write parameters (memo, feeBump, signal).
+   * @returns Object containing the confirming transaction hash.
+   */
+  async revokeDelegate(
+    delegate: string,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    return this.runWithMiddleware("revokeDelegate", [delegate], async () => {
+      validateStringLength("delegate", delegate);
+      if (!isValidStellarAddress(delegate)) {
+        throw new InvalidAddressError(delegate);
+      }
+      const sender = await this.requireWalletAdapter().getPublicKey();
+      const operation = this.encoder.revokeDelegate(sender, delegate);
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const txHash = await this.buildAndSubmit(
+        operation,
+        options?.signal,
+        feeBump,
+        "revokeDelegate",
+        options?.memo
+      );
+      return { txHash };
+    });
   }
 }
 

@@ -131,7 +131,7 @@ export async function getTransactionHistory(
           createdAt: record.created_at,
           sourceAccount: record.source_account,
           operationType: record.type,
-          streamDetails: streamDetails || undefined,
+          streamDetails: streamDetails ?? undefined,
         });
       }
     }
@@ -206,7 +206,7 @@ export async function getAddressActivity(
         createdAt: record.created_at,
         sourceAccount: record.source_account,
         operationType: record.type,
-        streamDetails,
+        streamDetails: streamDetails ?? undefined,
       });
     }
   }

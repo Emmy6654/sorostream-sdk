@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import type { GlobalOptions } from "./commands.js";
 import {
   cmdCreate,
   cmdGet,
@@ -32,7 +33,7 @@ program
   .requiredOption("--duration <seconds>", "Duration in seconds", parseInt)
   .option("--auto-renew", "Enable auto-renewal", false)
   .action(async (opts) => {
-    const global = program.opts();
+    const global = program.opts<GlobalOptions>();
     await cmdCreate(
       { ...global, ...opts },
     );
@@ -44,7 +45,7 @@ program
   .description("Get stream details")
   .argument("<streamId>", "Stream ID")
   .action(async (streamId) => {
-    const opts = program.opts();
+    const opts = program.opts<GlobalOptions>();
     await cmdGet(opts, streamId);
   });
 
@@ -54,7 +55,7 @@ program
   .description("Withdraw all claimable tokens from a stream")
   .argument("<streamId>", "Stream ID")
   .action(async (streamId) => {
-    const opts = program.opts();
+    const opts = program.opts<GlobalOptions>();
     await cmdWithdraw(opts, streamId);
   });
 
@@ -64,7 +65,7 @@ program
   .description("Cancel an active stream")
   .argument("<streamId>", "Stream ID")
   .action(async (streamId) => {
-    const opts = program.opts();
+    const opts = program.opts<GlobalOptions>();
     await cmdCancel(opts, streamId);
   });
 
@@ -75,7 +76,7 @@ program
   .argument("<streamId>", "Stream ID")
   .requiredOption("--amount <usdc>", "Amount in USDC to add")
   .action(async (streamId, opts) => {
-    const global = program.opts();
+    const global = program.opts<GlobalOptions>();
     await cmdTopUp({ ...global, ...opts }, streamId);
   });
 
@@ -85,7 +86,7 @@ program
   .description("Get the claimable amount for a stream")
   .argument("<streamId>", "Stream ID")
   .action(async (streamId) => {
-    const opts = program.opts();
+    const opts = program.opts<GlobalOptions>();
     await cmdClaimable(opts, streamId);
   });
 
@@ -95,7 +96,7 @@ program
   .description("Get the renewal forecast for an auto-renewing stream")
   .argument("<streamId>", "Stream ID")
   .action(async (streamId) => {
-    const opts = program.opts();
+    const opts = program.opts<GlobalOptions>();
     await cmdForecast(opts, streamId);
   });
 
@@ -109,8 +110,8 @@ program
   .action(async (entrypoint, opts) => {
     await cmdAnalyze({
       entrypoint,
-      html: opts.html,
-      outputDir: opts.outputDir,
+      html: opts.html as boolean,
+      outputDir: opts.outputDir as string | undefined,
     });
   });
 
