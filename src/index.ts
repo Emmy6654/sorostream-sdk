@@ -220,3 +220,8 @@ export type {
   SoroStreamClientConfig,
 } from "./types.js";
 
+export { RecipientValidationError } from "./errors.js";
+export { PluginRegistry } from "./pluginRegistry.js";
+export { getPortfolioStats } from "./portfolioAnalytics.js";
+export { scheduleFeeBumpMonitor } from "./feeBump.js";
+

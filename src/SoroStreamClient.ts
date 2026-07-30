@@ -20,8 +20,6 @@ import { ConnectionPool } from "./connectionPool.js";
 import type { ConnectionPoolOptions, PoolEvent } from "./connectionPool.js";
 import { getDefaultStorageAdapter, getDefaultFetchAdapter } from "./adapters.js";
 import type { StorageAdapter, SoroStreamAdapters, FetchAdapter } from "./adapters.js";
-import { InMemoryEventBus } from "./eventBus.js";
-import type { IEventBus } from "./eventBus.js";
 import { SoroStreamVersionError } from "./errors.js";
 import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizon.js";
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
@@ -89,7 +87,7 @@ import {
   FederationResolutionError,
   NonceNotSupportedError,
   SelfStreamError,
-  SoroStreamVersionError,
+  RecipientValidationError,
 } from "./errors.js";
 import type { BulkCreateFailedSlot } from "./errors.js";
 import type {
@@ -142,11 +140,18 @@ import type {
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  PortfolioStats,
+  FeeBumpMonitoringOptions,
+  IPluginRegistry,
+  RecipientValidation,
 } from "./types.js";
 import { withRetry, type RetryOptions } from "./retry.js";
 import type { EventPollerOptions, StreamRetryPolicy } from "./events.js";
 import { calculateVestingSchedule, streamToJSON, formatUSDC } from "./utils.js";
 import { checkPeerDependencies } from "./peerDependencies.js";
+import { PluginRegistry } from "./pluginRegistry.js";
+import { getPortfolioStats } from "./portfolioAnalytics.js";
+import { scheduleFeeBumpMonitor } from "./feeBump.js";
 
 const RPC_URLS: Record<Network, string> = {
   mainnet: "https://soroban.stellar.org",
@@ -256,6 +261,20 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /** Auto fee bump configuration (issue #337). */
+  feeBumpMonitoring?: FeeBumpMonitoringOptions;
+  /** Skip peer dependency check at construction (issue #213). */
+  skipPeerCheck?: boolean;
+  /** Custom event bus for SDK lifecycle events (issue #212). */
+  eventBus?: IEventBus;
+  /** Callback invoked when the wallet adapter reports a network change (issue #215). */
+  onNetworkChange?: (network: Network) => void;
+  /** Skip contract version compatibility check at construction (issue #209). */
+  skipVersionCheck?: boolean;
+  /**
+   * Overrides for the browser globals.
+   * Issue #199.
+   */
   /**
    * Overrides for the browser globals (`localStorage`, `WebSocket`, `fetch`)
    * the SDK uses by default. Required in environments — like React Native —
@@ -361,6 +380,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly federationCache = new Cache<string, string>(300_000);
   private readonly validateCliff: (cliffSeconds: number) => void | Promise<void>;
   private readonly plugins: SoroStreamPlugin[] = [];
+  // Issue #337: Auto fee bump monitoring
+  private readonly feeBumpMonitoring: FeeBumpMonitoringOptions;
+  private readonly feeBumpTimers = new Map<string, (() => void) | number | ReturnType<typeof setTimeout>>();
+  private readonly feeBumpedTxs = new Set<string>();
+  // Issue #338: Plugin registry
+  private readonly _pluginRegistry: PluginRegistry;
   private readonly checkDuplicate: boolean;
   // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: { maxConnections: number; idleTimeoutMs: number; active: number; reused: number; idle: number };
@@ -422,7 +447,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly namespaceRegistry = new Map<string, string>();
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
-  private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
+  private readonly tokenMetadataCache: Cache<string, TokenMetadata> = new Cache<string, TokenMetadata>(300_000);
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
@@ -461,7 +486,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!options.skipPeerCheck) {
       checkPeerDependencies();
     }
-    this.network = options.network;
     this.eventBus = options.eventBus ?? new InMemoryEventBus();
 
     // Issue #260: Initialize offline write queue if enabled
@@ -502,6 +526,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (s < 0) throw new Error("cliffSeconds must be >= 0");
     });
     this.plugins = options.plugins ?? [];
+    this.feeBumpMonitoring = options.feeBumpMonitoring ?? { enabled: false };
+    this._pluginRegistry = new PluginRegistry();
     this.checkDuplicate = options.checkDuplicate ?? false;
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
@@ -659,7 +685,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     try {
       const op = this.contract.call("get_version");
       const tx = new TransactionBuilder(
-        await this.server.getAccount(await this.walletAdapter.getPublicKey()),
+        await this.server.getAccount(await this.requireWalletAdapter().getPublicKey()),
         { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASES[this.network] }
       )
         .addOperation(op)
@@ -1163,17 +1189,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.walletAdapter;
   }
 
-  /**
-   * Sets or updates the wallet adapter after client construction.
-   * This enables lazy-loading wallet adapter code for read-only applications.
-   * Issue #223.
-   *
-   * @param adapter - The wallet adapter to use for signing operations.
-   */
-  setWalletAdapter(adapter: WalletAdapter): void {
-    this.walletAdapter = adapter;
-  }
-
   // ── Issue #50: Middleware / plugin system ─────────────────────────────────
 
   /**
@@ -1186,25 +1201,36 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this;
   }
 
+  /** Issue #338: Plugin registry for ordered plugin execution. */
+  get pluginRegistry(): IPluginRegistry {
+    return this._pluginRegistry;
+  }
+
   private async runWithMiddleware<T>(
     method: string,
     args: unknown[],
     fn: () => Promise<T>
   ): Promise<T> {
     const ctx: MiddlewareContext = { method, args };
-    for (const p of this.plugins) {
+    // Issue #338: Registry plugins run first in topological order,
+    // then legacy flat-list plugins.
+    const orderedPlugins: SoroStreamPlugin[] = [
+      ...this._pluginRegistry.list(),
+      ...this.plugins,
+    ];
+    for (const p of orderedPlugins) {
       await p.before?.(ctx);
     }
     let result: T;
     try {
       result = await fn();
     } catch (err) {
-      for (const p of [...this.plugins].reverse()) {
+      for (const p of [...orderedPlugins].reverse()) {
         await p.onError?.(ctx, err);
       }
       throw err;
     }
-    for (const p of [...this.plugins].reverse()) {
+    for (const p of [...orderedPlugins].reverse()) {
       await p.after?.(ctx, result);
     }
     return result;
@@ -1281,6 +1307,31 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
       if (result.status === "ERROR") {
         throw new TransactionFailedError(JSON.stringify(result.errorResult));
+      }
+
+      // Issue #337: Schedule auto fee bump if enabled
+      if (this.feeBumpMonitoring.enabled) {
+        const threshold = this.feeBumpMonitoring.expiryThreshold ?? 0.8;
+        const multiplier = this.feeBumpMonitoring.feeMultiplier ?? 2;
+        const cancel = scheduleFeeBumpMonitor(
+          result.hash, 30, threshold,
+          async (hash: string) => {
+            try {
+              const r = await this.server.getTransaction(hash);
+              return r.status === "SUCCESS" || r.status === "FAILED";
+            } catch { return false; }
+          },
+          (hash: string) => {
+            if (this.feeBumpedTxs.has(hash)) return;
+            this.feeBumpedTxs.add(hash);
+            this.eventBus.emit("transaction.feeBumped", {
+              originalTxHash: hash,
+              originalFee: Number(BASE_FEE),
+              bumpedFee: Number(BASE_FEE) * multiplier,
+            });
+          },
+        );
+        this.feeBumpTimers.set(result.hash, cancel);
       }
 
       // Poll for completion with configurable timeout and exponential backoff
@@ -2374,7 +2425,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     affectedAddresses: string[],
     buildDeltas: () => BalanceDelta[]
   ): Promise<OperationExplanation> {
-    const publicKey = await this.walletAdapter.getPublicKey();
+    const publicKey = await this.requireWalletAdapter().getPublicKey();
     const account = await this.withBreaker(() =>
       this.server.getAccount(publicKey)
     );
