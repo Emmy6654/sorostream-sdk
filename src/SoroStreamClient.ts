@@ -258,6 +258,17 @@ export interface SoroStreamClientOptions {
    * Issue #199.
    */
   adapters?: SoroStreamAdapters;
+  /**
+   * Maximum time in milliseconds to wait for the RPC to report the
+   * write-confirmed ledger before a subsequent read (read-your-own-writes
+   * consistency). Defaults to 10 000 ms (10 seconds).
+   *
+   * When set to `0`, the RYOW wait is skipped and reads proceed immediately
+   * (pre-existing behaviour).
+   *
+   * Issue #271.
+   */
+  ryowTimeoutMs?: number;
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -380,6 +391,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   private _ledgerTimestampCache: { value: number; expiresAt: number } | null = null;
 
+  // Issue #271: read-your-own-writes consistency
+  // Maps streamId → confirmed ledger sequence of the last mutation for that stream.
+  private readonly _lastWriteLedger = new Map<string, number>();
+  // The configured RYOW wait timeout (0 = disabled).
+  private readonly ryowTimeoutMs: number;
+
   /** TTL cache: streamId → resolved claimable amount */
   private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
   /** In-flight deduplication: streamId → shared promise for the active RPC call */
@@ -466,6 +483,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.auditLogEnabled = options.auditLog ?? false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
+    // Issue #271: RYOW timeout (0 = disabled for zero-overhead backward compat)
+    this.ryowTimeoutMs = options.ryowTimeoutMs ?? 10_000;
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -851,6 +870,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.streamInflight.clear();
     this.claimableInflight.clear();
     this.claimableCache.clear();
+    // Issue #271: clear pending RYOW ledger records — they are network-specific.
+    this._lastWriteLedger.clear();
 
     // 2. Destroy the existing event poller — it's still pointing at the
     //    previous network's RPC and would otherwise emit stale events for
@@ -897,6 +918,45 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     for (const key of ["mainnet", "testnet", "futurenet"] as Network[]) {
       this.streamCache.delete(`${key}:${streamId}`);
     }
+  }
+
+  // ── Issue #271: Read-your-own-writes (RYOW) helpers ───────────────────────
+
+  /**
+   * Records the confirmed ledger sequence for a stream after a successful
+   * write mutation. Subsequent {@link getStream} calls for the same stream
+   * will wait for the RPC to reach this ledger before returning data,
+   * ensuring callers never observe stale pre-write state.
+   *
+   * @param streamId - The stream that was mutated.
+   * @param ledger   - The ledger sequence returned by the confirmed transaction.
+   */
+  private _recordWriteLedger(streamId: string, ledger: number): void {
+    if (ledger <= 0 || this.ryowTimeoutMs === 0) return;
+    this._lastWriteLedger.set(streamId, ledger);
+  }
+
+  /**
+   * If a previous write has been recorded for `streamId`, waits until the
+   * Soroban RPC reports a ledger at or above the write's confirmed sequence
+   * before the subsequent read proceeds.  Clears the record once the wait
+   * succeeds so later reads are not penalised.
+   *
+   * No-op when:
+   * - No write has been recorded for the stream.
+   * - `ryowTimeoutMs` is 0 (RYOW disabled).
+   */
+  private async _waitForStreamLedger(streamId: string): Promise<void> {
+    if (this.ryowTimeoutMs === 0) return;
+    const target = this._lastWriteLedger.get(streamId);
+    if (target === undefined) return;
+
+    await waitForLedger(this.server, target, {
+      timeoutMs: this.ryowTimeoutMs,
+    });
+
+    // Only clear once we successfully reached the target.
+    this._lastWriteLedger.delete(streamId);
   }
 
   private async withBreaker<T>(fn: () => Promise<T>): Promise<T> {
@@ -994,7 +1054,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     feeBumpOpts?: FeeBumpOptions,
     operationName?: string,
     memo?: string | MemoHash
-  ): Promise<string> {
+  ): Promise<{ txHash: string; ledger: number }> {
     const opStart = Date.now();
     try {
       const adapter = this.requireWalletAdapter();
@@ -1075,7 +1135,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         });
       }
 
-      return result.hash;
+      // Issue #271: capture confirmed ledger for RYOW consistency.
+      const confirmedLedger: number =
+        (response as unknown as { ledger?: number }).ledger ?? 0;
+
+      return { txHash: result.hash, ledger: confirmedLedger };
     } catch (err) {
       // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
       this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
@@ -1414,7 +1478,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       }
 
       const feeBump = this.resolveFeeBump(options?.feeBump);
-      const txHash = await this.buildAndSubmit(operation, signal, feeBump, "createStream", options?.memo);
+      const { txHash, ledger } = await this.buildAndSubmit(operation, signal, feeBump, "createStream", options?.memo);
 
       const result = await this.getStreamsBySender(sender);
       const streams = Array.isArray(result) ? result : result.streams;
@@ -1746,7 +1810,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "topUp", options?.memo);
+    const { txHash, ledger } = await this.buildAndSubmit(operation, signal, feeBump, "topUp", options?.memo);
+
+    // Issue #271: record the confirmed ledger for RYOW consistency.
+    this._recordWriteLedger(params.streamId, ledger);
 
     // Fetch fresh on-chain state and cache it so immediate getStream() calls
     // reflect the topped-up balance without stale data.
@@ -1803,7 +1870,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "updateFlowRate", options?.memo);
     return { txHash };
   }
 
@@ -1835,7 +1902,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.approved
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "setOperator", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "setOperator", options?.memo);
     return { txHash };
   }
 
@@ -1857,7 +1924,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorCancelStream(params.streamId, operator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "operatorCancelStream", options?.memo);
     return { txHash };
   }
 
@@ -1882,7 +1949,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const operator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "operatorTopUp", options?.memo);
     return { txHash };
   }
 
@@ -1930,7 +1997,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const operation = this.encoder.splitStream(sender, params);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "splitStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "splitStream", options?.memo);
 
     const result = await this.getStreamsBySender(sender);
     const streams = Array.isArray(result) ? result : result.streams;
@@ -1969,7 +2036,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       params.newRecipient
     );
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "transferStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "transferStream", options?.memo);
     return { txHash };
   }
 
@@ -1991,7 +2058,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.pauseStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "pause", options?.memo);
     return { txHash };
   }
 
@@ -2013,7 +2080,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const sender = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.resumeStream(params.streamId, sender);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "resume", options?.memo);
     return { txHash };
   }
 
@@ -2360,6 +2427,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
     const cacheKey = `${networkAtCallTime}:${streamId}`;
+
+    // Issue #271: if a prior write has been recorded for this stream, wait for
+    // the confirmed ledger before serving data — this guarantees the read is
+    // not stale relative to the mutation (read-your-own-writes consistency).
+    await this._waitForStreamLedger(streamId);
 
     // 1. Fast path: serve from TTL cache.
     const cached = this.streamCache.get(cacheKey);
@@ -2838,7 +2910,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
                 durationSeconds: row.durationSeconds,
                 autoRenew,
               });
-              const txHash = await this.buildAndSubmit(operation, undefined, undefined, "bulkCreateStreams");
+              const { txHash } = await this.buildAndSubmit(operation, undefined, undefined, "bulkCreateStreams");
 
               const result = await this.getStreamsBySender(sender);
               const streams = Array.isArray(result) ? result : result.streams;
