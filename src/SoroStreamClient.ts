@@ -456,6 +456,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
+  // Issue #272: detected RPC version (set after first probe or explicit override)
+  private detectedRpcVersion: "v1" | "v2" | null = null;
+
   constructor(options: SoroStreamClientOptions) {
     // Issue #202: auto-detect the network from the RPC URL host when
     // `network` is not explicitly provided. An explicit `network` always
@@ -510,7 +513,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.customTransport = options.transport ?? null;
     this.server =
       this.customTransport ??
-      createDefaultRpcTransport(options.rpcUrl ?? RPC_URLS[this.network]);
+      createRpcCompatTransport(options.rpcUrl ?? RPC_URLS[this.network], {
+        // Issue #272: "auto" is the default so existing integrations pick up
+        // RPC v2 support transparently without any config change.
+        rpcVersion: options.rpcVersion ?? "auto",
+        onVersionDetected: (payload: RpcVersionDetectedPayload) => {
+          this.detectedRpcVersion = payload.version;
+          this.eventBus.emit("rpcVersionDetected", payload);
+        },
+      });
     void this.server.init?.({
       network: this.network,
       rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
