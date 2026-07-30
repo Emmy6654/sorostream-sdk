@@ -155,7 +155,7 @@ export type {
   VestingSchedulePoint,
   VestingScheduleResult,
   WatchClaimableOptions,
-  WebSocketReconnectOptions,
+  WatchTotalClaimableOptions,
   BulkStreamRow,
   BulkCreateOptions,
   BulkCreateBatchResult,
@@ -217,5 +217,6 @@ export type {
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  SoroStreamClientConfig,
 } from "./types.js";
 

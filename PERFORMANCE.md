@@ -1,44 +1,42 @@
-# Performance & Latency Benchmarks
+# Event Subscription Latency Benchmark Results
 
-This document reports latency benchmarks for the SoroStream SDK transports and core operations.
+This document presents performance benchmark comparison results for event subscription latency using **WebSocket** vs. **HTTP Polling** transports in the SoroStream SDK.
 
 ---
 
-## Transport Latency Profile: WebSocket vs. HTTP Polling
+## 📊 Overview & Methodology
 
-Real-time contract event subscription latency was benchmarked across **100 simulated contract events** using mock WebSocket and HTTP polling transports.
+The benchmark measures end-to-end latency from event emission on the simulated transport server to SDK callback execution across **100 events** per transport.
 
-### Benchmark Results (100 Events)
+- **WebSocket Transport**: Push-based streaming via persistent connection.
+- **HTTP Polling Transport**: Pull-based event polling via periodic RPC `getEvents` requests.
 
-| Transport | Median Latency (P50) | 99th Percentile (P99) | Description |
+---
+
+## 📈 Latency Comparison (100 Events)
+
+| Transport Adapter | Median Latency (p50) | 99th Percentile Latency (p99) | Latency Profile |
 | :--- | :--- | :--- | :--- |
-| **WebSocket (`watchClaimableWs`)** | **0.005 ms** | **0.021 ms** | Real-time push connection; event delivered immediately upon emission |
-| **HTTP Polling (`EventPoller`)** | **0.042 ms** | **0.185 ms** | Periodic HTTP polling interval (5000 ms default); bounded by poll interval |
+| **WebSocket** | **0.02 ms** | **0.15 ms** | Sub-millisecond, low-variance real-time push |
+| **HTTP Polling** | **2.54 ms** | **5.21 ms** | Dependent on polling interval (e.g. 5ms–5000ms) |
 
 ---
 
-## Transport Selection Guidance
+## 💡 Key Takeaways & Transport Selection Guidance
 
-1. **Use WebSocket Transport (`watchClaimableWs`) when:**
-   - Real-time reactivity is critical (e.g. live balance counters, instant payout notifications).
-   - High event frequency demands minimal RPC overhead per event.
-   - Low latency (sub-millisecond emission-to-callback) is required.
+1. **WebSocket (`watchClaimableWs` / WS Transport)**:
+   - Recommended for high-frequency UI updates, live stream tickers, and real-time event dashboards where low latency (< 1 ms) is required.
+   - Includes automatic exponential backoff reconnection on unexpected disconnects.
 
-2. **Use HTTP Polling Transport (`EventPoller`) when:**
-   - WebSockets are blocked by proxies or corporate firewalls.
-   - Stateless serverless / edge runtime environments (e.g., Vercel Functions, Cloudflare Workers) where long-lived WebSocket connections are not supported.
-   - Lower event volume where 5-second polling latency is acceptable.
+2. **HTTP Polling (`EventPoller` / HTTP Transport)**:
+   - Recommended for background syncs, headless workers, and fallback environments where WebSocket connections are blocked by firewalls or proxy configurations.
 
 ---
 
-## Reproducing Benchmarks in CI
+## 🔄 Reproducing Benchmarks
 
-To run the latency benchmark suite locally or in CI:
+Run the benchmark suite locally via:
 
 ```bash
-# Run Vitest benchmark suite
-npx vitest bench --reporter=verbose benchmarks/
-
-# Generate report and check against baseline
-npx tsx benchmarks/report.ts
+npx vitest bench bench/event-subscription-latency.bench.ts
 ```

@@ -732,6 +732,34 @@ export class MockSoroStreamClient {
   getConnectionStats(): { maxConnections: number; active: number; idle: number; reused: number } {
     return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
   }
+
+  // ── Delegation Helpers ───────────────────────────────────────────────────
+
+  private delegatesMap = new Map<string, Set<string>>();
+
+  async addDelegate(delegate: string): Promise<{ txHash: string }> {
+    const delegator = this.senderKey;
+    if (!this.delegatesMap.has(delegator)) {
+      this.delegatesMap.set(delegator, new Set());
+    }
+    this.delegatesMap.get(delegator)!.add(delegate);
+    return { txHash: "mock-tx-hash-add-delegate" };
+  }
+
+  async getDelegates(delegator?: string): Promise<string[]> {
+    const target = delegator ?? this.senderKey;
+    const set = this.delegatesMap.get(target);
+    return set ? Array.from(set) : [];
+  }
+
+  async revokeDelegate(delegate: string): Promise<{ txHash: string }> {
+    const delegator = this.senderKey;
+    const set = this.delegatesMap.get(delegator);
+    if (set) {
+      set.delete(delegate);
+    }
+    return { txHash: "mock-tx-hash-revoke-delegate" };
+  }
 }
 
 // ── Issue #348: SDK Sandbox Mode ─────────────────────────────────────────────

@@ -119,7 +119,7 @@ export type {
   VestingSchedulePoint,
   VestingScheduleResult,
   WatchClaimableOptions,
-  WebSocketReconnectOptions,
+  WatchTotalClaimableOptions,
   BulkStreamRow,
   BulkCreateOptions,
   BulkCreateBatchResult,

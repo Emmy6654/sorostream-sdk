@@ -394,17 +394,16 @@ export function watchClaimableWs(
   onClaimable: (claimable: bigint) => void,
   compression?: boolean | CompressionOptions,
   webSocketFactory?: WebSocketFactory,
-  reconnectOptions?: WebSocketReconnectOptions
+  reconnectOptions?: { reconnect?: boolean; backoffMs?: number; maxAttempts?: number }
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
-  let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastValueEmitted: bigint | null = null;
-
-  const maxAttempts = reconnectOptions?.maxAttempts ?? 5;
-  const baseDelayMs = reconnectOptions?.baseDelayMs ?? 1000;
-  const maxDelayMs = reconnectOptions?.maxDelayMs ?? 30000;
+  let reconnectAttempts = 0;
+  let lastEmittedValue: bigint | null = null;
+  const shouldReconnect = reconnectOptions?.reconnect ?? true;
+  const backoffMs = reconnectOptions?.backoffMs ?? 100;
+  const maxAttempts = reconnectOptions?.maxAttempts ?? 10;
 
   const compressionOpts = resolveCompression(compression);
   const payloadThreshold = compressionOpts?.threshold ?? Infinity;
@@ -416,48 +415,25 @@ export function watchClaimableWs(
     );
   }
 
-  function handleClaimable(val: bigint) {
-    if (val === lastValueEmitted) return;
-    lastValueEmitted = val;
-    onClaimable(val);
-  }
-
-  function scheduleReconnect() {
-    if (stopped || maxAttempts === 0) return;
-    if (reconnectAttempts >= maxAttempts) return;
-
-    reconnectAttempts++;
-    const delay = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, reconnectAttempts - 1));
-    reconnectTimer = setTimeout(() => {
-      if (!stopped) {
-        connect();
-      }
-    }, delay);
-  }
-
   function connect() {
     if (stopped) return;
     try {
       if (compressionOpts) {
         try {
           const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
-          ws = createWebSocket!(wsUrl, deflateOpts);
+          ws = createWebSocket(wsUrl, deflateOpts);
         } catch {
-          ws = createWebSocket!(wsUrl);
+          ws = createWebSocket(wsUrl);
         }
       } else {
-        ws = createWebSocket!(wsUrl);
+        ws = createWebSocket(wsUrl);
       }
 
       ws.onopen = () => {
         if (stopped) return;
         reconnectAttempts = 0;
         const msg = JSON.stringify({ type: "subscribe", streamId });
-        if (compressionOpts && msg.length < payloadThreshold) {
-          ws?.send(msg);
-        } else {
-          ws?.send(msg);
-        }
+        ws?.send(msg);
       };
 
       ws.onmessage = (event: MessageEvent) => {
@@ -465,7 +441,11 @@ export function watchClaimableWs(
         try {
           const data = JSON.parse(event.data as string);
           if (data.type === "claimable" && data.streamId === streamId) {
-            handleClaimable(BigInt(data.value));
+            const val = BigInt(data.value);
+            if (val !== lastEmittedValue) {
+              lastEmittedValue = val;
+              onClaimable(val);
+            }
           }
         } catch {
           // swallow parse errors
@@ -473,18 +453,19 @@ export function watchClaimableWs(
       };
 
       ws.onerror = () => {
-        // Connection error
+        // Silently swallow errors; close event will trigger reconnect if appropriate
       };
 
       ws.onclose = () => {
-        if (!stopped) {
-          scheduleReconnect();
+        if (stopped) return;
+        if (shouldReconnect && reconnectAttempts < maxAttempts) {
+          reconnectAttempts++;
+          const delay = backoffMs * Math.pow(1.5, reconnectAttempts - 1);
+          reconnectTimer = setTimeout(connect, delay);
         }
       };
     } catch {
-      if (!stopped) {
-        scheduleReconnect();
-      }
+      // WebSocket initialization failed
     }
   }
 
@@ -492,10 +473,7 @@ export function watchClaimableWs(
 
   return () => {
     stopped = true;
-    if (reconnectTimer !== null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     if (ws) {
       ws.onopen = null;
       ws.onmessage = null;
@@ -649,6 +627,62 @@ export function watchClaimable(
     clearInterval(tickTimer);
     clearInterval(reconcileTimer);
     stopWs?.();
+  };
+}
+
+/** Options for {@link watchTotalClaimable}. */
+export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
+
+/**
+ * Aggregates claimable amounts across multiple streams and emits the total sum.
+ * Updates the total whenever any individual stream's balance changes.
+ *
+ * @param streams - Array of Stream objects.
+ * @param reconciles - Array of async reconcile functions matching streams order, or a single reconcile function.
+ * @param onTotalChange - Callback invoked with the updated total claimable sum in stroops.
+ * @param options - Optional configuration options.
+ * @returns Unsubscribe function to stop watching all streams.
+ */
+export function watchTotalClaimable(
+  streams: Stream[],
+  reconciles: Array<() => Promise<bigint>> | (() => Promise<bigint>),
+  onTotalChange: (total: bigint) => void,
+  options?: WatchTotalClaimableOptions
+): () => void {
+  if (streams.length === 0) {
+    onTotalChange(0n);
+    return () => {};
+  }
+
+  const values: bigint[] = new Array(streams.length).fill(0n);
+  let lastEmittedTotal: bigint | null = null;
+
+  const updateAndEmit = () => {
+    const sum = values.reduce((acc, v) => acc + v, 0n);
+    if (sum !== lastEmittedTotal) {
+      lastEmittedTotal = sum;
+      onTotalChange(sum);
+    }
+  };
+
+  const unsubscribes = streams.map((stream, idx) => {
+    const reconcileFn = typeof reconciles === "function"
+      ? reconciles
+      : (reconciles[idx] ?? (async () => claimableNow(stream)));
+
+    return watchClaimable(
+      stream,
+      reconcileFn,
+      (val) => {
+        values[idx] = val;
+        updateAndEmit();
+      },
+      options
+    );
+  });
+
+  return () => {
+    unsubscribes.forEach((unsub) => unsub());
   };
 }
 

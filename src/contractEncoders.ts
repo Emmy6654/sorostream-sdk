@@ -14,8 +14,8 @@ export interface ContractCallEncoder {
   transferStream(streamId: string, sender: string, newRecipient: string): xdr.Operation;
   pauseStream(streamId: string, sender: string): xdr.Operation;
   resumeStream(streamId: string, sender: string): xdr.Operation;
-  addDelegate(delegate: string, delegator: string): xdr.Operation;
-  revokeDelegate(delegate: string, delegator: string): xdr.Operation;
+  addDelegate(delegator: string, delegate: string): xdr.Operation;
+  revokeDelegate(delegator: string, delegate: string): xdr.Operation;
 }
 
 class V1Encoder implements ContractCallEncoder {
@@ -131,19 +131,19 @@ class V1Encoder implements ContractCallEncoder {
     );
   }
 
-  addDelegate(delegate: string, delegator: string): xdr.Operation {
+  addDelegate(delegator: string, delegate: string): xdr.Operation {
     return this.contract.call(
       "add_delegate",
-      nativeToScVal(delegate, { type: "address" }),
-      nativeToScVal(delegator, { type: "address" })
+      nativeToScVal(delegator, { type: "address" }),
+      nativeToScVal(delegate, { type: "address" })
     );
   }
 
-  revokeDelegate(delegate: string, delegator: string): xdr.Operation {
+  revokeDelegate(delegator: string, delegate: string): xdr.Operation {
     return this.contract.call(
       "revoke_delegate",
-      nativeToScVal(delegate, { type: "address" }),
-      nativeToScVal(delegator, { type: "address" })
+      nativeToScVal(delegator, { type: "address" }),
+      nativeToScVal(delegate, { type: "address" })
     );
   }
 }
