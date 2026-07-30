@@ -3590,6 +3590,99 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return records;
     }
   }
+
+  /**
+   * Adds a delegate to the caller's account on the contract.
+   *
+   * @param delegate - The address to authorize as a delegate.
+   * @param options - Optional write parameters (memo, feeBump, signal).
+   * @returns Object containing the confirming transaction hash.
+   */
+  async addDelegate(
+    delegate: string,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    return this.runWithMiddleware("addDelegate", [delegate], async () => {
+      validateStringLength("delegate", delegate);
+      if (!isValidStellarAddress(delegate)) {
+        throw new InvalidAddressError(delegate);
+      }
+      const sender = await this.requireWalletAdapter().getPublicKey();
+      const operation = this.encoder.addDelegate(sender, delegate);
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const txHash = await this.buildAndSubmit(
+        operation,
+        options?.signal,
+        feeBump,
+        "addDelegate",
+        options?.memo
+      );
+      return { txHash };
+    });
+  }
+
+  /**
+   * Queries delegates authorized for a delegator address.
+   *
+   * @param delegator - The delegator address to query. Defaults to the connected wallet public key.
+   * @returns Array of authorized delegate addresses.
+   */
+  async getDelegates(delegator?: string): Promise<string[]> {
+    return this.runWithMiddleware("getDelegates", [delegator], async () => {
+      const target =
+        delegator ??
+        (this.walletAdapter ? await this.walletAdapter.getPublicKey() : undefined);
+      if (!target) {
+        throw new Error(
+          "Delegator address required when no wallet adapter is present"
+        );
+      }
+      validateStringLength("delegator", target);
+      if (!isValidStellarAddress(target)) {
+        throw new InvalidAddressError(target);
+      }
+      const operation = this.contract.call(
+        "get_delegates",
+        nativeToScVal(target, { type: "address" })
+      );
+      const result = await this.simulateOp(operation);
+      if (rpc.Api.isSimulationSuccess(result) && result.result) {
+        const delegates = scValToNative(result.result.retval) as string[];
+        return Array.isArray(delegates) ? delegates : [];
+      }
+      return [];
+    });
+  }
+
+  /**
+   * Revokes a delegate from the caller's account on the contract.
+   *
+   * @param delegate - The address to revoke delegation from.
+   * @param options - Optional write parameters (memo, feeBump, signal).
+   * @returns Object containing the confirming transaction hash.
+   */
+  async revokeDelegate(
+    delegate: string,
+    options?: WriteOptions
+  ): Promise<{ txHash: string }> {
+    return this.runWithMiddleware("revokeDelegate", [delegate], async () => {
+      validateStringLength("delegate", delegate);
+      if (!isValidStellarAddress(delegate)) {
+        throw new InvalidAddressError(delegate);
+      }
+      const sender = await this.requireWalletAdapter().getPublicKey();
+      const operation = this.encoder.revokeDelegate(sender, delegate);
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const txHash = await this.buildAndSubmit(
+        operation,
+        options?.signal,
+        feeBump,
+        "revokeDelegate",
+        options?.memo
+      );
+      return { txHash };
+    });
+  }
 }
 
 /**
