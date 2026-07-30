@@ -271,6 +271,10 @@ export class SelfStreamError extends SoroStreamError {
         "Use a different recipient address."
     );
     this.name = "SelfStreamError";
+  }
+}
+
+/**
  * Thrown when the SDK detects a contract version that is outside the
  * supported compatibility range. Issue #209.
  */
@@ -288,5 +292,29 @@ export class SoroStreamVersionError extends SoroStreamError {
     this.name = "SoroStreamVersionError";
     this.contractVersion = contractVersion;
     this.minVersion = minVersion;
+  }
+}
+
+/**
+ * Thrown by {@link validateRecipient} when the recipient address is invalid
+ * or does not exist on-chain (issue #339). The `warnings` array provides
+ * human-readable explanations for each detected issue.
+ */
+export class RecipientValidationError extends SoroStreamError {
+  /** Whether the address has a trustline for the token. */
+  readonly hasTrustline: boolean;
+  /** Whether the account exists on-chain. */
+  readonly accountExists: boolean;
+  /** Human-readable warnings for each detected issue. */
+  readonly warnings: string[];
+
+  constructor(hasTrustline: boolean, accountExists: boolean, warnings: string[]) {
+    super(
+      `Recipient validation failed: ${warnings.join("; ")}`
+    );
+    this.name = "RecipientValidationError";
+    this.hasTrustline = hasTrustline;
+    this.accountExists = accountExists;
+    this.warnings = warnings;
   }
 }

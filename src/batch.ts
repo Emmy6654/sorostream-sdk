@@ -14,6 +14,8 @@
  * ```
  */
 
+export { BatchBuilder } from "./batchBuilder.js";
+
 export { parseCsvStreamRows, batchSize } from "./utils.js";
 export { ConnectionPool } from "./connectionPool.js";
 export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from "./connectionPool.js";

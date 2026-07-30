@@ -21,6 +21,16 @@ let hasError = false;
 
 function validatePath(exportPath, filePath) {
   if (typeof filePath === 'string') {
+    // Subpath pattern exports (e.g. "./schemas/*") aren't literal files —
+    // there's nothing to resolve against the filesystem directly.
+    if (filePath.includes('*')) {
+      const dir = path.resolve(process.cwd(), filePath.split('*')[0]);
+      if (!fs.existsSync(dir)) {
+        console.error(`Export validation failed: Directory not found for export pattern "${exportPath}" at "${filePath}"`);
+        hasError = true;
+      }
+      return;
+    }
     const resolvedPath = path.resolve(process.cwd(), filePath);
     if (!fs.existsSync(resolvedPath)) {
       console.error(`Export validation failed: File not found for export path "${exportPath}" at "${filePath}"`);
