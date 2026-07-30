@@ -1,4 +1,7 @@
 import type { FetchAdapter, WebSocketFactory } from "./adapters.js";
+import type { CircuitBreakerOptions } from "./circuitBreaker.js";
+import type { RetryOptions } from "./retry.js";
+import type { StreamRetryPolicy } from "./events.js";
 
 /** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
@@ -1015,5 +1018,53 @@ export interface ExportStreamHistoryOptions {
   limit?: number;
   /** Starting ledger number to filter events. */
   startLedger?: number;
+}
+
+// ── Issue #267: JSON Schema generation ───────────────────────────────────────
+
+/**
+ * The JSON-serializable subset of `SoroStreamClientOptions` — the parts of a
+ * client config a non-TypeScript caller (a Python or Go script assembling a
+ * config payload) can meaningfully specify and validate.
+ *
+ * Deliberately excludes fields that bind to a runtime object with no JSON
+ * representation: `walletAdapter`, `transport`, `priceFeed`, `validateCliff`,
+ * `plugins`, `adapters`, and `feeBump` (its `sponsorAdapter` is a signer).
+ * This is the type `generateSchemas()` reflects to produce the
+ * `SoroStreamClientConfig` JSON Schema exported at `@sorostream/sdk/schemas`.
+ */
+export interface SoroStreamClientConfig {
+  /** The Stellar network to connect to. */
+  network?: Network;
+  /** The deployed StreamContract address. */
+  contractId: string;
+  /** Optional custom RPC URL (overrides the default for `network`). */
+  rpcUrl?: string;
+  /** Optional circuit-breaker configuration for RPC calls. */
+  circuitBreaker?: CircuitBreakerOptions;
+  /** Maximum time in ms to wait for a transaction to confirm (default: 120000). */
+  txTimeoutMs?: number;
+  /** Retry policy for read methods (getStream, getClaimable, etc.). */
+  readRetry?: Omit<RetryOptions, "signal">;
+  /** Retry policy for transaction submission RPC calls. */
+  submitRetry?: Omit<RetryOptions, "signal">;
+  /** Contract version to use for call encoding (default: "v1"). */
+  contractVersion?: ContractVersion;
+  /** Maximum number of pooled HTTP connections reused across RPC calls (default: 5). */
+  maxConnections?: number;
+  /** Time in ms before an idle pooled connection is closed (default: 30000). */
+  idleTimeoutMs?: number;
+  /** Opt-in connection pool size for high-throughput stream scenarios. */
+  poolSize?: number;
+  /** Maximum concurrent subscriptions per pooled connection (default: 10). */
+  maxSubscriptionsPerConnection?: number;
+  /** Retry policy for automatic event-stream reconnection on unexpected failures. */
+  retryPolicy?: StreamRetryPolicy;
+  /** Opt-in event batching configuration for high-frequency streams. */
+  batchingOptions?: BatchingOptions;
+  /** Opt-in check for duplicate stream creation. */
+  checkDuplicate?: boolean;
+  /** When true, write an audit log entry for each SDK write operation. */
+  auditLog?: boolean;
 }
 
