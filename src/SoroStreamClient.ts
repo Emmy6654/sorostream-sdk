@@ -373,6 +373,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private networkVersion = 0;
   // Issue #215: wallet-initiated network switch subscribers
   private readonly networkChangedCbs = new Set<(network: Network) => void>();
+  // Issue #261: wallet adapter hot-swap subscribers
+  private readonly walletAdapterChangedCbs = new Set<
+    (payload: WalletAdapterChangedPayload) => void
+  >();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
   // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
@@ -3116,6 +3120,113 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   onNetworkChanged(cb: (network: Network) => void): () => void {
     this.networkChangedCbs.add(cb);
     return () => this.networkChangedCbs.delete(cb);
+  }
+
+  // ── Issue #261: Wallet adapter hot-swap ──────────────────────────────────
+
+  /**
+   * Replaces the active signing adapter without re-initialising the client.
+   *
+   * After the swap:
+   * - **All read-side caches are preserved** — previously fetched stream data
+   *   remains available and will continue to serve cache hits until TTL expiry.
+   * - **All active event subscriptions remain active** — no re-subscription
+   *   is required after the swap.
+   * - **Pending transactions** submitted via the old adapter are not affected;
+   *   they continue using the XDR that was already signed before the swap.
+   * - The \`"wallet.adapterChanged"\` event is emitted through the client's event
+   *   bus, and any callbacks registered via {@link onWalletAdapterChanged} are
+   *   called synchronously before this method returns.
+   *
+   * If the new adapter exposes an \`onNetworkChange\` hook, it is registered so
+   * that automatic network-switch handling continues to work.
+   *
+   * @param adapter - The new wallet adapter to use for all future signing.
+   * @returns A promise that resolves once the swap is complete and the
+   *   \`wallet.adapterChanged\` event has been emitted.
+   *
+   * @example
+   * ```ts
+   * // User picks Ledger after starting with Freighter
+   * const ledgerAdapter = createLedgerAdapter({ transport });
+   * await client.setWalletAdapter(ledgerAdapter);
+   * // client is now signing with Ledger; caches and subscriptions intact
+   * ```
+   *
+   * Issue #261.
+   */
+  async setWalletAdapter(adapter: WalletAdapter): Promise<void> {
+    // Resolve public keys before the swap so the event payload is accurate.
+    let previousPublicKey: string | null = null;
+    try {
+      previousPublicKey = await this.walletAdapter.getPublicKey();
+    } catch {
+      // Previous adapter may already be disconnected — tolerate gracefully.
+    }
+
+    let newPublicKey: string | null = null;
+    try {
+      newPublicKey = await adapter.getPublicKey();
+    } catch {
+      // New adapter might not be connected yet — tolerate gracefully.
+    }
+
+    // Replace the signing provider.
+    this.walletAdapter = adapter;
+
+    // Re-wire automatic network-change detection for the new adapter.
+    if (adapter.onNetworkChange) {
+      adapter.onNetworkChange((newNetwork) => {
+        if (newNetwork === this.network) return;
+        this.setNetwork(newNetwork);
+        for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
+    }
+
+    const payload: WalletAdapterChangedPayload = {
+      previousPublicKey,
+      newPublicKey,
+    };
+
+    // Notify framework-agnostic event-bus listeners.
+    this.eventBus.emit("wallet.adapterChanged", payload);
+
+    // Notify direct subscribers registered via onWalletAdapterChanged().
+    for (const cb of this.walletAdapterChangedCbs) {
+      cb(payload);
+    }
+  }
+
+  /**
+   * Subscribes to wallet adapter hot-swap notifications.
+   *
+   * The callback fires immediately after {@link setWalletAdapter} completes
+   * and receives a {@link WalletAdapterChangedPayload} containing the previous
+   * and new adapter public keys.
+   *
+   * Returns an unsubscribe function — call it to stop receiving notifications.
+   *
+   * @param cb - Invoked with the swap payload each time the adapter changes.
+   * @returns An unsubscribe function.
+   *
+   * @example
+   * ```ts
+   * const unsub = client.onWalletAdapterChanged(({ previousPublicKey, newPublicKey }) => {
+   *   console.log(\`Wallet changed: \${previousPublicKey} → \${newPublicKey}\`);
+   *   updateUiWalletIndicator(newPublicKey);
+   * });
+   *
+   * // Later, when you no longer need notifications:
+   * unsub();
+   * ```
+   *
+   * Issue #261.
+   */
+  onWalletAdapterChanged(
+    cb: (payload: WalletAdapterChangedPayload) => void
+  ): () => void {
+    this.walletAdapterChangedCbs.add(cb);
+    return () => this.walletAdapterChangedCbs.delete(cb);
   }
 
   // ── Issue #187: Event batching ────────────────────────────────────────────

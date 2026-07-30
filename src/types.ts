@@ -942,6 +942,29 @@ export interface RpcErrorEventPayload {
 }
 
 /**
+ * Event payload emitted by {@link SoroStreamClient.setWalletAdapter} after
+ * the signing provider has been replaced without re-initialising the client.
+ * Issue #261.
+ */
+export interface WalletAdapterChangedPayload {
+  /**
+   * Public key held by the adapter that was replaced.
+   * \`null\` when the previous adapter's \`getPublicKey()\` could not be resolved.
+   */
+  previousPublicKey: string | null;
+  /**
+   * Public key of the newly active adapter.
+   * \`null\` when the new adapter's \`getPublicKey()\` could not be resolved.
+   */
+  newPublicKey: string | null;
+  /**
+   * Human-readable name for the new adapter, if provided.
+   * For display or audit-log purposes only.
+   */
+  adapterName?: string;
+}
+
+/**
  * Maps each SDK lifecycle event name emitted through {@link IEventBus} to its
  * payload shape. Reference-only — {@link IEventBus.emit} itself stays
  * loosely typed so any framework-agnostic bus can implement it.
