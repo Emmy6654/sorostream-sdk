@@ -8,6 +8,7 @@ import type {
   TokenAggregate,
   VestingScheduleResult,
   WatchClaimableOptions,
+  WebSocketReconnectOptions,
   FormatUSDCOptions,
   StreamDrift,
   ReconcileStreamOptions,
@@ -392,10 +393,18 @@ export function watchClaimableWs(
   streamId: string,
   onClaimable: (claimable: bigint) => void,
   compression?: boolean | CompressionOptions,
-  webSocketFactory?: WebSocketFactory
+  webSocketFactory?: WebSocketFactory,
+  reconnectOptions?: { reconnect?: boolean; backoffMs?: number; maxAttempts?: number }
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectAttempts = 0;
+  let lastEmittedValue: bigint | null = null;
+  const shouldReconnect = reconnectOptions?.reconnect ?? true;
+  const backoffMs = reconnectOptions?.backoffMs ?? 100;
+  const maxAttempts = reconnectOptions?.maxAttempts ?? 10;
+
   const compressionOpts = resolveCompression(compression);
   const payloadThreshold = compressionOpts?.threshold ?? Infinity;
   const createWebSocket = webSocketFactory ?? getDefaultWebSocketFactory();
@@ -406,58 +415,70 @@ export function watchClaimableWs(
     );
   }
 
-  try {
-    // Attempt to pass perMessageDeflate options for environments that support it
-    // (e.g. Node.js ws library). Browser WebSocket ignores extra constructor args.
-    if (compressionOpts) {
-      try {
-        const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
-        ws = createWebSocket(wsUrl, deflateOpts);
-      } catch {
-        // Fall back to standard constructor when options are unsupported
+  function connect() {
+    if (stopped) return;
+    try {
+      if (compressionOpts) {
+        try {
+          const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
+          ws = createWebSocket(wsUrl, deflateOpts);
+        } catch {
+          ws = createWebSocket(wsUrl);
+        }
+      } else {
         ws = createWebSocket(wsUrl);
       }
-    } else {
-      ws = createWebSocket(wsUrl);
-    }
 
-    ws.onopen = () => {
-      if (stopped) return;
-      const msg = JSON.stringify({ type: "subscribe", streamId });
-      // Respect threshold: only rely on compression for large-enough payloads
-      if (compressionOpts && msg.length < payloadThreshold) {
+      ws.onopen = () => {
+        if (stopped) return;
+        reconnectAttempts = 0;
+        const msg = JSON.stringify({ type: "subscribe", streamId });
         ws?.send(msg);
-      } else {
-        ws?.send(msg);
-      }
-    };
+      };
 
-    ws.onmessage = (event: MessageEvent) => {
-      if (stopped) return;
-      try {
-        const data = JSON.parse(event.data as string);
-        if (data.type === "claimable" && data.streamId === streamId) {
-          onClaimable(BigInt(data.value));
+      ws.onmessage = (event: MessageEvent) => {
+        if (stopped) return;
+        try {
+          const data = JSON.parse(event.data as string);
+          if (data.type === "claimable" && data.streamId === streamId) {
+            const val = BigInt(data.value);
+            if (val !== lastEmittedValue) {
+              lastEmittedValue = val;
+              onClaimable(val);
+            }
+          }
+        } catch {
+          // swallow parse errors
         }
-      } catch {
-        // swallow parse errors
-      }
-    };
+      };
 
-    ws.onerror = () => {
-      // Connection failed or compression extension rejected by server —
-      // silently no-op; caller should provide a polling fallback.
-    };
-  } catch {
-    // WebSocket not supported in this environment
+      ws.onerror = () => {
+        // Silently swallow errors; close event will trigger reconnect if appropriate
+      };
+
+      ws.onclose = () => {
+        if (stopped) return;
+        if (shouldReconnect && reconnectAttempts < maxAttempts) {
+          reconnectAttempts++;
+          const delay = backoffMs * Math.pow(1.5, reconnectAttempts - 1);
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
+    } catch {
+      // WebSocket initialization failed
+    }
   }
+
+  connect();
 
   return () => {
     stopped = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     if (ws) {
       ws.onopen = null;
       ws.onmessage = null;
       ws.onerror = null;
+      ws.onclose = null;
       ws.close();
       ws = null;
     }
@@ -612,7 +633,8 @@ export function watchClaimable(
         emit();
       },
       options.compression,
-      options.webSocketFactory
+      options.webSocketFactory,
+      options.wsReconnectOptions
     );
   }
 
@@ -621,6 +643,62 @@ export function watchClaimable(
     clearInterval(tickTimer);
     clearInterval(reconcileTimer);
     stopWs?.();
+  };
+}
+
+/** Options for {@link watchTotalClaimable}. */
+export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
+
+/**
+ * Aggregates claimable amounts across multiple streams and emits the total sum.
+ * Updates the total whenever any individual stream's balance changes.
+ *
+ * @param streams - Array of Stream objects.
+ * @param reconciles - Array of async reconcile functions matching streams order, or a single reconcile function.
+ * @param onTotalChange - Callback invoked with the updated total claimable sum in stroops.
+ * @param options - Optional configuration options.
+ * @returns Unsubscribe function to stop watching all streams.
+ */
+export function watchTotalClaimable(
+  streams: Stream[],
+  reconciles: Array<() => Promise<bigint>> | (() => Promise<bigint>),
+  onTotalChange: (total: bigint) => void,
+  options?: WatchTotalClaimableOptions
+): () => void {
+  if (streams.length === 0) {
+    onTotalChange(0n);
+    return () => {};
+  }
+
+  const values: bigint[] = new Array(streams.length).fill(0n);
+  let lastEmittedTotal: bigint | null = null;
+
+  const updateAndEmit = () => {
+    const sum = values.reduce((acc, v) => acc + v, 0n);
+    if (sum !== lastEmittedTotal) {
+      lastEmittedTotal = sum;
+      onTotalChange(sum);
+    }
+  };
+
+  const unsubscribes = streams.map((stream, idx) => {
+    const reconcileFn = typeof reconciles === "function"
+      ? reconciles
+      : (reconciles[idx] ?? (async () => claimableNow(stream)));
+
+    return watchClaimable(
+      stream,
+      reconcileFn,
+      (val) => {
+        values[idx] = val;
+        updateAndEmit();
+      },
+      options
+    );
+  });
+
+  return () => {
+    unsubscribes.forEach((unsub) => unsub());
   };
 }
 
@@ -879,6 +957,84 @@ export function totalValueStreamed(streams: Stream[]): StreamTotals {
     totalClaimable,
     totalClaimed,
     totalRemaining,
+  };
+}
+
+/**
+ * Subscribes to claimable balance updates across multiple streams and emits the total sum.
+ *
+ * @param streams - List of streams to watch.
+ * @param reconcileMapOrCb - Optional function/map returning claimable per stream or the total change callback.
+ * @param onTotalChange - Callback invoked with the updated total claimable sum.
+ * @param options - Optional WatchClaimableOptions.
+ * @returns Unsubscribe function to stop watching all streams.
+ */
+export function watchTotalClaimable(
+  streams: Stream[],
+  reconcileMapOrCb?: ((streamId: string) => Promise<bigint>) | Record<string, () => Promise<bigint>> | ((total: bigint) => void),
+  onTotalChange?: (total: bigint) => void,
+  options?: WatchClaimableOptions
+): () => void {
+  let callback: (total: bigint) => void;
+  let reconcileFn: (stream: Stream) => Promise<bigint>;
+
+  if (typeof reconcileMapOrCb === "function" && !onTotalChange) {
+    callback = reconcileMapOrCb as (total: bigint) => void;
+    reconcileFn = async (s) => claimableNow(s);
+  } else if (typeof reconcileMapOrCb === "function") {
+    const fn = reconcileMapOrCb as (streamId: string) => Promise<bigint>;
+    callback = onTotalChange!;
+    reconcileFn = async (s) => fn(s.id);
+  } else if (reconcileMapOrCb && typeof reconcileMapOrCb === "object") {
+    const map = reconcileMapOrCb as Record<string, () => Promise<bigint>>;
+    callback = onTotalChange!;
+    reconcileFn = async (s) => (map[s.id] ? map[s.id]!() : claimableNow(s));
+  } else {
+    callback = onTotalChange ?? (() => {});
+    reconcileFn = async (s) => claimableNow(s);
+  }
+
+  if (streams.length === 0) {
+    callback(0n);
+    return () => {};
+  }
+
+  const values: Map<string, bigint> = new Map();
+  for (const s of streams) {
+    values.set(s.id, claimableNow(s));
+  }
+
+  let lastTotal: bigint | null = null;
+
+  function calculateAndEmitTotal() {
+    let sum = 0n;
+    for (const val of values.values()) {
+      sum += val;
+    }
+    if (sum !== lastTotal) {
+      lastTotal = sum;
+      callback(sum);
+    }
+  }
+
+  calculateAndEmitTotal();
+
+  const unsubscribes = streams.map((stream) => {
+    return watchClaimable(
+      stream,
+      () => reconcileFn(stream),
+      (val) => {
+        values.set(stream.id, val);
+        calculateAndEmitTotal();
+      },
+      options
+    );
+  });
+
+  return () => {
+    for (const unsub of unsubscribes) {
+      unsub();
+    }
   };
 }
 
