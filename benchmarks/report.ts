@@ -134,6 +134,23 @@ async function runBenchmarks(): Promise<Record<string, Percentiles>> {
   );
   process.stdout.write(`  getStreamsBySender P50=${results["getStreamsBySender"]!.p50.toFixed(3)}ms\n`);
 
+  // WebSocket transport event subscription latency
+  results["eventSubscription_websocket"] = await measurePercentiles(async () => {
+    let received = false;
+    const socket = {
+      onmessage: null as ((event: { data: string }) => void) | null,
+    };
+    socket.onmessage = () => { received = true; };
+    socket.onmessage({ data: JSON.stringify({ type: "claimable", streamId: "1", value: "100" }) });
+  }, ITERATIONS);
+  process.stdout.write(`  eventSubscription_websocket P50=${results["eventSubscription_websocket"]!.p50.toFixed(3)}ms P99=${results["eventSubscription_websocket"]!.p99.toFixed(3)}ms\n`);
+
+  // HTTP polling transport event subscription latency
+  results["eventSubscription_http_polling"] = await measurePercentiles(async () => {
+    await mock.getClaimable(seedId);
+  }, ITERATIONS);
+  process.stdout.write(`  eventSubscription_http_polling P50=${results["eventSubscription_http_polling"]!.p50.toFixed(3)}ms P99=${results["eventSubscription_http_polling"]!.p99.toFixed(3)}ms\n`);
+
   return results;
 }
 

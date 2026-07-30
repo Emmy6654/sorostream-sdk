@@ -251,6 +251,25 @@ console.log(`Created ${batches.length} batch(es)`);
 | [cliff-linear-vesting.ts](./examples/cliff-linear-vesting.ts) | Cliff period followed by linear release |
 | [milestone-vesting.ts](./examples/milestone-vesting.ts) | Fixed tranches released at scheduled dates |
 | [logging-middleware.ts](./examples/logging-middleware.ts) | Plugin system worked example |
+
+## JSON Schema validation
+
+Non-TypeScript tooling (Python/Go scripts assembling stream-creation payloads, for example) can validate against JSON Schema files generated from the SDK's own TypeScript types, published at `@sorostream/sdk/schemas/*`:
+
+- `sorostream-client-config.schema.json` — `SoroStreamClientConfig`, the JSON-serializable subset of `SoroStreamClientOptions`
+- `create-stream-params.schema.json` — `CreateStreamParams`
+- `stream-filter.schema.json` — `StreamFilter`
+
+```js
+const Ajv = require("ajv");
+const schema = require("@sorostream/sdk/schemas/create-stream-params.schema.json");
+const ajv = new Ajv();
+const validate = ajv.compile(schema);
+validate({ recipient: "G...", token: "C...", amount: "100000000", durationSeconds: 3600, autoRenew: false });
+```
+
+Schemas are regenerated with `npm run generate-schemas` (or `sorostream-generate-schemas` from a repo checkout) and kept in sync with the TypeScript source by a CI check (`npm run check:schemas`).
+
 ## Architecture
 
 ```
