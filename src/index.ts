@@ -1,5 +1,5 @@
 export { SoroStreamClient, createClient } from "./SoroStreamClient.js";
-export type { SoroStreamClientOptions, SimulateOnlyResult } from "./SoroStreamClient.js";
+export type { SoroStreamClientOptions, SimulateOnlyResult, SoroStreamConfigUpdate, ConfigUpdatedEvent } from "./SoroStreamClient.js";
 export type {
   StorageAdapter,
   WebSocketFactory,
@@ -14,7 +14,7 @@ export type {
   RpcTransportGetEventsRequest,
 } from "./transport.js";
 
-export { MockSoroStreamClient } from "./mock.js";
+export { MockSoroStreamClient, SoroStreamSandbox } from "./mock.js";
 
 export { WebhookForwarder } from "./webhook.js";
 export {
@@ -31,6 +31,7 @@ export {
   calculateVestingSchedule,
   watchClaimable,
   watchClaimableWs,
+  watchTotalClaimable,
   aggregateStreamsByToken,
   totalValueStreamed,
   aggregateStreamsByStatus,
@@ -145,12 +146,16 @@ export type {
   UpdateFlowRateParams,
   SetOperatorParams,
   OperatorTopUpParams,
+  AddDelegateParams,
+  RevokeDelegateParams,
   Network,
   WalletAdapter,
+  WalletAdapterSignResult,
   FeeEstimate,
   VestingSchedulePoint,
   VestingScheduleResult,
   WatchClaimableOptions,
+  WatchTotalClaimableOptions,
   BulkStreamRow,
   BulkCreateOptions,
   BulkCreateBatchResult,
@@ -205,11 +210,18 @@ export type {
   StreamWithdrawnEventPayload,
   StreamCancelledEventPayload,
   RpcErrorEventPayload,
+  CacheInvalidatedEventPayload,
   SoroStreamEventMap,
   KmsWalletAdapterConfig,
   HealthCheckResult,
   ExportStreamHistoryOptions,
   OperationExplanation,
   BalanceDelta,
+  SoroStreamClientConfig,
 } from "./types.js";
+
+export { RecipientValidationError } from "./errors.js";
+export { PluginRegistry } from "./pluginRegistry.js";
+export { getPortfolioStats } from "./portfolioAnalytics.js";
+export { scheduleFeeBumpMonitor } from "./feeBump.js";
 

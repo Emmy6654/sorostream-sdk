@@ -1,4 +1,7 @@
 import type { FetchAdapter, WebSocketFactory } from "./adapters.js";
+import type { CircuitBreakerOptions } from "./circuitBreaker.js";
+import type { RetryOptions } from "./retry.js";
+import type { StreamRetryPolicy } from "./events.js";
 
 /** Status of a payment stream. */
 export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
@@ -289,6 +292,26 @@ export interface CompressionOptions {
   threshold?: number;
 }
 
+/** Reconnect policy options for WebSocket subscriptions. */
+export interface WebSocketReconnectOptions {
+  /** Max reconnect attempts before stopping (default: 5). Set to 0 to disable. */
+  maxAttempts?: number;
+  /** Base delay in ms for exponential backoff (default: 1000). */
+  baseDelayMs?: number;
+  /** Maximum delay cap in ms for exponential backoff (default: 30000). */
+  maxDelayMs?: number;
+}
+
+/** Parameters for adding a delegate. */
+export interface AddDelegateParams {
+  delegate: string;
+}
+
+/** Parameters for revoking a delegate. */
+export interface RevokeDelegateParams {
+  delegate: string;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -312,6 +335,8 @@ export interface WatchClaimableOptions {
    * Issue #188.
    */
   compression?: boolean | CompressionOptions;
+  /** Reconnect policy configuration for WebSocket connection. */
+  wsReconnectOptions?: WebSocketReconnectOptions;
   /**
    * Returns a monotonically increasing version number that increments
    * each time the client switches networks. When the version changes
@@ -331,8 +356,11 @@ export interface WatchClaimableOptions {
    * subscription. Required in environments without a native `WebSocket`
    * global (issue #199).
    */
-  webSocketFactory?: WebSocketFactory;
+   webSocketFactory?: WebSocketFactory;
 }
+
+/** Options for {@link watchTotalClaimable}. */
+export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
 
 
 /**
@@ -366,6 +394,14 @@ export interface WalletAdapter {
    * keypair adapters, multisig adapters, etc.) simply omit this method.
    */
   onNetworkChange?(callback: (network: Network) => void): () => void;
+}
+
+/** Result shape returned when a wallet adapter signs a transaction (issue #344). */
+export interface WalletAdapterSignResult {
+  /** The signed transaction envelope XDR encoded in base64. */
+  signedXdr: string;
+  /** Optional transaction hash if calculated by the adapter. */
+  txHash?: string;
 }
 
 /** A single row for bulk stream creation. */
@@ -942,6 +978,29 @@ export interface RpcErrorEventPayload {
 }
 
 /**
+ * Event payload emitted by {@link SoroStreamClient.setWalletAdapter} after
+ * the signing provider has been replaced without re-initialising the client.
+ * Issue #261.
+ */
+export interface WalletAdapterChangedPayload {
+  /**
+   * Public key held by the adapter that was replaced.
+   * \`null\` when the previous adapter's \`getPublicKey()\` could not be resolved.
+   */
+  previousPublicKey: string | null;
+  /**
+   * Public key of the newly active adapter.
+   * \`null\` when the new adapter's \`getPublicKey()\` could not be resolved.
+   */
+  newPublicKey: string | null;
+  /**
+   * Human-readable name for the new adapter, if provided.
+   * For display or audit-log purposes only.
+   */
+  adapterName?: string;
+}
+
+/**
  * Maps each SDK lifecycle event name emitted through {@link IEventBus} to its
  * payload shape. Reference-only — {@link IEventBus.emit} itself stays
  * loosely typed so any framework-agnostic bus can implement it.
@@ -952,6 +1011,15 @@ export interface SoroStreamEventMap {
   "stream.cancelled": StreamCancelledEventPayload;
   "rpc.error": RpcErrorEventPayload;
   "walletAdapterChanged": WalletAdapterChangedEventPayload;
+  "cacheInvalidated": CacheInvalidatedEventPayload;
+}
+
+/** Payload emitted when the client read cache is invalidated (issue #342). */
+export interface CacheInvalidatedEventPayload {
+  reason: "networkSwitch" | "manual" | string;
+  network: Network;
+  previousNetwork?: Network;
+  streamId?: string;
 }
 
 /** Payload emitted when the wallet adapter is hot-swapped (issue #261). */
@@ -992,5 +1060,53 @@ export interface ExportStreamHistoryOptions {
   limit?: number;
   /** Starting ledger number to filter events. */
   startLedger?: number;
+}
+
+// ── Issue #267: JSON Schema generation ───────────────────────────────────────
+
+/**
+ * The JSON-serializable subset of `SoroStreamClientOptions` — the parts of a
+ * client config a non-TypeScript caller (a Python or Go script assembling a
+ * config payload) can meaningfully specify and validate.
+ *
+ * Deliberately excludes fields that bind to a runtime object with no JSON
+ * representation: `walletAdapter`, `transport`, `priceFeed`, `validateCliff`,
+ * `plugins`, `adapters`, and `feeBump` (its `sponsorAdapter` is a signer).
+ * This is the type `generateSchemas()` reflects to produce the
+ * `SoroStreamClientConfig` JSON Schema exported at `@sorostream/sdk/schemas`.
+ */
+export interface SoroStreamClientConfig {
+  /** The Stellar network to connect to. */
+  network?: Network;
+  /** The deployed StreamContract address. */
+  contractId: string;
+  /** Optional custom RPC URL (overrides the default for `network`). */
+  rpcUrl?: string;
+  /** Optional circuit-breaker configuration for RPC calls. */
+  circuitBreaker?: CircuitBreakerOptions;
+  /** Maximum time in ms to wait for a transaction to confirm (default: 120000). */
+  txTimeoutMs?: number;
+  /** Retry policy for read methods (getStream, getClaimable, etc.). */
+  readRetry?: Omit<RetryOptions, "signal">;
+  /** Retry policy for transaction submission RPC calls. */
+  submitRetry?: Omit<RetryOptions, "signal">;
+  /** Contract version to use for call encoding (default: "v1"). */
+  contractVersion?: ContractVersion;
+  /** Maximum number of pooled HTTP connections reused across RPC calls (default: 5). */
+  maxConnections?: number;
+  /** Time in ms before an idle pooled connection is closed (default: 30000). */
+  idleTimeoutMs?: number;
+  /** Opt-in connection pool size for high-throughput stream scenarios. */
+  poolSize?: number;
+  /** Maximum concurrent subscriptions per pooled connection (default: 10). */
+  maxSubscriptionsPerConnection?: number;
+  /** Retry policy for automatic event-stream reconnection on unexpected failures. */
+  retryPolicy?: StreamRetryPolicy;
+  /** Opt-in event batching configuration for high-frequency streams. */
+  batchingOptions?: BatchingOptions;
+  /** Opt-in check for duplicate stream creation. */
+  checkDuplicate?: boolean;
+  /** When true, write an audit log entry for each SDK write operation. */
+  auditLog?: boolean;
 }
 
