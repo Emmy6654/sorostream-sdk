@@ -101,6 +101,7 @@ await client.withdraw({ streamId });
 | `tokenMetadataTtlMs?` | `600000` | TTL (ms) for cached `getTokenMetadata()` results |
 | `onNetworkChange?` | â€” | Called when the connected wallet switches networks mid-session |
 | `skipPeerCheck?` | `false` | Skips the `@stellar/stellar-sdk` peer version compatibility check |
+| `telemetry?` | `true` | Set to `false` to opt out of any SDK telemetry now and in future releases. No data is collected as of this version. See [TELEMETRY.md](./TELEMETRY.md) for the full policy |
 
 All mutation methods (`createStream`, `withdraw`, `cancelStream`, `topUp`) accept an optional `AbortSignal` as the last argument to cancel in-flight transactions.
 

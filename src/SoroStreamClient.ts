@@ -413,6 +413,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   >();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  // Issue #270: telemetry opt-out flag
+  private readonly telemetryEnabled: boolean;
+  // Issue #270: OTel tracer wrapper — respects telemetryEnabled.
+  private readonly _telemetry: Telemetry;
   // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
   private readonly storageAdapter: StorageAdapter | null;
   private readonly fetchAdapter: FetchAdapter;
@@ -452,8 +456,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
-  // Issue #265: opt-in rate-limit-aware request queue with priority lanes.
-  private readonly requestQueue: PriorityRequestQueue | null;
+  // Issue #272: detected RPC version (set after first probe or explicit override)
+  private detectedRpcVersion: "v1" | "v2" | null = null;
 
   constructor(options: SoroStreamClientOptions) {
     // Issue #202: auto-detect the network from the RPC URL host when
@@ -509,7 +513,15 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.customTransport = options.transport ?? null;
     this.server =
       this.customTransport ??
-      createDefaultRpcTransport(options.rpcUrl ?? RPC_URLS[this.network]);
+      createRpcCompatTransport(options.rpcUrl ?? RPC_URLS[this.network], {
+        // Issue #272: "auto" is the default so existing integrations pick up
+        // RPC v2 support transparently without any config change.
+        rpcVersion: options.rpcVersion ?? "auto",
+        onVersionDetected: (payload: RpcVersionDetectedPayload) => {
+          this.detectedRpcVersion = payload.version;
+          this.eventBus.emit("rpcVersionDetected", payload);
+        },
+      });
     void this.server.init?.({
       network: this.network,
       rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
@@ -828,6 +840,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   getNetwork(): Network {
     return this.network;
+  }
+
+  /**
+   * Returns whether telemetry instrumentation is enabled on this client.
+   *
+   * When `false`, no spans will be emitted to an OpenTelemetry provider
+   * even if one is registered by the consuming application. The flag is
+   * also a forward-compatibility contract: any future optional usage
+   * metrics will also be suppressed when this returns `false`.
+   *
+   * @returns `true` by default; `false` when `{ telemetry: false }` was
+   *   passed to the constructor.
+   *
+   * Issue #270.
+   */
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
+  }
+
+  /**
+   * Returns whether telemetry is enabled on this client instance.
+   *
+   * When `false`, no instrumentation data will be emitted even when an
+   * OpenTelemetry provider is registered in the application.
+   *
+   * @returns `true` by default; `false` when `{ telemetry: false }` was
+   *   passed to the constructor.
+   *
+   * Issue #270.
+   */
+  get isTelemetryEnabled(): boolean {
+    return this.telemetryEnabled;
   }
 
   /**
