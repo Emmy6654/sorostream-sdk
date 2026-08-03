@@ -1315,6 +1315,24 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<{ txHash: string; ledger: number }> {
     const opStart = Date.now();
     try {
+      return await this.enqueueOp("write", () =>
+        this.buildAndSubmitInner(operation, opStart, signal, feeBumpOpts, operationName, memo)
+      );
+    } catch (err) {
+      // Issue #212: notify subscribers of the custom event bus on RPC/submission failure.
+      this.eventBus.emit("rpc.error", { method: operationName ?? "unknown", error: err });
+      throw err;
+    }
+  }
+
+  private async buildAndSubmitInner(
+    operation: xdr.Operation,
+    opStart: number,
+    signal?: AbortSignal,
+    feeBumpOpts?: FeeBumpOptions,
+    operationName?: string,
+    memo?: string | MemoHash
+  ): Promise<string> {
       const adapter = this.requireWalletAdapter();
       const publicKey = await adapter.getPublicKey();
 
@@ -1435,6 +1453,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   private async buildAndSubmitBatch(operations: xdr.Operation[]): Promise<string> {
+    return this.enqueueOp("write", () => this.buildAndSubmitBatchInner(operations));
+  }
+
+  private async buildAndSubmitBatchInner(operations: xdr.Operation[]): Promise<string> {
     const adapter = this.requireWalletAdapter();
     const publicKey = await adapter.getPublicKey();
 
@@ -1499,19 +1521,33 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private async simulateOp(
     operation: xdr.Operation
   ): Promise<rpc.Api.SimulateTransactionResponse> {
-    const adapter = this.requireWalletAdapter();
-    const publicKey = await adapter.getPublicKey();
-    const account = await this.withBreaker(() =>
-      this.server.getAccount(publicKey)
-    );
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASES[this.network],
-    })
-      .addOperation(operation)
-      .setTimeout(30)
-      .build();
-    return this.withBreaker(() => this.server.simulateTransaction(tx));
+    return this.enqueueOp("read", async () => {
+      const adapter = this.requireWalletAdapter();
+      const publicKey = await adapter.getPublicKey();
+      const account = await this.withBreaker(() =>
+        this.server.getAccount(publicKey)
+      );
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASES[this.network],
+      })
+        .addOperation(operation)
+        .setTimeout(30)
+        .build();
+      return this.withBreaker(() => this.server.simulateTransaction(tx));
+    });
+  }
+
+  /**
+   * Routes a unit of RPC work through the opt-in priority request queue
+   * (issue #265) when one is configured; otherwise runs it immediately.
+   *
+   * @param lane - `"write"` for transaction submission, `"read"` for
+   *               simulate/query calls. Write requests are drained ahead of
+   *               read requests when the queue is at capacity.
+   */
+  private enqueueOp<T>(lane: "write" | "read", fn: () => Promise<T>): Promise<T> {
+    return this.requestQueue ? this.requestQueue.enqueue(lane, fn) : fn();
   }
 
   /**
