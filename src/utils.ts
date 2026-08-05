@@ -649,59 +649,6 @@ export function watchClaimable(
 /** Options for {@link watchTotalClaimable}. */
 export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
 
-/**
- * Aggregates claimable amounts across multiple streams and emits the total sum.
- * Updates the total whenever any individual stream's balance changes.
- *
- * @param streams - Array of Stream objects.
- * @param reconciles - Array of async reconcile functions matching streams order, or a single reconcile function.
- * @param onTotalChange - Callback invoked with the updated total claimable sum in stroops.
- * @param options - Optional configuration options.
- * @returns Unsubscribe function to stop watching all streams.
- */
-export function watchTotalClaimable(
-  streams: Stream[],
-  reconciles: Array<() => Promise<bigint>> | (() => Promise<bigint>),
-  onTotalChange: (total: bigint) => void,
-  options?: WatchTotalClaimableOptions
-): () => void {
-  if (streams.length === 0) {
-    onTotalChange(0n);
-    return () => {};
-  }
-
-  const values: bigint[] = new Array(streams.length).fill(0n);
-  let lastEmittedTotal: bigint | null = null;
-
-  const updateAndEmit = () => {
-    const sum = values.reduce((acc, v) => acc + v, 0n);
-    if (sum !== lastEmittedTotal) {
-      lastEmittedTotal = sum;
-      onTotalChange(sum);
-    }
-  };
-
-  const unsubscribes = streams.map((stream, idx) => {
-    const reconcileFn = typeof reconciles === "function"
-      ? reconciles
-      : (reconciles[idx] ?? (async () => claimableNow(stream)));
-
-    return watchClaimable(
-      stream,
-      reconcileFn,
-      (val) => {
-        values[idx] = val;
-        updateAndEmit();
-      },
-      options
-    );
-  });
-
-  return () => {
-    unsubscribes.forEach((unsub) => unsub());
-  };
-}
-
 // ── Issue #47: Cache reconciliation / drift detection ────────────────────────
 
 const DRIFT_FIELDS: ReadonlyArray<keyof Stream> = [
@@ -971,21 +918,29 @@ export function totalValueStreamed(streams: Stream[]): StreamTotals {
  */
 export function watchTotalClaimable(
   streams: Stream[],
-  reconcileMapOrCb?: ((streamId: string) => Promise<bigint>) | Record<string, () => Promise<bigint>> | ((total: bigint) => void),
+  reconcileMapOrCb?: Array<() => Promise<bigint>> | ((streamId: string) => Promise<bigint>) | Record<string, () => Promise<bigint>> | ((total: bigint) => void),
   onTotalChange?: (total: bigint) => void,
   options?: WatchClaimableOptions
 ): () => void {
   let callback: (total: bigint) => void;
-  let reconcileFn: (stream: Stream) => Promise<bigint>;
+  let reconcileFn: (stream: Stream, idx: number) => Promise<bigint>;
 
-  if (typeof reconcileMapOrCb === "function" && !onTotalChange) {
+  if (Array.isArray(reconcileMapOrCb)) {
+    // watchTotalClaimable(streams, [fn, fn, ...], onTotalChange)
+    const arr = reconcileMapOrCb as Array<() => Promise<bigint>>;
+    callback = onTotalChange ?? (() => {});
+    reconcileFn = (s, idx) => (arr[idx] ? arr[idx]!() : claimableNow(s));
+  } else if (typeof reconcileMapOrCb === "function" && !onTotalChange) {
+    // watchTotalClaimable(streams, onTotalChange)
     callback = reconcileMapOrCb as (total: bigint) => void;
     reconcileFn = async (s) => claimableNow(s);
   } else if (typeof reconcileMapOrCb === "function") {
+    // watchTotalClaimable(streams, (streamId) => Promise<bigint>, onTotalChange)
     const fn = reconcileMapOrCb as (streamId: string) => Promise<bigint>;
     callback = onTotalChange!;
     reconcileFn = async (s) => fn(s.id);
   } else if (reconcileMapOrCb && typeof reconcileMapOrCb === "object") {
+    // watchTotalClaimable(streams, { streamId: () => Promise<bigint> }, onTotalChange)
     const map = reconcileMapOrCb as Record<string, () => Promise<bigint>>;
     callback = onTotalChange!;
     reconcileFn = async (s) => (map[s.id] ? map[s.id]!() : claimableNow(s));
@@ -1017,12 +972,51 @@ export function watchTotalClaimable(
     }
   }
 
-  calculateAndEmitTotal();
+  if (Array.isArray(reconcileMapOrCb)) {
+    // Suppress initial watchClaimable emissions until the reconcile phase is
+    // done so that the first callback invocation reflects reconcile values,
+    // not the zero-or-stale claimableNow values.
+    let initialDone = false;
 
-  const unsubscribes = streams.map((stream) => {
+    const unsubscribes: Array<() => void> = [];
+    for (let idx = 0; idx < streams.length; idx++) {
+      const stream = streams[idx]!;
+      unsubscribes.push(
+        watchClaimable(
+          stream,
+          () => reconcileFn(stream, idx),
+          (val) => {
+            values.set(stream.id, val);
+            if (initialDone) calculateAndEmitTotal();
+          },
+          options
+        )
+      );
+    }
+
+    let pending = streams.length;
+    for (let idx = 0; idx < streams.length; idx++) {
+      const stream = streams[idx]!;
+      reconcileFn(stream, idx).then((val) => {
+        values.set(stream.id, val);
+        if (--pending === 0) {
+          initialDone = true;
+          calculateAndEmitTotal();
+        }
+      });
+    }
+
+    return () => {
+      for (const unsub of unsubscribes) unsub();
+    };
+  } else {
+    calculateAndEmitTotal();
+  }
+
+  const unsubscribes = streams.map((stream, idx) => {
     return watchClaimable(
       stream,
-      () => reconcileFn(stream),
+      () => reconcileFn(stream, idx),
       (val) => {
         values.set(stream.id, val);
         calculateAndEmitTotal();

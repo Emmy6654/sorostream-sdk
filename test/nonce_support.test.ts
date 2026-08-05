@@ -11,7 +11,7 @@ import { rpc, nativeToScVal } from "@stellar/stellar-sdk";
 
 const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 const VALID_ACCOUNT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
-const VALID_RECIPIENT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
+const VALID_RECIPIENT = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
 const VALID_TOKEN = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
 
 function makeAdapter(): WalletAdapter {
@@ -139,7 +139,7 @@ describe("#231 createStream — nonce field handling", () => {
     // Stub the rest of createStream internals so they don't fail
     vi.spyOn(client as any, "validateStreamParams").mockResolvedValue(undefined);
     vi.spyOn(client as any, "checkAllowance").mockResolvedValue(undefined);
-    vi.spyOn(client as any, "buildAndSubmit").mockResolvedValue("txhash");
+    vi.spyOn(client as any, "buildAndSubmit").mockResolvedValue({ txHash: "txhash", ledger: 0 });
     vi.spyOn(client, "getStreamsBySender").mockResolvedValue([
       {
         id: "1",
@@ -200,7 +200,7 @@ describe("#231 createStream — nonce field handling", () => {
     vi.spyOn(client, "supportsNonce").mockResolvedValue(true);
     vi.spyOn(client as any, "validateStreamParams").mockResolvedValue(undefined);
     vi.spyOn(client as any, "checkAllowance").mockResolvedValue(undefined);
-    vi.spyOn(client as any, "buildAndSubmit").mockResolvedValue("txhash");
+    vi.spyOn(client as any, "buildAndSubmit").mockResolvedValue({ txHash: "txhash", ledger: 0 });
     vi.spyOn(client, "getStreamsBySender").mockResolvedValue([
       {
         id: "1",
@@ -235,7 +235,7 @@ describe("#231 createStream — nonce field handling", () => {
     const nonceSpy = vi.spyOn(client, "supportsNonce");
     vi.spyOn(client as any, "validateStreamParams").mockResolvedValue(undefined);
     vi.spyOn(client as any, "checkAllowance").mockResolvedValue(undefined);
-    vi.spyOn(client as any, "buildAndSubmit").mockResolvedValue("txhash");
+    vi.spyOn(client as any, "buildAndSubmit").mockResolvedValue({ txHash: "txhash", ledger: 0 });
     vi.spyOn(client, "getStreamsBySender").mockResolvedValue([
       {
         id: "1",

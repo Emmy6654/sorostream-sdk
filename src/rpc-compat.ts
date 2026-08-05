@@ -294,6 +294,7 @@ export function createRpcCompatTransport(
 
   // Return a proxy adapter that resolves the real adapter on first call.
   const proxy: RpcTransportAdapter = {
+    serverURL: new URL(rpcUrl),
     async getAccount(address) {
       return (await getAdapter()).getAccount(address);
     },

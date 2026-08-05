@@ -90,10 +90,10 @@ describe("#229 batchWithdraw — partial results", () => {
 
     vi.spyOn(client, "getClaimable").mockResolvedValue(100n);
 
-    const result = await client.batchWithdraw(["A", "B", "C", "D"], 2);
+    const result = await client.batchWithdraw(["10", "20", "30", "40"], 2);
 
-    expect(result.failures.map((f) => f.id)).toEqual(["A", "B"]);
-    expect(result.successes).toEqual(["C", "D"]);
+    expect(result.failures.map((f) => f.id)).toEqual(["10", "20"]);
+    expect(result.successes).toEqual(["30", "40"]);
   });
 
   it("tolerates individual getClaimable failures without blocking submission", async () => {

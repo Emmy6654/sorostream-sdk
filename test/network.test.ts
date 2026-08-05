@@ -369,8 +369,9 @@ describe("setNetwork flushes the stream cache immediately", () => {
           })
       );
 
-    // Start a fetch, switch networks, then resolve the RPC.
+    // Start a fetch, allow simulateOp to be called, then switch networks.
     const fetchPromise = client.getStream("42");
+    await Promise.resolve();
     client.setNetwork("mainnet");
     resolveSim(makeStreamResult("TESTNET_SENDER"));
     await fetchPromise;

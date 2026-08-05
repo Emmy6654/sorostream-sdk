@@ -282,15 +282,17 @@ export class SoroStreamVersionError extends SoroStreamError {
   /** The detected contract version. */
   readonly contractVersion: string;
   /** The minimum compatible version. */
+  readonly minCompatibleVersion: string;
+  /** Alias for {@link minCompatibleVersion}. */
   readonly minVersion: string;
 
   constructor(contractVersion: string, minVersion: string) {
     super(
-      `Contract version ${contractVersion} is below the minimum compatible version (${minVersion}). ` +
-        `Upgrade the contract or downgrade the SDK.`
+      `Contract version ${contractVersion} is incompatible with SDK. Minimum required: ${minVersion}`
     );
     this.name = "SoroStreamVersionError";
     this.contractVersion = contractVersion;
+    this.minCompatibleVersion = minVersion;
     this.minVersion = minVersion;
   }
 }

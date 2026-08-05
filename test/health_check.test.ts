@@ -13,7 +13,7 @@ describe("SoroStreamClient.healthCheck (issue #308)", () => {
   it("returns rpcReachable: false on connection refused without throwing", async () => {
     const client = new SoroStreamClient({
       network: "testnet",
-      contractId: "CC123456789012345678901234567890123456789012345678901234",
+      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
       walletAdapter: mockWallet,
     });
 
@@ -31,7 +31,7 @@ describe("SoroStreamClient.healthCheck (issue #308)", () => {
   it("returns rpcReachable: false on RPC timeout without throwing", async () => {
     const client = new SoroStreamClient({
       network: "testnet",
-      contractId: "CC123456789012345678901234567890123456789012345678901234",
+      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
       walletAdapter: mockWallet,
     });
 
@@ -49,7 +49,7 @@ describe("SoroStreamClient.healthCheck (issue #308)", () => {
   it("returns rpcReachable: true when RPC returns healthy status", async () => {
     const client = new SoroStreamClient({
       network: "testnet",
-      contractId: "CC123456789012345678901234567890123456789012345678901234",
+      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
       walletAdapter: mockWallet,
     });
 

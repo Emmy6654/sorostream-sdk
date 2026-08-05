@@ -56,6 +56,8 @@ describe("watchTotalClaimable aggregator (Issue #346)", () => {
     });
 
     const expectedSum = initialClaimableValues.reduce((a, b) => a + b, 0n); // 5500n
+    await Promise.resolve();
+    await Promise.resolve();
     expect(emittedTotal).toBe(expectedSum);
 
     unsub();
@@ -92,6 +94,8 @@ describe("watchTotalClaimable aggregator (Issue #346)", () => {
     });
 
     const initialSum = claimableStates.reduce((a, b) => a + b, 0n); // 550n
+    await Promise.resolve();
+    await Promise.resolve();
     expect(emittedTotals[0]).toBe(initialSum);
 
     // Update stream-5 balance from 50n to 250n

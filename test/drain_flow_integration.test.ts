@@ -4,6 +4,7 @@ import type { WalletAdapter, Stream } from "../src/types.js";
 
 const VALID_CONTRACT = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
 const VALID_ACCOUNT = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
+const VALID_RECIPIENT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
 
 function makeMockAdapter(): WalletAdapter {
   return {
@@ -59,11 +60,10 @@ describe("Drain flow integration test", () => {
     (client as any).validateCliff = vi.fn().mockResolvedValue(undefined);
 
     // Track submission order by intercepting buildAndSubmit
-    const originalBuildAndSubmit = (client as any).buildAndSubmit.bind(client);
     (client as any).buildAndSubmit = vi.fn().mockImplementation(async (...args: any[]) => {
       const opIdx = submissionOrder.length;
       submissionOrder.push(`mutation-${opIdx}`);
-      return `tx-hash-${opIdx}`;
+      return { txHash: `tx-hash-${opIdx}`, ledger: 0 };
     });
 
     // Mock getStreamsBySender to return a stream
@@ -76,7 +76,7 @@ describe("Drain flow integration test", () => {
     // Queue 5 createStream calls sequentially
     for (let i = 0; i < 5; i++) {
       await client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: BigInt(1000 * (i + 1)),
         durationSeconds: 3600,
@@ -110,11 +110,10 @@ describe("Drain flow integration test", () => {
     (client as any).getLedgerTimestamp = vi.fn().mockResolvedValue(Math.floor(Date.now() / 1000));
     (client as any).validateCliff = vi.fn().mockResolvedValue(undefined);
 
-    const originalBuildAndSubmit = (client as any).buildAndSubmit.bind(client);
     (client as any).buildAndSubmit = vi.fn().mockImplementation(async (...args: any[]) => {
       submissionCounter++;
       submissionOrder.push(submissionCounter);
-      return `tx-hash-${submissionCounter}`;
+      return { txHash: `tx-hash-${submissionCounter}`, ledger: 0 };
     });
 
     let streamCounter = 0;
@@ -126,7 +125,7 @@ describe("Drain flow integration test", () => {
     // Create streams sequentially
     for (let i = 0; i < 5; i++) {
       await client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: BigInt(1000 * (i + 1)),
         durationSeconds: 3600,
@@ -163,7 +162,7 @@ describe("Drain flow integration test", () => {
     (client as any).validateCliff = vi.fn().mockResolvedValue(undefined);
 
     (client as any).buildAndSubmit = vi.fn().mockImplementation(async (...args: any[]) => {
-      return `tx-hash-${Date.now()}`;
+      return { txHash: `tx-hash-${Date.now()}`, ledger: 0 };
     });
 
     let streamCounter = 0;
@@ -175,7 +174,7 @@ describe("Drain flow integration test", () => {
     // Create 3 streams
     for (let i = 0; i < 3; i++) {
       await client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: BigInt(1000 * (i + 1)),
         durationSeconds: 3600,
@@ -192,7 +191,7 @@ describe("Drain flow integration test", () => {
       const data = event.data as Record<string, unknown>;
       expect(data).toHaveProperty("streamId");
       expect(data).toHaveProperty("sender", VALID_ACCOUNT);
-      expect(data).toHaveProperty("recipient", VALID_ACCOUNT);
+      expect(data).toHaveProperty("recipient", VALID_RECIPIENT);
       expect(data).toHaveProperty("token", VALID_CONTRACT);
       expect(data).toHaveProperty("txHash");
     }
@@ -216,7 +215,7 @@ describe("Drain flow integration test", () => {
     (client as any).buildAndSubmit = vi.fn().mockImplementation(async (...args: any[]) => {
       const txHash = `tx-hash-${allSubmissions.length + 1}`;
       allSubmissions.push(txHash);
-      return txHash;
+      return { txHash, ledger: 0 };
     });
 
     let streamCounter = 0;
@@ -228,7 +227,7 @@ describe("Drain flow integration test", () => {
     // First batch: 3 streams
     for (let i = 0; i < 3; i++) {
       await client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: BigInt(1000 * (i + 1)),
         durationSeconds: 3600,
@@ -242,7 +241,7 @@ describe("Drain flow integration test", () => {
     // Second batch: 2 more streams
     for (let i = 0; i < 2; i++) {
       await client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: BigInt(2000 * (i + 1)),
         durationSeconds: 7200,

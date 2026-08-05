@@ -94,12 +94,16 @@ export class MockSoroStreamClient {
     this.streams.set(stream.id, { ...stream });
   }
 
-  /** Advance a stream's `lastWithdrawTime` by `seconds` without going through withdraw. */
+  /** Simulate `seconds` of time passing on a stream by shifting its timestamps backward. */
   advanceTime(streamId: string, seconds: number): void {
     const s = this.streams.get(streamId);
     if (!s) throw new Error(`Stream not found: ${streamId}`);
-    const newTime = Math.min(s.lastWithdrawTime + seconds, s.endTime);
-    this.streams.set(streamId, { ...s, lastWithdrawTime: newTime });
+    this.streams.set(streamId, {
+      ...s,
+      startTime: s.startTime - seconds,
+      endTime: s.endTime - seconds,
+      lastWithdrawTime: s.lastWithdrawTime - seconds,
+    });
   }
 
   private emit(event: StreamEvent): void {
@@ -338,13 +342,13 @@ export class MockSoroStreamClient {
   private operators = new Map<string, string[]>();
   private delegates = new Map<string, Set<string>>();
 
-  async addDelegate(params: AddDelegateParams): Promise<{ txHash: string }> {
+  async addDelegate(delegate: string): Promise<{ txHash: string }> {
     const delegator = this.senderKey;
     if (!this.delegates.has(delegator)) {
       this.delegates.set(delegator, new Set());
     }
-    this.delegates.get(delegator)!.add(params.delegate);
-    return { txHash: `mock-tx-add-delegate-${params.delegate}` };
+    this.delegates.get(delegator)!.add(delegate);
+    return { txHash: `mock-tx-add-delegate-${delegate}` };
   }
 
   async getDelegates(delegator = this.senderKey): Promise<string[]> {
@@ -352,12 +356,12 @@ export class MockSoroStreamClient {
     return set ? Array.from(set) : [];
   }
 
-  async revokeDelegate(params: RevokeDelegateParams): Promise<{ txHash: string }> {
+  async revokeDelegate(delegate: string): Promise<{ txHash: string }> {
     const delegator = this.senderKey;
     if (this.delegates.has(delegator)) {
-      this.delegates.get(delegator)!.delete(params.delegate);
+      this.delegates.get(delegator)!.delete(delegate);
     }
-    return { txHash: `mock-tx-revoke-delegate-${params.delegate}` };
+    return { txHash: `mock-tx-revoke-delegate-${delegate}` };
   }
 
   async setOperator(
@@ -733,33 +737,6 @@ export class MockSoroStreamClient {
     return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
   }
 
-  // ── Delegation Helpers ───────────────────────────────────────────────────
-
-  private delegatesMap = new Map<string, Set<string>>();
-
-  async addDelegate(delegate: string): Promise<{ txHash: string }> {
-    const delegator = this.senderKey;
-    if (!this.delegatesMap.has(delegator)) {
-      this.delegatesMap.set(delegator, new Set());
-    }
-    this.delegatesMap.get(delegator)!.add(delegate);
-    return { txHash: "mock-tx-hash-add-delegate" };
-  }
-
-  async getDelegates(delegator?: string): Promise<string[]> {
-    const target = delegator ?? this.senderKey;
-    const set = this.delegatesMap.get(target);
-    return set ? Array.from(set) : [];
-  }
-
-  async revokeDelegate(delegate: string): Promise<{ txHash: string }> {
-    const delegator = this.senderKey;
-    const set = this.delegatesMap.get(delegator);
-    if (set) {
-      set.delete(delegate);
-    }
-    return { txHash: "mock-tx-hash-revoke-delegate" };
-  }
 }
 
 // ── Issue #348: SDK Sandbox Mode ─────────────────────────────────────────────
@@ -784,6 +761,15 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
 
   constructor(senderKey = "GSANDBOX_SENDER") {
     super(senderKey);
+    return new Proxy(this, {
+      get(target, prop, receiver) {
+        if (typeof prop === "string" && !(prop in target)) {
+          return (...args: unknown[]) =>
+            target["recordAndExecute"](prop, () => Promise.resolve(undefined), args);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as SoroStreamSandbox;
   }
 
   /** Configures the unexpected call handling policy. */

@@ -26,6 +26,8 @@ import type { TransactionHistoryOptions, TransactionHistoryPage } from "./horizo
 import { getTransactionHistory, getAddressActivity } from "./horizon.js";
 import { createDefaultRpcTransport } from "./transport.js";
 import type { RpcTransportAdapter } from "./transport.js";
+import { createRpcCompatTransport } from "./rpc-compat.js";
+import type { RpcVersionDetectedPayload } from "./rpc-compat.js";
 import { StreamMonitor } from "./stream-monitor.js";
 import type { StreamMonitorConfig } from "./stream-monitor.js";
 
@@ -272,6 +274,8 @@ export interface SoroStreamClientOptions {
   onNetworkChange?: (network: Network) => void;
   /** Skip contract version compatibility check at construction (issue #209). */
   skipVersionCheck?: boolean;
+  /** TTL for token metadata cache entries in milliseconds. Defaults to 10 minutes. Issue #203. */
+  tokenMetadataTtlMs?: number;
   /**
    * Overrides for the browser globals.
    * Issue #199.
@@ -294,6 +298,27 @@ export interface SoroStreamClientOptions {
    * Issue #271.
    */
   ryowTimeoutMs?: number;
+}
+
+function nativeToStream(raw: Record<string, unknown>): Stream {
+  return {
+    id: String(raw["id"]),
+    sender: String(raw["sender"]),
+    recipient: String(raw["recipient"]),
+    token: String(raw["token"]),
+    deposit: BigInt(raw["deposit"] as number),
+    flowRate: BigInt(raw["flow_rate"] as number),
+    startTime: Number(raw["start_time"]),
+    endTime: Number(raw["end_time"]),
+    lastWithdrawTime: Number(raw["last_withdraw_time"]),
+    status: raw["status"] as Stream["status"],
+    autoRenew: Boolean(raw["auto_renew"]),
+    ...(raw["paused_at"] != null ? { pausedAt: Number(raw["paused_at"]) } : {}),
+    ...(raw["lock_until"] != null ? { lockUntil: Number(raw["lock_until"]) } : {}),
+    toJSON() {
+      return streamToJSON(this) as Record<string, unknown>;
+    },
+  };
 }
 
 function scValToStream(val: xdr.ScVal): Stream {
@@ -354,8 +379,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly breaker: CircuitBreaker | null;
   private contract: Contract;
   private network: Network;
-  private walletAdapter: WalletAdapter;
-  private readonly walletAdapter: WalletAdapter | undefined;
+  private walletAdapter: WalletAdapter | undefined;
   private txTimeoutMs: number;
   private readonly readRetry: RetryOptions;
   private readonly submitRetry: RetryOptions;
@@ -452,7 +476,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly namespaceRegistry = new Map<string, string>();
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
-  private readonly tokenMetadataCache: Cache<string, TokenMetadata> = new Cache<string, TokenMetadata>(300_000);
+  private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
   /** In-flight deduplication: token address → shared promise for the active RPC calls. */
   private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
@@ -552,6 +576,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
     // Issue #271: RYOW timeout (0 = disabled for zero-overhead backward compat)
     this.ryowTimeoutMs = options.ryowTimeoutMs ?? 10_000;
+    // Issue #203: token metadata cache (10-minute default TTL)
+    this.tokenMetadataCache = new Cache<string, TokenMetadata>(options.tokenMetadataTtlMs ?? 600_000);
     // Issue #149: connection pool stats tracker
     this.connectionPool = {
       maxConnections: options.maxConnections ?? 5,
@@ -1583,6 +1609,70 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this._ledgerTimestampCache = null;
   }
 
+  // ── Token metadata cache (Issue #203) ────────────────────────────────────
+
+  /**
+   * Fetches and caches the SAC token metadata (name, symbol, decimals).
+   * Concurrent calls for the same token share a single in-flight request.
+   */
+  async getTokenMetadata(tokenAddress: string): Promise<TokenMetadata> {
+    const cached = this.tokenMetadataCache.get(tokenAddress);
+    if (cached) return cached;
+
+    const inflight = this.tokenMetadataInflight.get(tokenAddress);
+    if (inflight) return inflight;
+
+    const promise = (async (): Promise<TokenMetadata> => {
+      const tokenContract = new Contract(tokenAddress);
+      const [nameRes, symbolRes, decimalsRes] = await Promise.all([
+        this.simulateOp(tokenContract.call("name")),
+        this.simulateOp(tokenContract.call("symbol")),
+        this.simulateOp(tokenContract.call("decimals")),
+      ]);
+      const name = String(scValToNative((nameRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!));
+      const symbol = String(scValToNative((symbolRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!));
+      const decimals = Number(scValToNative((decimalsRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!));
+      const metadata: TokenMetadata = { name, symbol, decimals };
+      this.tokenMetadataCache.set(tokenAddress, metadata);
+      return metadata;
+    })();
+
+    this.tokenMetadataInflight.set(tokenAddress, promise);
+    try {
+      return await promise;
+    } finally {
+      this.tokenMetadataInflight.delete(tokenAddress);
+    }
+  }
+
+  /** Clears token metadata cache entries. Without an argument, clears all. */
+  clearTokenCache(address?: string): void {
+    if (address !== undefined) {
+      this.tokenMetadataCache.delete(address);
+    } else {
+      this.tokenMetadataCache.clear();
+    }
+  }
+
+  // ── Federation address resolution (Issue #216) ────────────────────────────
+
+  /**
+   * Resolves a federation address (e.g. `alice*stellar.org`) to a Stellar
+   * G-address. Returns `null` if the address cannot be resolved (never throws).
+   * Results are cached for the session.
+   */
+  async resolveFederationAddress(address: string): Promise<string | null> {
+    try {
+      const cached = this.federationCache.get(address);
+      if (cached) return cached;
+      const resolved = await resolveFederationAddress(address);
+      this.federationCache.set(address, resolved);
+      return resolved;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Pre-flight validation (Issue 2) ───────────────────────────────────────
 
   private async validateStreamParams(
@@ -1754,7 +1844,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
       const sender = await this.requireWalletAdapter().getPublicKey();
 
-      // Issue #232: Prevent self-streaming (recipient === sender)
+      // Issue #232: Prevent self-streaming (recipient === sender).
+      // Checked before validateStreamParams so SelfStreamError is never
+      // shadowed by an AccountNotFoundError from the on-chain account lookup.
       if (params.recipient === sender) {
         throw new SelfStreamError();
       }
@@ -1770,6 +1862,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         }
       }
 
+      // Full validation (format checks + on-chain account verification) runs
+      // after the self-stream and duplicate checks so those errors always take
+      // priority and are never shadowed by AccountNotFoundError.
       await this.validateStreamParams(params);
 
       if (!params.skipAllowanceCheck) {
@@ -1920,7 +2015,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "withdraw", options?.memo);
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.withdrawn", {
@@ -1984,11 +2079,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         }
       }
 
-      const operations = chunk.map((id) =>
-        this.encoder.withdraw(id, recipient)
-      );
-
       try {
+        const operations = chunk.map((id) =>
+          this.encoder.withdraw(id, recipient)
+        );
         await this.executeBatch(operations);
         for (const id of chunk) {
           successes.push(id);
@@ -2055,7 +2149,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "cancelStream", options?.memo);
 
     // Issue #212: notify subscribers of the custom event bus.
     this.eventBus.emit("stream.cancelled", { streamId: params.streamId, txHash });
@@ -2236,7 +2330,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const delegator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.addDelegate(params.delegate, delegator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "addDelegate", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "addDelegate", options?.memo);
     return { txHash };
   }
 
@@ -2274,7 +2368,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const delegator = await this.requireWalletAdapter().getPublicKey();
     const operation = this.encoder.revokeDelegate(params.delegate, delegator);
     const feeBump = this.resolveFeeBump(options?.feeBump);
-    const txHash = await this.buildAndSubmit(operation, signal, feeBump, "revokeDelegate", options?.memo);
+    const { txHash } = await this.buildAndSubmit(operation, signal, feeBump, "revokeDelegate", options?.memo);
     return { txHash };
   }
 
@@ -2798,8 +2892,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
-    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
-    const cacheKey = `${passphrase}:${streamId}`;
+    const cacheKey = `${networkAtCallTime}:${streamId}`;
 
     // Issue #271: if a prior write has been recorded for this stream, wait for
     // the confirmed ledger before serving data — this guarantees the read is
@@ -2944,8 +3037,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<Stream[] | PaginatedStreams> {
     // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
-    const cacheKey = `${passphrase}:${sender}`;
+    const cacheKey = `${networkAtCallTime}:${sender}`;
     if (!pagination) {
       const cached = this.senderCache.get(cacheKey);
       if (cached) return cached;
@@ -2982,8 +3074,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         : [];
     }
 
-    const raw = scValToNative(returnVal) as xdr.ScVal[];
-    const streams = raw.map(scValToStream);
+    const raw = scValToNative(returnVal) as Record<string, unknown>[];
+    const streams = raw.map(nativeToStream);
 
     // Only cache non-paginated results, and only when the network hasn't
     // switched mid-flight (mirrors the guard in getStream).
@@ -3019,8 +3111,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<Stream[] | PaginatedStreams> {
     // Network-keyed cache for non-paginated calls (issue #230 & #342).
     const networkAtCallTime = this.network;
-    const passphrase = NETWORK_PASSPHRASES[networkAtCallTime] ?? networkAtCallTime;
-    const cacheKey = `${passphrase}:${recipient}`;
+    const cacheKey = `${networkAtCallTime}:${recipient}`;
     if (!pagination) {
       const cached = this.recipientCache.get(cacheKey);
       if (cached) return cached;
@@ -3059,8 +3150,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         : [];
     }
 
-    const raw = scValToNative(returnVal) as xdr.ScVal[];
-    const streams = raw.map(scValToStream);
+    const raw = scValToNative(returnVal) as Record<string, unknown>[];
+    const streams = raw.map(nativeToStream);
 
     // Only cache non-paginated results, and only when the network hasn't
     // switched mid-flight (mirrors the guard in getStream and getStreamsBySender).
@@ -3527,81 +3618,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return () => this.networkChangedCbs.delete(cb);
   }
 
-  // ── Issue #261: Wallet adapter hot-swap ──────────────────────────────────
-
-  /**
-   * Replaces the active signing adapter without re-initialising the client.
-   *
-   * After the swap:
-   * - **All read-side caches are preserved** — previously fetched stream data
-   *   remains available and will continue to serve cache hits until TTL expiry.
-   * - **All active event subscriptions remain active** — no re-subscription
-   *   is required after the swap.
-   * - **Pending transactions** submitted via the old adapter are not affected;
-   *   they continue using the XDR that was already signed before the swap.
-   * - The \`"wallet.adapterChanged"\` event is emitted through the client's event
-   *   bus, and any callbacks registered via {@link onWalletAdapterChanged} are
-   *   called synchronously before this method returns.
-   *
-   * If the new adapter exposes an \`onNetworkChange\` hook, it is registered so
-   * that automatic network-switch handling continues to work.
-   *
-   * @param adapter - The new wallet adapter to use for all future signing.
-   * @returns A promise that resolves once the swap is complete and the
-   *   \`wallet.adapterChanged\` event has been emitted.
-   *
-   * @example
-   * ```ts
-   * // User picks Ledger after starting with Freighter
-   * const ledgerAdapter = createLedgerAdapter({ transport });
-   * await client.setWalletAdapter(ledgerAdapter);
-   * // client is now signing with Ledger; caches and subscriptions intact
-   * ```
-   *
-   * Issue #261.
-   */
-  async setWalletAdapter(adapter: WalletAdapter): Promise<void> {
-    // Resolve public keys before the swap so the event payload is accurate.
-    let previousPublicKey: string | null = null;
-    try {
-      previousPublicKey = await this.walletAdapter.getPublicKey();
-    } catch {
-      // Previous adapter may already be disconnected — tolerate gracefully.
-    }
-
-    let newPublicKey: string | null = null;
-    try {
-      newPublicKey = await adapter.getPublicKey();
-    } catch {
-      // New adapter might not be connected yet — tolerate gracefully.
-    }
-
-    // Replace the signing provider.
-    this.walletAdapter = adapter;
-
-    // Re-wire automatic network-change detection for the new adapter.
-    if (adapter.onNetworkChange) {
-      adapter.onNetworkChange((newNetwork) => {
-        if (newNetwork === this.network) return;
-        this.setNetwork(newNetwork);
-        for (const cb of this.networkChangedCbs) cb(newNetwork);
-      });
-    }
-
-    const payload: WalletAdapterChangedPayload = {
-      previousPublicKey,
-      newPublicKey,
-    };
-
-    // Notify framework-agnostic event-bus listeners.
-    this.eventBus.emit("wallet.adapterChanged", payload);
-
-    // Notify direct subscribers registered via onWalletAdapterChanged().
-    for (const cb of this.walletAdapterChangedCbs) {
-      cb(payload);
-    }
-  }
-
   /**
    * Subscribes to wallet adapter hot-swap notifications.
    *
@@ -4032,7 +4048,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       nativeToScVal(sender, { type: "address" }),
       nativeToScVal(delegateAddress, { type: "address" })
     );
-    const txHash = await this.buildAndSubmit(operation, undefined, undefined, "addDelegate");
+    const { txHash } = await this.buildAndSubmit(operation, undefined, undefined, "addDelegate");
     return { txHash };
   }
 
@@ -4055,7 +4071,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       nativeToScVal(sender, { type: "address" }),
       nativeToScVal(delegateAddress, { type: "address" })
     );
-    const txHash = await this.buildAndSubmit(operation, undefined, undefined, "revokeDelegate");
+    const { txHash } = await this.buildAndSubmit(operation, undefined, undefined, "revokeDelegate");
     return { txHash };
   }
 
@@ -4189,7 +4205,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       const sender = await this.requireWalletAdapter().getPublicKey();
       const operation = this.encoder.addDelegate(sender, delegate);
       const feeBump = this.resolveFeeBump(options?.feeBump);
-      const txHash = await this.buildAndSubmit(
+      const { txHash } = await this.buildAndSubmit(
         operation,
         options?.signal,
         feeBump,
@@ -4252,7 +4268,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       const sender = await this.requireWalletAdapter().getPublicKey();
       const operation = this.encoder.revokeDelegate(sender, delegate);
       const feeBump = this.resolveFeeBump(options?.feeBump);
-      const txHash = await this.buildAndSubmit(
+      const { txHash } = await this.buildAndSubmit(
         operation,
         options?.signal,
         feeBump,

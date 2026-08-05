@@ -77,6 +77,9 @@ export interface RpcTransportAdapter {
   /** Fetch contract events matching the given filters, used by `subscribeEvents`/`watchClaimable`. */
   getEvents(request: RpcTransportGetEventsRequest): Promise<rpc.Api.GetEventsResponse>;
 
+  /** The RPC endpoint URL, mirroring `rpc.Server.serverURL`. Optional for custom transports. */
+  serverURL?: URL;
+
   /**
    * Optional teardown hook. Called from {@link SoroStreamClient.disconnect}.
    * Use it to close sockets, flush buffers, or release any resources opened
@@ -112,6 +115,7 @@ export function createDefaultRpcTransport(
 ): RpcTransportAdapter {
   const server = new rpc.Server(rpcUrl, { allowHttp: false, ...opts });
   return {
+    serverURL: server.serverURL,
     getAccount: (address) => server.getAccount(address),
     getHealth: () => server.getHealth(),
     getLatestLedger: () => server.getLatestLedger(),

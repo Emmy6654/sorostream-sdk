@@ -4,6 +4,7 @@ import type { WalletAdapter, Stream } from "../src/types.js";
 
 const VALID_CONTRACT = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
 const VALID_ACCOUNT = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
+const VALID_RECIPIENT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
 
 function makeMockAdapter(): WalletAdapter {
   return {
@@ -52,7 +53,7 @@ describe("Multi-tenant namespace support", () => {
     (client as any).getLedgerTimestamp = vi.fn().mockResolvedValue(Math.floor(Date.now() / 1000));
     (client as any).validateCliff = vi.fn().mockResolvedValue(undefined);
 
-    (client as any).buildAndSubmit = vi.fn().mockResolvedValue("tx-hash-1");
+    (client as any).buildAndSubmit = vi.fn().mockResolvedValue({ txHash: "tx-hash-1", ledger: 0 });
 
     let streamCounter = 0;
     vi.spyOn(client, "getStreamsBySender").mockImplementation(async () => {
@@ -62,7 +63,7 @@ describe("Multi-tenant namespace support", () => {
 
     // Create a stream with namespace
     const result = await client.createStream({
-      recipient: VALID_ACCOUNT,
+      recipient: VALID_RECIPIENT,
       token: VALID_CONTRACT,
       amount: 100000000n,
       durationSeconds: 3600,
@@ -88,7 +89,7 @@ describe("Multi-tenant namespace support", () => {
     (client as any).getLedgerTimestamp = vi.fn().mockResolvedValue(Math.floor(Date.now() / 1000));
     (client as any).validateCliff = vi.fn().mockResolvedValue(undefined);
 
-    (client as any).buildAndSubmit = vi.fn().mockResolvedValue("tx-hash-1");
+    (client as any).buildAndSubmit = vi.fn().mockResolvedValue({ txHash: "tx-hash-1", ledger: 0 });
 
     let streamCounter = 0;
     vi.spyOn(client, "getStreamsBySender").mockImplementation(async () => {
@@ -98,7 +99,7 @@ describe("Multi-tenant namespace support", () => {
 
     // Create a stream without namespace
     const result = await client.createStream({
-      recipient: VALID_ACCOUNT,
+      recipient: VALID_RECIPIENT,
       token: VALID_CONTRACT,
       amount: 100000000n,
       durationSeconds: 3600,

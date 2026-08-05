@@ -46,6 +46,7 @@ import { createContractEncoder } from "../src/contractEncoders.js";
 import { Contract } from "@stellar/stellar-sdk";
 
 const VALID_ACCOUNT = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
+const VALID_RECIPIENT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
 const VALID_CONTRACT = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
 
 const MOCK_SENDER = Keypair.random().publicKey();
@@ -739,7 +740,7 @@ describe("SoroStreamClient input validation", () => {
   it("rejects createStream with zero duration", async () => {
     await expect(
       client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: 100n,
         durationSeconds: 0,
@@ -930,51 +931,40 @@ describe("SoroStreamClient batchWithdraw", () => {
     vi.spyOn(client, "getClaimable").mockResolvedValue(500n);
   });
 
-  it("calls buildAndSubmitBatch with correct number of operations", async () => {
-    const results = await client.batchWithdraw(["1", "2", "3"], 8);
+  it("returns successes for all streams when executeBatch succeeds", async () => {
+    const result = await client.batchWithdraw(["1", "2", "3"], 8);
 
-    expect(results).toHaveLength(1);
-    expect(results[0]!.txHash).toBe("txhash_batch");
-    expect(results[0]!.streamIds).toEqual(["1", "2", "3"]);
+    expect(result.successes).toEqual(["1", "2", "3"]);
+    expect(result.failures).toEqual([]);
   });
 
   it("splits into multiple batches when count exceeds batchSize", async () => {
     const ids = Array.from({ length: 10 }, (_, i) => String(i + 1));
-    const results = await client.batchWithdraw(ids, 3);
+    const result = await client.batchWithdraw(ids, 3);
 
-    expect(results).toHaveLength(4);
-    expect(results[0]!.streamIds).toHaveLength(3);
-    expect(results[3]!.streamIds).toHaveLength(1);
+    expect(result.successes).toHaveLength(10);
+    expect(result.failures).toEqual([]);
   });
 
-  it("skips zero-claimable streams and reports them in results", async () => {
-    vi.spyOn(client, "getClaimable")
-      .mockResolvedValueOnce(0n)
-      .mockResolvedValueOnce(500n)
-      .mockResolvedValueOnce(0n);
+  it("records failures when executeBatch rejects for a chunk", async () => {
+    vi.spyOn(client, "executeBatch")
+      .mockResolvedValueOnce("tx1")
+      .mockRejectedValueOnce(new Error("batch failed"));
 
-    const results = await client.batchWithdraw(["1", "2", "3"], 8);
+    const result = await client.batchWithdraw(["1", "2", "3", "4"], 2);
 
-    expect(results).toHaveLength(1);
-    expect(results[0]!.streamIds).toEqual(["2"]);
-    expect(results[0]!.amounts).toEqual(["500"]);
-    expect(results[0]!.skipped).toHaveLength(2);
-    expect(results[0]!.skipped).toEqual([
-      { id: "1", reason: "zero_claimable" },
-      { id: "3", reason: "zero_claimable" },
-    ]);
+    expect(result.successes).toEqual(["1", "2"]);
+    expect(result.failures).toHaveLength(2);
+    expect(result.failures[0]!.id).toBe("3");
   });
 
-  it("returns empty batch result when all streams have zero claimable", async () => {
-    vi.spyOn(client, "getClaimable").mockResolvedValue(0n);
+  it("returns all failures when all batches fail", async () => {
+    vi.spyOn(client, "executeBatch").mockRejectedValue(new Error("all failed"));
 
-    const results = await client.batchWithdraw(["1", "2"], 8);
+    const result = await client.batchWithdraw(["1", "2"], 8);
 
-    expect(results).toHaveLength(1);
-    expect(results[0]!.txHash).toBe("");
-    expect(results[0]!.streamIds).toEqual([]);
-    expect(results[0]!.amounts).toEqual([]);
-    expect(results[0]!.skipped).toHaveLength(2);
+    expect(result.successes).toEqual([]);
+    expect(result.failures).toHaveLength(2);
   });
 });
 
@@ -1075,7 +1065,7 @@ describe("createStream pre-flight validation", () => {
   it("rejects invalid token address format", async () => {
     await expect(
       client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: "SHORT",
         amount: 100n,
         durationSeconds: 1000,
@@ -1096,7 +1086,7 @@ describe("createStream pre-flight validation", () => {
 
     await expect(
       client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: 100n,
         durationSeconds: 1000,
@@ -1124,7 +1114,7 @@ describe("createStream pre-flight validation", () => {
 
     await expect(
       client.createStream({
-        recipient: VALID_ACCOUNT,
+        recipient: VALID_RECIPIENT,
         token: VALID_CONTRACT,
         amount: 100n,
         durationSeconds: 1000,
@@ -1594,7 +1584,7 @@ describe("SoroStreamClient setOperator", () => {
       walletAdapter: mockAdapter,
     });
 
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_op");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_op", ledger: 0 });
   });
 
   it("sets an operator and returns tx hash", async () => {
@@ -1633,7 +1623,7 @@ describe("SoroStreamClient operatorCancelStream", () => {
       walletAdapter: mockAdapter,
     });
 
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_op_cancel");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_op_cancel", ledger: 0 });
   });
 
   it("cancels stream as operator and returns tx hash", async () => {
@@ -1659,7 +1649,7 @@ describe("SoroStreamClient operatorTopUp", () => {
       walletAdapter: mockAdapter,
     });
 
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_op_topup");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_op_topup", ledger: 0 });
   });
 
   it("tops up stream as operator and returns tx hash", async () => {
@@ -1693,7 +1683,7 @@ describe("SoroStreamClient updateFlowRate", () => {
       walletAdapter: mockAdapter,
     });
 
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_update");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_update", ledger: 0 });
   });
 
   it("updates flow rate and returns tx hash", async () => {

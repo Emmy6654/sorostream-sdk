@@ -114,7 +114,7 @@ describe("SoroStreamClient event bus integration", () => {
     (client as any).server = {
       getAccount: vi.fn().mockResolvedValue({ accountId: () => TEST_PK }),
     };
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_create");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_create", ledger: 0 });
     vi.spyOn(client, "getStreamsBySender").mockResolvedValue([makeStream({ id: "42" })]);
 
     await client.createStream({
@@ -141,7 +141,7 @@ describe("SoroStreamClient event bus integration", () => {
       eventBus,
     });
 
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_withdraw");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_withdraw", ledger: 0 });
     vi.spyOn(client, "getClaimable").mockResolvedValue(500n);
 
     await client.withdraw({ streamId: "42" });
@@ -161,7 +161,7 @@ describe("SoroStreamClient event bus integration", () => {
       eventBus,
     });
 
-    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue("txhash_cancel");
+    vi.spyOn(client, "buildAndSubmit" as any).mockResolvedValue({ txHash: "txhash_cancel", ledger: 0 });
 
     await client.cancelStream({ streamId: "42" });
 

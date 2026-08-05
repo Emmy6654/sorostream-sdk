@@ -111,6 +111,7 @@ describe("#202 SoroStreamClient network auto-detection", () => {
         contractId: VALID_CONTRACT,
         walletAdapter: makeAdapter(),
         rpcUrl: "https://soroban-testnet.stellar.org",
+        skipPeerCheck: true,
       });
       expect(client.getNetwork()).toBe("mainnet");
       expect(warnSpy).toHaveBeenCalledOnce();
@@ -132,6 +133,7 @@ describe("#202 SoroStreamClient network auto-detection", () => {
         contractId: VALID_CONTRACT,
         walletAdapter: makeAdapter(),
         rpcUrl: "https://soroban-testnet.stellar.org",
+        skipPeerCheck: true,
       });
       expect(warnSpy).not.toHaveBeenCalled();
     } finally {
@@ -150,6 +152,7 @@ describe("#202 SoroStreamClient network auto-detection", () => {
         contractId: VALID_CONTRACT,
         walletAdapter: makeAdapter(),
         rpcUrl: "https://soroban-testnet.stellar.org",
+        skipPeerCheck: true,
       });
       expect(warnSpy).not.toHaveBeenCalled();
     } finally {

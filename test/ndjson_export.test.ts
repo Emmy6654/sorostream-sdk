@@ -13,7 +13,7 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
   const createMockClient = (events: any[]) => {
     const client = new SoroStreamClient({
       network: "testnet",
-      contractId: "CC123456789012345678901234567890123456789012345678901234",
+      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
       walletAdapter: mockWallet,
     });
 
