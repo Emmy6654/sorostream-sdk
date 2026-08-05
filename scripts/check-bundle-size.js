@@ -55,7 +55,9 @@ async function main() {
     try {
       sizeKb = await measure(file);
     } catch (err) {
-      console.error(`Bundle size check failed: could not bundle "${file}". Run "npm run build" first.`);
+      console.error(
+        `Bundle size check failed: could not bundle "${file}". Run "npm run build" first.`,
+      );
       console.error(err.message);
       hasError = true;
       continue;
@@ -63,7 +65,9 @@ async function main() {
     sizes[file] = sizeKb;
     const limitKb = LIMITS_KB[file];
     const withinLimit = sizeKb <= limitKb;
-    console.log(`${file}: ${sizeKb.toFixed(2)} KB gzipped (limit ${limitKb} KB) [${withinLimit ? 'OK' : 'FAIL'}]`);
+    console.log(
+      `${file}: ${sizeKb.toFixed(2)} KB gzipped (limit ${limitKb} KB) [${withinLimit ? 'OK' : 'FAIL'}]`,
+    );
     if (!withinLimit) hasError = true;
   }
 
@@ -71,7 +75,7 @@ async function main() {
     const ratio = sizes['core.mjs'] / sizes['index.mjs'];
     const ok = ratio <= CORE_MUST_BE_SMALLER_THAN_INDEX_RATIO;
     console.log(
-      `core.mjs / index.mjs size ratio: ${ratio.toFixed(3)} (must be <= ${CORE_MUST_BE_SMALLER_THAN_INDEX_RATIO}) [${ok ? 'OK' : 'FAIL'}]`
+      `core.mjs / index.mjs size ratio: ${ratio.toFixed(3)} (must be <= ${CORE_MUST_BE_SMALLER_THAN_INDEX_RATIO}) [${ok ? 'OK' : 'FAIL'}]`,
     );
     if (!ok) hasError = true;
   }

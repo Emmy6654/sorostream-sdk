@@ -1,14 +1,14 @@
-import { describe, it } from "vitest";
-import { RuleTester } from "eslint";
-import rule from "../../src/rules/no-withdraw-without-claimable-check.js";
+import { describe, it } from 'vitest';
+import { RuleTester } from 'eslint';
+import rule from '../../src/rules/no-withdraw-without-claimable-check.js';
 
 const ruleTester = new RuleTester({
-  languageOptions: { ecmaVersion: 2022, sourceType: "module" },
+  languageOptions: { ecmaVersion: 2022, sourceType: 'module' },
 });
 
-describe("no-withdraw-without-claimable-check", () => {
-  it("passes RuleTester valid/invalid cases", () => {
-    ruleTester.run("no-withdraw-without-claimable-check", rule, {
+describe('no-withdraw-without-claimable-check', () => {
+  it('passes RuleTester valid/invalid cases', () => {
+    ruleTester.run('no-withdraw-without-claimable-check', rule, {
       valid: [
         `async function run(client, id) {
           const claimable = await client.getClaimable(id);
@@ -36,14 +36,14 @@ describe("no-withdraw-without-claimable-check", () => {
           code: `async function run(client, id) {
             await client.withdraw(id);
           }`,
-          errors: [{ messageId: "missingCheck" }],
+          errors: [{ messageId: 'missingCheck' }],
         },
         {
           code: `async function run(client, id) {
             await client.cancelStream(id);
             await client.withdraw(id);
           }`,
-          errors: [{ messageId: "missingCheck" }],
+          errors: [{ messageId: 'missingCheck' }],
         },
         {
           // getClaimable is only checked inside a *different* function scope
@@ -55,7 +55,7 @@ describe("no-withdraw-without-claimable-check", () => {
             }
             await client.withdraw(id);
           }`,
-          errors: [{ messageId: "missingCheck" }],
+          errors: [{ messageId: 'missingCheck' }],
         },
       ],
     });

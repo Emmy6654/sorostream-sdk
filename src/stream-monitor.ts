@@ -27,7 +27,7 @@
  * ```
  */
 
-import type { Stream } from "./types.js";
+import type { Stream } from './types.js';
 
 // ── Event payloads ─────────────────────────────────────────────────────────────
 
@@ -60,9 +60,9 @@ export interface StreamLowBalancePayload {
 export interface StreamStatusChangedPayload {
   streamId: string;
   /** Previous status (or `undefined` on the first observation). */
-  previousStatus: Stream["status"] | undefined;
+  previousStatus: Stream['status'] | undefined;
   /** New status. */
-  currentStatus: Stream["status"];
+  currentStatus: Stream['status'];
 }
 
 /** Emitted when the monitor encounters an RPC error for a stream. */
@@ -83,9 +83,7 @@ export interface StreamMonitorEventMap {
 }
 
 type StreamMonitorEventName = keyof StreamMonitorEventMap;
-type Listener<K extends StreamMonitorEventName> = (
-  payload: StreamMonitorEventMap[K],
-) => void;
+type Listener<K extends StreamMonitorEventName> = (payload: StreamMonitorEventMap[K]) => void;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -149,7 +147,7 @@ export class StreamMonitor {
   private readonly fetchers: StreamMonitorFetchers;
 
   /** Last known status per stream, for change detection. */
-  private readonly lastStatus = new Map<string, Stream["status"]>();
+  private readonly lastStatus = new Map<string, Stream['status']>();
   /** Tracks which streams have already fired `streamExpiringSoon` so we don't spam. */
   private readonly expiringSoonFired = new Set<string>();
   /** Tracks which streams have already fired `streamExpired`. */
@@ -173,7 +171,7 @@ export class StreamMonitor {
     this.lowBalanceThreshold = config.lowBalanceThreshold;
 
     if (config.onError) {
-      this.on("monitorError", config.onError);
+      this.on('monitorError', config.onError);
     }
 
     // Start immediately
@@ -258,9 +256,7 @@ export class StreamMonitor {
     if (this.stopped) return;
 
     // Poll all streams concurrently — failure of one must not cancel others.
-    await Promise.allSettled(
-      this.streamIds.map((streamId) => this.pollStream(streamId)),
-    );
+    await Promise.allSettled(this.streamIds.map((streamId) => this.pollStream(streamId)));
   }
 
   private async pollStream(streamId: string): Promise<void> {
@@ -270,7 +266,7 @@ export class StreamMonitor {
     try {
       stream = await this.fetchers.getStream(streamId);
     } catch (error) {
-      this.emit("monitorError", { streamId, error });
+      this.emit('monitorError', { streamId, error });
       return;
     }
 
@@ -281,7 +277,7 @@ export class StreamMonitor {
     const currentStatus = stream.status;
     if (previousStatus !== currentStatus) {
       this.lastStatus.set(streamId, currentStatus);
-      this.emit("streamStatusChanged", { streamId, previousStatus, currentStatus });
+      this.emit('streamStatusChanged', { streamId, previousStatus, currentStatus });
     }
 
     // ── Expiry events ─────────────────────────────────────────────────────────
@@ -289,14 +285,14 @@ export class StreamMonitor {
 
     if (secondsLeft <= 0 && !this.expiredFired.has(streamId)) {
       this.expiredFired.add(streamId);
-      this.emit("streamExpired", { streamId, endTime: stream.endTime });
+      this.emit('streamExpired', { streamId, endTime: stream.endTime });
     } else if (
       secondsLeft > 0 &&
       secondsLeft * 1_000 <= this.expiryWarningMs &&
       !this.expiringSoonFired.has(streamId)
     ) {
       this.expiringSoonFired.add(streamId);
-      this.emit("streamExpiringSoon", { streamId, secondsLeft, endTime: stream.endTime });
+      this.emit('streamExpiringSoon', { streamId, secondsLeft, endTime: stream.endTime });
     }
 
     // ── Low balance ───────────────────────────────────────────────────────────
@@ -305,11 +301,11 @@ export class StreamMonitor {
       try {
         claimable = await this.fetchers.getClaimable(streamId);
       } catch (error) {
-        this.emit("monitorError", { streamId, error });
+        this.emit('monitorError', { streamId, error });
         return;
       }
       if (claimable < this.lowBalanceThreshold) {
-        this.emit("streamLowBalance", {
+        this.emit('streamLowBalance', {
           streamId,
           claimable,
           threshold: this.lowBalanceThreshold,

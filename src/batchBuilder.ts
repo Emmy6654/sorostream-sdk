@@ -1,5 +1,5 @@
-import type { SoroStreamClient } from "./SoroStreamClient.js";
-import type { CreateStreamParams } from "./types.js";
+import type { SoroStreamClient } from './SoroStreamClient.js';
+import type { CreateStreamParams } from './types.js';
 
 /**
  * Fluent builder for constructing and submitting multi-stream batch operations.
@@ -30,8 +30,10 @@ export class BatchBuilder {
    */
   createStream(params: CreateStreamParams): this {
     this.ops.push({
-      label: "createStream",
-      run: async () => { await this.client.createStream(params); },
+      label: 'createStream',
+      run: async () => {
+        await this.client.createStream(params);
+      },
     });
     return this;
   }
@@ -42,8 +44,10 @@ export class BatchBuilder {
    */
   cancelStream(streamId: string): this {
     this.ops.push({
-      label: "cancelStream",
-      run: async () => { await this.client.cancelStream({ streamId }); },
+      label: 'cancelStream',
+      run: async () => {
+        await this.client.cancelStream({ streamId });
+      },
     });
     return this;
   }
@@ -54,8 +58,10 @@ export class BatchBuilder {
    */
   withdraw(streamId: string): this {
     this.ops.push({
-      label: "withdraw",
-      run: async () => { await this.client.withdraw({ streamId }); },
+      label: 'withdraw',
+      run: async () => {
+        await this.client.withdraw({ streamId });
+      },
     });
     return this;
   }
@@ -75,7 +81,7 @@ export class BatchBuilder {
   }> {
     if (this.ops.length === 0) {
       throw new Error(
-        "BatchBuilder: no operations queued — add at least one operation before calling submit()"
+        'BatchBuilder: no operations queued — add at least one operation before calling submit()',
       );
     }
 
@@ -94,6 +100,6 @@ export class BatchBuilder {
       }
     }
 
-    return { txHash: "(see individual operation results)", results };
+    return { txHash: '(see individual operation results)', results };
   }
 }

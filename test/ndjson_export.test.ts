@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
-import { SoroStreamClient } from "../src/SoroStreamClient.js";
-import { Keypair } from "@stellar/stellar-sdk";
+import { describe, it, expect, vi } from 'vitest';
+import { SoroStreamClient } from '../src/SoroStreamClient.js';
+import { Keypair } from '@stellar/stellar-sdk';
 
-describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
+describe('SoroStreamClient.exportStreamHistory (issue #307)', () => {
   const dummyPublicKey = Keypair.random().publicKey();
   const mockWallet = {
     getPublicKey: async () => dummyPublicKey,
@@ -12,13 +12,13 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
 
   const createMockClient = (events: any[]) => {
     const client = new SoroStreamClient({
-      network: "testnet",
-      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      network: 'testnet',
+      contractId: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM',
       walletAdapter: mockWallet,
     });
 
-    vi.spyOn(client as any, "exportStreamHistory").mockImplementation(async (addr, options) => {
-      const format = options?.format ?? "json";
+    vi.spyOn(client as any, 'exportStreamHistory').mockImplementation(async (addr, options) => {
+      const format = options?.format ?? 'json';
       const records = events.map((e) => ({
         type: e.type,
         timestamp: 1600000000000,
@@ -27,12 +27,13 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
         ledger: e.ledger,
       }));
 
-      if (format === "ndjson" && options?.writable) {
+      if (format === 'ndjson' && options?.writable) {
         for (const entry of records) {
-          const line = JSON.stringify(entry, (k, v) => (typeof v === "bigint" ? v.toString() : v)) + "\n";
-          if (typeof options.writable.write === "function") {
+          const line =
+            JSON.stringify(entry, (k, v) => (typeof v === 'bigint' ? v.toString() : v)) + '\n';
+          if (typeof options.writable.write === 'function') {
             options.writable.write(line);
-          } else if (typeof options.writable.getWriter === "function") {
+          } else if (typeof options.writable.getWriter === 'function') {
             const writer = options.writable.getWriter();
             const encoder = new TextEncoder();
             writer.write(encoder.encode(line));
@@ -48,8 +49,8 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
 
   it("exports format: 'json' (default) as an array of history entries", async () => {
     const mockEvents = [
-      { type: "StreamCreated", txHash: "tx1", ledger: 100, data: { deposit: 500n } },
-      { type: "StreamWithdrawn", txHash: "tx2", ledger: 105, data: { amount: 100n } },
+      { type: 'StreamCreated', txHash: 'tx1', ledger: 100, data: { deposit: 500n } },
+      { type: 'StreamWithdrawn', txHash: 'tx2', ledger: 105, data: { amount: 100n } },
     ];
     const client = createMockClient(mockEvents);
 
@@ -60,8 +61,8 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
 
   it("exports format: 'ndjson' line by line to a Node-like writable stream", async () => {
     const mockEvents = [
-      { type: "StreamCreated", txHash: "tx1", ledger: 100, data: { deposit: 500n } },
-      { type: "StreamWithdrawn", txHash: "tx2", ledger: 105, data: { amount: 100n } },
+      { type: 'StreamCreated', txHash: 'tx1', ledger: 100, data: { deposit: 500n } },
+      { type: 'StreamWithdrawn', txHash: 'tx2', ledger: 105, data: { amount: 100n } },
     ];
     const client = createMockClient(mockEvents);
 
@@ -73,7 +74,7 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
     };
 
     const result = await client.exportStreamHistory(dummyPublicKey, {
-      format: "ndjson",
+      format: 'ndjson',
       writable: mockWritable,
     });
 
@@ -83,9 +84,9 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
     expect(lines[1]).toContain('"type":"StreamWithdrawn"');
   });
 
-  it("works with web WritableStream writer interface", async () => {
+  it('works with web WritableStream writer interface', async () => {
     const mockEvents = [
-      { type: "StreamCreated", txHash: "tx1", ledger: 100, data: { deposit: 500n } },
+      { type: 'StreamCreated', txHash: 'tx1', ledger: 100, data: { deposit: 500n } },
     ];
     const client = createMockClient(mockEvents);
 
@@ -98,7 +99,7 @@ describe("SoroStreamClient.exportStreamHistory (issue #307)", () => {
     };
 
     await client.exportStreamHistory(dummyPublicKey, {
-      format: "ndjson",
+      format: 'ndjson',
       writable: mockWebWritable,
     });
 

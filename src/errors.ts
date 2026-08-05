@@ -4,63 +4,63 @@
 export class SoroStreamError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "SoroStreamError";
+    this.name = 'SoroStreamError';
   }
 }
 
 export class InsufficientAmountError extends SoroStreamError {
   constructor(message?: string) {
-    super(message ?? "Amount must be > 0");
-    this.name = "InsufficientAmountError";
+    super(message ?? 'Amount must be > 0');
+    this.name = 'InsufficientAmountError';
   }
 }
 
 export class StreamNotFoundError extends SoroStreamError {
   constructor(streamId: string) {
     super(`Stream not found: ${streamId}`);
-    this.name = "StreamNotFoundError";
+    this.name = 'StreamNotFoundError';
   }
 }
 
 export class StreamNotActiveError extends SoroStreamError {
   constructor(streamId: string) {
     super(`Stream is not active: ${streamId}`);
-    this.name = "StreamNotActiveError";
+    this.name = 'StreamNotActiveError';
   }
 }
 
 export class TransactionFailedError extends SoroStreamError {
   constructor(details: string) {
     super(`Transaction failed: ${details}`);
-    this.name = "TransactionFailedError";
+    this.name = 'TransactionFailedError';
   }
 }
 
 export class InvalidAddressError extends SoroStreamError {
   constructor(address: string) {
     super(`Invalid Stellar address: ${address}`);
-    this.name = "InvalidAddressError";
+    this.name = 'InvalidAddressError';
   }
 }
 
 export class AccountNotFoundError extends SoroStreamError {
   constructor(address: string) {
     super(`Account not found on-chain: ${address}`);
-    this.name = "AccountNotFoundError";
+    this.name = 'AccountNotFoundError';
   }
 }
 
 export class InsufficientBalanceError extends SoroStreamError {
   constructor(message?: string) {
-    super(message ?? "Insufficient token balance or missing trustline");
-    this.name = "InsufficientBalanceError";
+    super(message ?? 'Insufficient token balance or missing trustline');
+    this.name = 'InsufficientBalanceError';
   }
 }
 
 export class ZeroDurationError extends SoroStreamError {
   constructor(message?: string) {
-    super(message ?? "Stream duration must be greater than zero");
-    this.name = "ZeroDurationError";
+    super(message ?? 'Stream duration must be greater than zero');
+    this.name = 'ZeroDurationError';
   }
 }
 
@@ -69,7 +69,7 @@ export interface BulkCreateFailedSlot {
   /** Zero-based index of the row in the original `rows` array. */
   index: number;
   /** The row that failed. */
-  row: import("./types.js").BulkStreamRow;
+  row: import('./types.js').BulkStreamRow;
   /** The underlying error that caused the failure. */
   error: unknown;
 }
@@ -82,18 +82,18 @@ export interface BulkCreateFailedSlot {
  * `failedSlots` describes each row that could not be created.
  */
 export class BulkCreatePartialError extends SoroStreamError {
-  readonly successfulBatches: import("./types.js").BulkCreateBatchResult[];
+  readonly successfulBatches: import('./types.js').BulkCreateBatchResult[];
   readonly failedSlots: BulkCreateFailedSlot[];
 
   constructor(
-    successfulBatches: import("./types.js").BulkCreateBatchResult[],
-    failedSlots: BulkCreateFailedSlot[]
+    successfulBatches: import('./types.js').BulkCreateBatchResult[],
+    failedSlots: BulkCreateFailedSlot[],
   ) {
     const created = successfulBatches.reduce((n, b) => n + b.streamIds.length, 0);
     super(
-      `Bulk create partially failed: ${created} stream(s) created, ${failedSlots.length} slot(s) failed`
+      `Bulk create partially failed: ${created} stream(s) created, ${failedSlots.length} slot(s) failed`,
     );
-    this.name = "BulkCreatePartialError";
+    this.name = 'BulkCreatePartialError';
     this.successfulBatches = successfulBatches;
     this.failedSlots = failedSlots;
   }
@@ -109,9 +109,9 @@ export class InsufficientAllowanceError extends SoroStreamError {
 
   constructor(token: string, required: bigint, current: bigint) {
     super(
-      `Insufficient allowance for token ${token}: required ${required}, current ${current} (shortfall ${required - current})`
+      `Insufficient allowance for token ${token}: required ${required}, current ${current} (shortfall ${required - current})`,
     );
-    this.name = "InsufficientAllowanceError";
+    this.name = 'InsufficientAllowanceError';
     this.token = token;
     this.required = required;
     this.current = current;
@@ -119,16 +119,16 @@ export class InsufficientAllowanceError extends SoroStreamError {
 }
 
 export class DuplicateStreamError extends SoroStreamError {
-  constructor(message = "Duplicate stream detected") {
+  constructor(message = 'Duplicate stream detected') {
     super(message);
-    this.name = "DuplicateStreamError";
+    this.name = 'DuplicateStreamError';
   }
 }
 
 export class SoroStreamMemoError extends SoroStreamError {
   constructor(message: string) {
     super(message);
-    this.name = "SoroStreamMemoError";
+    this.name = 'SoroStreamMemoError';
   }
 }
 
@@ -146,15 +146,15 @@ export class SoroStreamTransportError extends SoroStreamError {
 
   constructor(message: string, cause?: unknown) {
     super(message);
-    this.name = "SoroStreamTransportError";
+    this.name = 'SoroStreamTransportError';
     this.cause = cause;
   }
 }
 
 export class FederationResolutionError extends SoroStreamError {
   constructor(address: string, reason?: string) {
-    super(`Failed to resolve federation address "${address}"${reason ? `: ${reason}` : ""}`);
-    this.name = "FederationResolutionError";
+    super(`Failed to resolve federation address "${address}"${reason ? `: ${reason}` : ''}`);
+    this.name = 'FederationResolutionError';
   }
 }
 
@@ -167,10 +167,8 @@ export class SoroStreamValidationError extends SoroStreamError {
   readonly maxLength: number;
 
   constructor(field: string, actualLength: number, maxLength: number) {
-    super(
-      `Field "${field}" exceeded maximum length: ${actualLength} bytes (max ${maxLength})`
-    );
-    this.name = "SoroStreamValidationError";
+    super(`Field "${field}" exceeded maximum length: ${actualLength} bytes (max ${maxLength})`);
+    this.name = 'SoroStreamValidationError';
     this.field = field;
     this.actualLength = actualLength;
     this.maxLength = maxLength;
@@ -187,12 +185,12 @@ export class SoroStreamValidationError extends SoroStreamError {
 export class NonceNotSupportedError extends SoroStreamError {
   constructor() {
     super(
-      "The nonce field was provided but the deployed contract does not support " +
-        "nonce-based idempotency. Retries will NOT be deduplicated. " +
-        "Upgrade the contract or remove the nonce field. " +
-        "Pass strict: true in WriteOptions to turn this into an error."
+      'The nonce field was provided but the deployed contract does not support ' +
+        'nonce-based idempotency. Retries will NOT be deduplicated. ' +
+        'Upgrade the contract or remove the nonce field. ' +
+        'Pass strict: true in WriteOptions to turn this into an error.',
     );
-    this.name = "NonceNotSupportedError";
+    this.name = 'NonceNotSupportedError';
   }
 }
 
@@ -219,14 +217,12 @@ export class SoroStreamRetryExhaustedError extends SoroStreamError {
     originalError: unknown,
     attemptCount: number,
     attempts: RetryAttempt[],
-    finalResponseBody: string | null
+    finalResponseBody: string | null,
   ) {
     const lastErrMsg =
       originalError instanceof Error ? originalError.message : String(originalError);
-    super(
-      `RPC request failed after ${attemptCount} attempt(s): ${lastErrMsg}`
-    );
-    this.name = "SoroStreamRetryExhaustedError";
+    super(`RPC request failed after ${attemptCount} attempt(s): ${lastErrMsg}`);
+    this.name = 'SoroStreamRetryExhaustedError';
     this.originalError = originalError;
     this.attemptCount = attemptCount;
     this.attempts = attempts;
@@ -251,9 +247,9 @@ export class SoroStreamDependencyError extends SoroStreamError {
   constructor(packageName: string, requiredRange: string, installedVersion: string) {
     super(
       `${packageName}@${installedVersion} is incompatible with this SDK, which requires ${packageName}@${requiredRange}. ` +
-        `Upgrade or downgrade ${packageName} to satisfy ${requiredRange}, or pass { skipPeerCheck: true } to opt out of this check.`
+        `Upgrade or downgrade ${packageName} to satisfy ${requiredRange}, or pass { skipPeerCheck: true } to opt out of this check.`,
     );
-    this.name = "SoroStreamDependencyError";
+    this.name = 'SoroStreamDependencyError';
     this.packageName = packageName;
     this.requiredRange = requiredRange;
     this.installedVersion = installedVersion;
@@ -267,10 +263,10 @@ export class SoroStreamDependencyError extends SoroStreamError {
 export class SelfStreamError extends SoroStreamError {
   constructor() {
     super(
-      "Cannot create a stream where the recipient is the same as the sender. " +
-        "Use a different recipient address."
+      'Cannot create a stream where the recipient is the same as the sender. ' +
+        'Use a different recipient address.',
     );
-    this.name = "SelfStreamError";
+    this.name = 'SelfStreamError';
   }
 }
 
@@ -288,9 +284,9 @@ export class SoroStreamVersionError extends SoroStreamError {
 
   constructor(contractVersion: string, minVersion: string) {
     super(
-      `Contract version ${contractVersion} is incompatible with SDK. Minimum required: ${minVersion}`
+      `Contract version ${contractVersion} is incompatible with SDK. Minimum required: ${minVersion}`,
     );
-    this.name = "SoroStreamVersionError";
+    this.name = 'SoroStreamVersionError';
     this.contractVersion = contractVersion;
     this.minCompatibleVersion = minVersion;
     this.minVersion = minVersion;
@@ -311,10 +307,8 @@ export class RecipientValidationError extends SoroStreamError {
   readonly warnings: string[];
 
   constructor(hasTrustline: boolean, accountExists: boolean, warnings: string[]) {
-    super(
-      `Recipient validation failed: ${warnings.join("; ")}`
-    );
-    this.name = "RecipientValidationError";
+    super(`Recipient validation failed: ${warnings.join('; ')}`);
+    this.name = 'RecipientValidationError';
     this.hasTrustline = hasTrustline;
     this.accountExists = accountExists;
     this.warnings = warnings;

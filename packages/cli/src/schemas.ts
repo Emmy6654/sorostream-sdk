@@ -9,28 +9,28 @@
 // ships compiled `dist/` output and the pre-generated `schemas/` files, not
 // the TypeScript source). Consumers of the SDK should import the static
 // schema files from `@sorostream/sdk/schemas/*` instead of running this.
-import { Command } from "commander";
-import * as fs from "fs";
-import * as path from "path";
+import { Command } from 'commander';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const program = new Command();
 
 program
-  .name("sorostream-generate-schemas")
+  .name('sorostream-generate-schemas')
   .description("Generate JSON Schema files for the SDK's config and stream parameter types")
-  .version("0.1.0");
+  .version('0.1.0');
 
 program
-  .command("generate-schemas", { isDefault: true })
+  .command('generate-schemas', { isDefault: true })
   .description("Regenerate schemas/*.schema.json from the SDK's TypeScript types")
-  .option("--out-dir <dir>", "Output directory (default: <sdk repo root>/schemas)")
+  .option('--out-dir <dir>', 'Output directory (default: <sdk repo root>/schemas)')
   .action(async (opts: { outDir?: string }) => {
     const generatorPath = findGeneratorScript();
     if (!generatorPath) {
       console.error(
-        "generate-schemas requires running from within a checkout of the sorostream-sdk " +
+        'generate-schemas requires running from within a checkout of the sorostream-sdk ' +
           "repository — it reflects src/types.ts, which isn't published to npm. " +
-          "Import the pre-generated schemas from @sorostream/sdk/schemas/* instead."
+          'Import the pre-generated schemas from @sorostream/sdk/schemas/* instead.',
       );
       process.exit(1);
     }
@@ -41,7 +41,7 @@ program
     };
     const outDir = opts.outDir
       ? path.resolve(opts.outDir)
-      : path.join(path.dirname(generatorPath), "..", "schemas");
+      : path.join(path.dirname(generatorPath), '..', 'schemas');
 
     const results = generateSchemas(outDir);
     for (const [typeName, { outputPath }] of Object.entries(results)) {
@@ -58,7 +58,7 @@ program
 function findGeneratorScript(): string | null {
   let dir = __dirname;
   for (let i = 0; i < 5; i++) {
-    const candidate = path.join(dir, "scripts", "generate-schemas.js");
+    const candidate = path.join(dir, 'scripts', 'generate-schemas.js');
     if (fs.existsSync(candidate)) return candidate;
     dir = path.dirname(dir);
   }

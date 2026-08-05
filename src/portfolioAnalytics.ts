@@ -1,7 +1,7 @@
 // ── Issue #336: Portfolio analytics ──────────────────────────────────────────
 
-import type { Stream, PortfolioStats } from "./types.js";
-import { claimableNow, isExpired } from "./utils.js";
+import type { Stream, PortfolioStats } from './types.js';
+import { claimableNow, isExpired } from './utils.js';
 
 /** Number of seconds in a month (30 days) for monthly outflow/inflow calcs. */
 const SECONDS_PER_MONTH = 30 * 24 * 60 * 60;
@@ -11,7 +11,7 @@ const SECONDS_PER_MONTH = 30 * 24 * 60 * 60;
  * not yet expired.
  */
 function isActiveNonExpired(s: Stream): boolean {
-  if (s.status === "Cancelled" || s.status === "Completed") return false;
+  if (s.status === 'Cancelled' || s.status === 'Completed') return false;
   return !isExpired(s);
 }
 

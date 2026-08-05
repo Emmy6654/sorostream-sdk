@@ -1,6 +1,12 @@
-import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
-import type { StreamEvent, StreamEventType, StreamSubscription, BatchingOptions, BatchMetrics } from "./types.js";
-import type { RpcTransportAdapter } from "./transport.js";
+import { rpc, scValToNative, xdr } from '@stellar/stellar-sdk';
+import type {
+  StreamEvent,
+  StreamEventType,
+  StreamSubscription,
+  BatchingOptions,
+  BatchMetrics,
+} from './types.js';
+import type { RpcTransportAdapter } from './transport.js';
 
 /**
  * Retry policy for automatic event poller reconnection on unexpected failures.
@@ -30,14 +36,14 @@ interface BatchEntry {
 }
 
 const STREAM_EVENT_NAMES = new Set([
-  "StreamCreated",
-  "StreamWithdrawn",
-  "StreamCancelled",
-  "StreamCompleted",
-  "StreamToppedUp",
-  "StreamPaused",
-  "StreamResumed",
-  "StreamTransferred",
+  'StreamCreated',
+  'StreamWithdrawn',
+  'StreamCancelled',
+  'StreamCompleted',
+  'StreamToppedUp',
+  'StreamPaused',
+  'StreamResumed',
+  'StreamTransferred',
 ]);
 
 function isStreamEventType(value: string): value is StreamEventType {
@@ -48,10 +54,10 @@ function parseStreamEvent(raw: rpc.Api.EventResponse): StreamEvent | null {
   if (!raw.inSuccessfulContractCall) return null;
 
   const rawType = raw.topic.length > 0 ? scValToNative(raw.topic[0]!) : null;
-  if (typeof rawType !== "string" || !isStreamEventType(rawType)) return null;
+  if (typeof rawType !== 'string' || !isStreamEventType(rawType)) return null;
 
   const rawStreamId = raw.topic.length > 1 ? scValToNative(raw.topic[1]!) : null;
-  const streamId = rawStreamId != null ? String(rawStreamId) : "0";
+  const streamId = rawStreamId != null ? String(rawStreamId) : '0';
 
   const data = raw.value ? (scValToNative(raw.value) as Record<string, unknown>) : {};
 
@@ -123,10 +129,7 @@ export class EventPoller {
     this.maxBatchDelayMs = options?.batchingOptions?.maxBatchDelayMs ?? 10;
   }
 
-  subscribe(
-    key: string,
-    entry: PollerEntry
-  ): StreamSubscription {
+  subscribe(key: string, entry: PollerEntry): StreamSubscription {
     this.entries.set(key, entry);
     if (!this.intervalId) {
       this.startPolling();
@@ -147,7 +150,7 @@ export class EventPoller {
         startLedger: this.startLedger ?? undefined,
         filters: [
           {
-            type: "contract",
+            type: 'contract',
             contractIds: [this.contractId],
           },
         ],
@@ -207,7 +210,7 @@ export class EventPoller {
       // Full jitter: delay = random(0, min(maxDelay, base * 2^attempt))
       const cap = Math.min(
         this.retryMaxDelayMs,
-        this.retryBaseDelayMs * 2 ** (this.consecutiveFailures - 1)
+        this.retryBaseDelayMs * 2 ** (this.consecutiveFailures - 1),
       );
       const delayMs = Math.floor(Math.random() * cap);
 

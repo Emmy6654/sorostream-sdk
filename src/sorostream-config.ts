@@ -36,8 +36,8 @@
  * \`\`\`
  */
 
-import path from "node:path";
-import type { Network } from "./types.js";
+import path from 'node:path';
+import type { Network } from './types.js';
 
 // ── Config type ───────────────────────────────────────────────────────────────
 
@@ -116,17 +116,17 @@ export interface SorostreamConfig {
    *
    * @default "warn"
    */
-  logLevel?: "silent" | "error" | "warn" | "info" | "debug";
+  logLevel?: 'silent' | 'error' | 'warn' | 'info' | 'debug';
 }
 
 // ── Config loader ─────────────────────────────────────────────────────────────
 
 /** Candidate file names the loader searches for, in priority order. */
 const CONFIG_FILE_NAMES = [
-  "sorostream.config.ts",
-  "sorostream.config.js",
-  "sorostream.config.mjs",
-  "sorostream.config.cjs",
+  'sorostream.config.ts',
+  'sorostream.config.js',
+  'sorostream.config.mjs',
+  'sorostream.config.cjs',
 ] as const;
 
 /**
@@ -161,10 +161,8 @@ const CONFIG_FILE_NAMES = [
  * const client = new SoroStreamClient(options);
  * \`\`\`
  */
-export async function loadSorostreamConfig(
-  cwd?: string
-): Promise<SorostreamConfig | null> {
-  const root = cwd ?? (typeof process !== "undefined" ? process.cwd() : ".");
+export async function loadSorostreamConfig(cwd?: string): Promise<SorostreamConfig | null> {
+  const root = cwd ?? (typeof process !== 'undefined' ? process.cwd() : '.');
 
   for (const fileName of CONFIG_FILE_NAMES) {
     const filePath = path.join(root, fileName);
@@ -172,19 +170,17 @@ export async function loadSorostreamConfig(
       // Dynamic import works for both CJS (require-compatible) and ESM.
       // The file:// prefix is required on Windows for absolute paths.
       const url =
-        typeof process !== "undefined" && process.platform === "win32"
-          ? `file:///${filePath.replace(/\\/g, "/")}`
+        typeof process !== 'undefined' && process.platform === 'win32'
+          ? `file:///${filePath.replace(/\\/g, '/')}`
           : filePath;
 
-      const mod = (await import(url)) as
-        | { default?: SorostreamConfig }
-        | SorostreamConfig;
+      const mod = (await import(url)) as { default?: SorostreamConfig } | SorostreamConfig;
 
       // Accept both `export default config` and `module.exports = config`.
       const config: SorostreamConfig =
         (mod as { default?: SorostreamConfig }).default ?? (mod as SorostreamConfig);
 
-      if (config && typeof config === "object") {
+      if (config && typeof config === 'object') {
         return config;
       }
     } catch {
@@ -235,7 +231,7 @@ export function mergeSorostreamConfig<
       ? { network: fileConfig.network }
       : {}),
     ...(fileConfig.contractId !== undefined &&
-    (runtimeOptions.contractId === undefined || runtimeOptions.contractId === "")
+    (runtimeOptions.contractId === undefined || runtimeOptions.contractId === '')
       ? { contractId: fileConfig.contractId }
       : {}),
     ...(fileConfig.rpcUrl !== undefined && runtimeOptions.rpcUrl === undefined

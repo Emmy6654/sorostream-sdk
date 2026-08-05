@@ -12,8 +12,8 @@
  * Issue #269.
  */
 
-import { scValToNative, xdr } from "@stellar/stellar-sdk";
-import type { rpc } from "@stellar/stellar-sdk";
+import { scValToNative, xdr } from '@stellar/stellar-sdk';
+import type { rpc } from '@stellar/stellar-sdk';
 
 // ── Payload interfaces ────────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ import type { rpc } from "@stellar/stellar-sdk";
  */
 export interface StreamCreatedPayload {
   /** Discriminant — always `"StreamCreated"`. */
-  type: "StreamCreated";
+  type: 'StreamCreated';
   /** The newly created stream ID (string representation of the u64 contract ID). */
   streamId: string;
   /** Stellar address of the stream creator / payer. */
@@ -56,7 +56,7 @@ export interface StreamCreatedPayload {
  */
 export interface WithdrawalPayload {
   /** Discriminant — always `"StreamWithdrawn"`. */
-  type: "StreamWithdrawn";
+  type: 'StreamWithdrawn';
   /** The stream that was withdrawn from. */
   streamId: string;
   /** Stellar address of the recipient who triggered the withdrawal. */
@@ -81,7 +81,7 @@ export interface WithdrawalPayload {
  */
 export interface CancelledStreamPayload {
   /** Discriminant — always `"StreamCancelled"`. */
-  type: "StreamCancelled";
+  type: 'StreamCancelled';
   /** The stream that was cancelled. */
   streamId: string;
   /** Stellar address of the sender who cancelled the stream. */
@@ -104,7 +104,7 @@ export interface CancelledStreamPayload {
  */
 export interface StreamCompletedPayload {
   /** Discriminant — always `"StreamCompleted"`. */
-  type: "StreamCompleted";
+  type: 'StreamCompleted';
   /** The stream that completed. */
   streamId: string;
   /** Stellar address of the stream sender. */
@@ -127,7 +127,7 @@ export interface StreamCompletedPayload {
  */
 export interface StreamToppedUpPayload {
   /** Discriminant — always `"StreamToppedUp"`. */
-  type: "StreamToppedUp";
+  type: 'StreamToppedUp';
   /** The stream that was topped up. */
   streamId: string;
   /** Additional amount deposited in stroops. */
@@ -150,7 +150,7 @@ export interface StreamToppedUpPayload {
  */
 export interface StreamPausedPayload {
   /** Discriminant — always `"StreamPaused"`. */
-  type: "StreamPaused";
+  type: 'StreamPaused';
   /** The stream that was paused. */
   streamId: string;
   /** Stellar address of the sender who paused the stream. */
@@ -173,7 +173,7 @@ export interface StreamPausedPayload {
  */
 export interface StreamResumedPayload {
   /** Discriminant — always `"StreamResumed"`. */
-  type: "StreamResumed";
+  type: 'StreamResumed';
   /** The stream that was resumed. */
   streamId: string;
   /** Stellar address of the sender who resumed the stream. */
@@ -195,7 +195,7 @@ export interface StreamResumedPayload {
  */
 export interface StreamTransferredPayload {
   /** Discriminant — always `"StreamTransferred"`. */
-  type: "StreamTransferred";
+  type: 'StreamTransferred';
   /** The stream that was transferred. */
   streamId: string;
   /** The previous recipient address. */
@@ -225,7 +225,7 @@ export interface StreamTransferredPayload {
  */
 export interface UnknownEventPayload {
   /** Discriminant — always `"UnknownEvent"`. */
-  type: "UnknownEvent";
+  type: 'UnknownEvent';
   /** The raw event type string extracted from the topic, if any. */
   rawType: string | null;
   /** The raw deserialized event data, if parseable. */
@@ -267,21 +267,21 @@ function safeNative(val: xdr.ScVal | undefined): unknown {
 }
 
 function toBigInt(v: unknown): bigint {
-  if (typeof v === "bigint") return v;
-  if (typeof v === "number") return BigInt(Math.round(v));
-  if (typeof v === "string") return BigInt(v);
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') return BigInt(Math.round(v));
+  if (typeof v === 'string') return BigInt(v);
   return 0n;
 }
 
 function toNumber(v: unknown): number {
-  if (typeof v === "number") return v;
-  if (typeof v === "bigint") return Number(v);
-  if (typeof v === "string") return Number(v);
+  if (typeof v === 'number') return v;
+  if (typeof v === 'bigint') return Number(v);
+  if (typeof v === 'string') return Number(v);
   return 0;
 }
 
 function toString(v: unknown): string {
-  if (v === null || v === undefined) return "";
+  if (v === null || v === undefined) return '';
   return String(v);
 }
 
@@ -326,9 +326,7 @@ function dataRecord(raw: rpc.Api.EventResponse): Record<string, unknown> {
  * }
  * ```
  */
-export function parseContractEvent(
-  raw: rpc.Api.EventResponse
-): ContractEventPayload {
+export function parseContractEvent(raw: rpc.Api.EventResponse): ContractEventPayload {
   const timestamp = new Date(raw.ledgerClosedAt).getTime();
   const meta = { txHash: raw.txHash, ledger: raw.ledger, timestamp };
 
@@ -342,106 +340,106 @@ export function parseContractEvent(
   }
 
   // Extract stream ID from topic[1]
-  let streamId = "0";
+  let streamId = '0';
   try {
     const idVal = raw.topic[1] ? scValToNative(raw.topic[1]) : null;
-    streamId = idVal !== null && idVal !== undefined ? String(idVal) : "0";
+    streamId = idVal !== null && idVal !== undefined ? String(idVal) : '0';
   } catch {
-    streamId = "0";
+    streamId = '0';
   }
 
   const data = dataRecord(raw);
 
   switch (rawType) {
-    case "StreamCreated": {
+    case 'StreamCreated': {
       return {
-        type: "StreamCreated",
+        type: 'StreamCreated',
         streamId,
-        sender: toString(data["sender"]),
-        recipient: toString(data["recipient"]),
-        token: toString(data["token"]),
-        deposit: toBigInt(data["deposit"]),
-        flowRate: toBigInt(data["flow_rate"]),
-        startTime: toNumber(data["start_time"]),
-        endTime: toNumber(data["end_time"]),
+        sender: toString(data['sender']),
+        recipient: toString(data['recipient']),
+        token: toString(data['token']),
+        deposit: toBigInt(data['deposit']),
+        flowRate: toBigInt(data['flow_rate']),
+        startTime: toNumber(data['start_time']),
+        endTime: toNumber(data['end_time']),
         ...meta,
       } satisfies StreamCreatedPayload;
     }
 
-    case "StreamWithdrawn": {
+    case 'StreamWithdrawn': {
       return {
-        type: "StreamWithdrawn",
+        type: 'StreamWithdrawn',
         streamId,
-        recipient: toString(data["recipient"]),
-        amount: toBigInt(data["amount"]),
-        withdrawTime: toNumber(data["withdraw_time"]),
+        recipient: toString(data['recipient']),
+        amount: toBigInt(data['amount']),
+        withdrawTime: toNumber(data['withdraw_time']),
         ...meta,
       } satisfies WithdrawalPayload;
     }
 
-    case "StreamCancelled": {
+    case 'StreamCancelled': {
       return {
-        type: "StreamCancelled",
+        type: 'StreamCancelled',
         streamId,
-        sender: toString(data["sender"]),
-        refunded: toBigInt(data["refunded"]),
+        sender: toString(data['sender']),
+        refunded: toBigInt(data['refunded']),
         ...meta,
       } satisfies CancelledStreamPayload;
     }
 
-    case "StreamCompleted": {
+    case 'StreamCompleted': {
       return {
-        type: "StreamCompleted",
+        type: 'StreamCompleted',
         streamId,
-        sender: toString(data["sender"]),
-        recipient: toString(data["recipient"]),
+        sender: toString(data['sender']),
+        recipient: toString(data['recipient']),
         ...meta,
       } satisfies StreamCompletedPayload;
     }
 
-    case "StreamToppedUp": {
+    case 'StreamToppedUp': {
       return {
-        type: "StreamToppedUp",
+        type: 'StreamToppedUp',
         streamId,
-        addedAmount: toBigInt(data["added_amount"]),
-        newEndTime: toNumber(data["new_end_time"]),
+        addedAmount: toBigInt(data['added_amount']),
+        newEndTime: toNumber(data['new_end_time']),
         ...meta,
       } satisfies StreamToppedUpPayload;
     }
 
-    case "StreamPaused": {
+    case 'StreamPaused': {
       return {
-        type: "StreamPaused",
+        type: 'StreamPaused',
         streamId,
-        sender: toString(data["sender"]),
-        pausedAt: toNumber(data["paused_at"]),
+        sender: toString(data['sender']),
+        pausedAt: toNumber(data['paused_at']),
         ...meta,
       } satisfies StreamPausedPayload;
     }
 
-    case "StreamResumed": {
+    case 'StreamResumed': {
       return {
-        type: "StreamResumed",
+        type: 'StreamResumed',
         streamId,
-        sender: toString(data["sender"]),
-        resumedAt: toNumber(data["resumed_at"]),
+        sender: toString(data['sender']),
+        resumedAt: toNumber(data['resumed_at']),
         ...meta,
       } satisfies StreamResumedPayload;
     }
 
-    case "StreamTransferred": {
+    case 'StreamTransferred': {
       return {
-        type: "StreamTransferred",
+        type: 'StreamTransferred',
         streamId,
-        oldRecipient: toString(data["old_recipient"]),
-        newRecipient: toString(data["new_recipient"]),
+        oldRecipient: toString(data['old_recipient']),
+        newRecipient: toString(data['new_recipient']),
         ...meta,
       } satisfies StreamTransferredPayload;
     }
 
     default: {
       return {
-        type: "UnknownEvent",
+        type: 'UnknownEvent',
         rawType,
         rawData: data,
         ...meta,

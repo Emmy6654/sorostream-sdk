@@ -1,4 +1,4 @@
-import type { SoroStreamAdapters, StorageAdapter } from "@sorostream/sdk";
+import type { SoroStreamAdapters, StorageAdapter } from '@sorostream/sdk';
 
 /**
  * Structural subset of `@react-native-async-storage/async-storage`'s default

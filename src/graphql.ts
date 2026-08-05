@@ -10,7 +10,7 @@
  *
  * Issue #214.
  */
-import type { Stream } from "./types.js";
+import type { Stream } from './types.js';
 
 /**
  * GraphQL SDL type definitions for a SoroStream `Stream`, including the
@@ -66,7 +66,7 @@ export const StreamTypeDefs = `
  * `bigint` fields are returned as-is and converted to strings on the wire by
  * {@link bigIntScalarConfig}.
  */
-export type StreamGraphQLResult = Omit<Stream, "toJSON">;
+export type StreamGraphQLResult = Omit<Stream, 'toJSON'>;
 
 /**
  * Converts an SDK {@link Stream} into the shape a GraphQL resolver should
@@ -85,23 +85,23 @@ export function toStreamResolverResult(stream: Stream): StreamGraphQLResult {
  * native arbitrary-precision integer type.
  */
 export const bigIntScalarConfig = {
-  name: "BigInt",
+  name: 'BigInt',
   description:
-    "Arbitrary-precision integer, serialized as a string. Used for stream amounts in stroops (deposit, flowRate).",
+    'Arbitrary-precision integer, serialized as a string. Used for stream amounts in stroops (deposit, flowRate).',
   serialize(value: unknown): string {
-    if (typeof value === "bigint" || typeof value === "number" || typeof value === "string") {
+    if (typeof value === 'bigint' || typeof value === 'number' || typeof value === 'string') {
       return BigInt(value).toString();
     }
     throw new TypeError(`BigInt scalar cannot serialize value of type ${typeof value}`);
   },
   parseValue(value: unknown): bigint {
-    if (typeof value === "bigint" || typeof value === "number" || typeof value === "string") {
+    if (typeof value === 'bigint' || typeof value === 'number' || typeof value === 'string') {
       return BigInt(value);
     }
     throw new TypeError(`BigInt scalar cannot parse value of type ${typeof value}`);
   },
   parseLiteral(ast: { kind: string; value: string }): bigint {
-    if (ast.kind === "StringValue" || ast.kind === "IntValue") {
+    if (ast.kind === 'StringValue' || ast.kind === 'IntValue') {
       return BigInt(ast.value);
     }
     throw new TypeError(`BigInt scalar cannot parse literal of kind ${ast.kind}`);

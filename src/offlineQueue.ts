@@ -130,7 +130,7 @@ export class OfflineWriteQueue {
     if (this.queue.length >= this.options.maxQueueSize) {
       console.warn(
         `[SoroStream SDK] Offline queue is full (${this.options.maxQueueSize}). ` +
-        `Operation "${operation}" was dropped.`
+          `Operation "${operation}" was dropped.`,
       );
       return false;
     }
@@ -182,8 +182,8 @@ export class OfflineWriteQueue {
     const event: QueueDrainedEvent = {
       results,
       totalOperations: results.length,
-      successful: results.filter(r => r.success).length,
-      failed: results.filter(r => !r.success).length,
+      successful: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
     };
 
     this.eventBus.emit('queueDrained', event);

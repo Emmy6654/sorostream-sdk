@@ -1,6 +1,6 @@
-import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from "./errors.js";
-import { getDefaultWebSocketFactory } from "./adapters.js";
-import type { FetchAdapter, WebSocketFactory } from "./adapters.js";
+import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from './errors.js';
+import { getDefaultWebSocketFactory } from './adapters.js';
+import type { FetchAdapter, WebSocketFactory } from './adapters.js';
 import type {
   PriceFeedAdapter,
   Stream,
@@ -25,7 +25,7 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
-} from "./types.js";
+} from './types.js';
 
 /** A single point in a stream's payout forecast. */
 export interface PayoutSchedulePoint {
@@ -43,9 +43,9 @@ const STROOP_FACTOR = 10_000_000n;
  * @param decimals - Number of decimal places the token uses (default 7 for SAC).
  */
 export function toStroops(amount: string, decimals: number = 7): bigint {
-  const [whole = "0", decimal = ""] = amount.split(".");
+  const [whole = '0', decimal = ''] = amount.split('.');
   const factor = 10n ** BigInt(decimals);
-  const paddedDecimal = decimal.padEnd(decimals, "0").slice(0, decimals);
+  const paddedDecimal = decimal.padEnd(decimals, '0').slice(0, decimals);
   return BigInt(whole) * factor + BigInt(paddedDecimal);
 }
 
@@ -63,14 +63,14 @@ export function toStroops(amount: string, decimals: number = 7): bigint {
 export function formatUSDC(
   stroops: bigint,
   decimals: number = 7,
-  options?: FormatUSDCOptions
+  options?: FormatUSDCOptions,
 ): string {
   const factor = 10n ** BigInt(decimals);
   const whole = stroops / factor;
   const remainder = stroops % factor;
 
   if (!options) {
-    return `${whole}.${remainder.toString().padStart(decimals, "0")}`;
+    return `${whole}.${remainder.toString().padStart(decimals, '0')}`;
   }
 
   // Build a numeric value from the bigint parts to avoid precision loss.
@@ -107,7 +107,7 @@ export async function toFiatDisplay(
   decimals: number,
   priceFeed: PriceFeedAdapter,
   tokenAddress: string,
-  displayCurrency = "usd"
+  displayCurrency = 'usd',
 ): Promise<{ tokenAmount: string; fiatAmount: string }> {
   const tokenAmount = formatToken(stroops, decimals);
   const pricePerUnit = await priceFeed.getPrice(tokenAddress, displayCurrency);
@@ -138,8 +138,8 @@ export async function toFiatDisplay(
  */
 export function detectNetworkFromRpcUrl(rpcUrl: string): Network | undefined {
   const lower = rpcUrl.toLowerCase();
-  if (lower.includes("testnet")) return "testnet";
-  if (lower.includes("mainnet") || lower.includes("horizon.stellar.org")) return "mainnet";
+  if (lower.includes('testnet')) return 'testnet';
+  if (lower.includes('mainnet') || lower.includes('horizon.stellar.org')) return 'mainnet';
   return undefined;
 }
 
@@ -147,16 +147,14 @@ export function detectNetworkFromRpcUrl(rpcUrl: string): Network | undefined {
  * Checks whether a string looks like a valid Stellar address (account or contract).
  */
 export function isValidStellarAddress(address: string): boolean {
-  return (
-    typeof address === "string" && /^[GC][A-Z2-7]{55}$/.test(address)
-  );
+  return typeof address === 'string' && /^[GC][A-Z2-7]{55}$/.test(address);
 }
 
 /**
  * Returns true when the string is a Stellar federation address (user*domain.com format).
  */
 export function isFederationAddress(address: string): boolean {
-  return typeof address === "string" && /^[^*\s]+\*[^*\s]+\.[^*\s]+$/.test(address);
+  return typeof address === 'string' && /^[^*\s]+\*[^*\s]+\.[^*\s]+$/.test(address);
 }
 
 /**
@@ -166,15 +164,15 @@ export function isFederationAddress(address: string): boolean {
  */
 export async function resolveFederationAddress(
   federationAddress: string,
-  fetchImpl: FetchAdapter = fetch
+  fetchImpl: FetchAdapter = fetch,
 ): Promise<string> {
-  const starIdx = federationAddress.indexOf("*");
+  const starIdx = federationAddress.indexOf('*');
   if (starIdx === -1) {
-    throw new FederationResolutionError(federationAddress, "invalid federation address format");
+    throw new FederationResolutionError(federationAddress, 'invalid federation address format');
   }
   const domain = federationAddress.slice(starIdx + 1);
   if (!domain) {
-    throw new FederationResolutionError(federationAddress, "missing domain");
+    throw new FederationResolutionError(federationAddress, 'missing domain');
   }
 
   let federationServer: string;
@@ -183,30 +181,30 @@ export async function resolveFederationAddress(
     if (!tomlRes.ok) throw new Error(`HTTP ${tomlRes.status}`);
     const tomlText = await tomlRes.text();
     const match = /FEDERATION_SERVER\s*=\s*"([^"]+)"/.exec(tomlText);
-    if (!match?.[1]) throw new Error("FEDERATION_SERVER not found in stellar.toml");
+    if (!match?.[1]) throw new Error('FEDERATION_SERVER not found in stellar.toml');
     federationServer = match[1];
   } catch (err) {
     throw new FederationResolutionError(
       federationAddress,
-      `stellar.toml unreachable: ${String(err)}`
+      `stellar.toml unreachable: ${String(err)}`,
     );
   }
 
   try {
     const fedRes = await fetchImpl(
-      `${federationServer}?q=${encodeURIComponent(federationAddress)}&type=name`
+      `${federationServer}?q=${encodeURIComponent(federationAddress)}&type=name`,
     );
     if (!fedRes.ok) throw new Error(`HTTP ${fedRes.status}`);
     const json = (await fedRes.json()) as { account_id?: string };
     const resolved = json.account_id;
     if (!resolved || !isValidStellarAddress(resolved)) {
-      throw new Error("no valid account_id in federation response");
+      throw new Error('no valid account_id in federation response');
     }
     return resolved;
   } catch (err) {
     throw new FederationResolutionError(
       federationAddress,
-      `federation server query failed: ${String(err)}`
+      `federation server query failed: ${String(err)}`,
     );
   }
 }
@@ -225,12 +223,9 @@ export async function resolveFederationAddress(
  * // rate * duration <= totalAmount is always satisfied
  * ```
  */
-export function calculateFlowRate(
-  totalAmount: bigint,
-  durationSeconds: number
-): bigint {
-  if (totalAmount <= 0n) throw new SoroStreamError("totalAmount must be > 0");
-  if (durationSeconds <= 0) throw new SoroStreamError("durationSeconds must be > 0");
+export function calculateFlowRate(totalAmount: bigint, durationSeconds: number): bigint {
+  if (totalAmount <= 0n) throw new SoroStreamError('totalAmount must be > 0');
+  if (durationSeconds <= 0) throw new SoroStreamError('durationSeconds must be > 0');
   return totalAmount / BigInt(durationSeconds);
 }
 
@@ -264,7 +259,7 @@ export function timeUntilStreamEnd(stream: Stream): number {
  * @param stream - The stream object.
  */
 export function claimableNow(stream: Stream): bigint {
-  if (stream.status !== "Active") return 0n;
+  if (stream.status !== 'Active') return 0n;
   const now = Math.floor(Date.now() / 1000);
   const effectiveNow = Math.min(now, stream.endTime);
   const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
@@ -291,7 +286,7 @@ export function claimableNow(stream: Stream): bigint {
 export function calculateVestingSchedule(
   stream: Stream,
   cliffSeconds: number,
-  now?: number
+  now?: number,
 ): VestingScheduleResult {
   const currentTime = now ?? Math.floor(Date.now() / 1000);
   const cliffEndTime = stream.startTime + cliffSeconds;
@@ -315,8 +310,7 @@ export function calculateVestingSchedule(
     // up to min(now, endTime).
     const minNowBig = BigInt(Math.min(currentTime, stream.endTime));
     const vestingStartBig = BigInt(Math.max(cliffEndTime, stream.startTime));
-    const elapsedBig =
-      minNowBig > vestingStartBig ? minNowBig - vestingStartBig : 0n;
+    const elapsedBig = minNowBig > vestingStartBig ? minNowBig - vestingStartBig : 0n;
     effectiveClaimable = stream.flowRate * (cliffSecondsBig + elapsedBig);
   }
 
@@ -381,7 +375,7 @@ export function calculateVestingSchedule(
  * or `null` when compression is disabled (the default).
  */
 function resolveCompression(
-  compression: boolean | CompressionOptions | undefined
+  compression: boolean | CompressionOptions | undefined,
 ): CompressionOptions | null {
   if (!compression) return null;
   if (compression === true) return { level: 6, threshold: 128 };
@@ -394,7 +388,7 @@ export function watchClaimableWs(
   onClaimable: (claimable: bigint) => void,
   compression?: boolean | CompressionOptions,
   webSocketFactory?: WebSocketFactory,
-  reconnectOptions?: { reconnect?: boolean; backoffMs?: number; maxAttempts?: number }
+  reconnectOptions?: { reconnect?: boolean; backoffMs?: number; maxAttempts?: number },
 ): () => void {
   let ws: WebSocket | null = null;
   let stopped = false;
@@ -410,8 +404,8 @@ export function watchClaimableWs(
   const createWebSocket = webSocketFactory ?? getDefaultWebSocketFactory();
   if (!createWebSocket) {
     throw new Error(
-      "watchClaimableWs: no WebSocket implementation available. Pass `webSocketFactory` " +
-        "in environments without a global WebSocket (e.g. React Native — see @sorostream/sdk-react-native)."
+      'watchClaimableWs: no WebSocket implementation available. Pass `webSocketFactory` ' +
+        'in environments without a global WebSocket (e.g. React Native — see @sorostream/sdk-react-native).',
     );
   }
 
@@ -421,18 +415,18 @@ export function watchClaimableWs(
       if (compressionOpts) {
         try {
           const deflateOpts = { perMessageDeflate: { level: compressionOpts.level } };
-          ws = createWebSocket(wsUrl, deflateOpts);
+          ws = createWebSocket!(wsUrl, deflateOpts);
         } catch {
-          ws = createWebSocket(wsUrl);
+          ws = createWebSocket!(wsUrl);
         }
       } else {
-        ws = createWebSocket(wsUrl);
+        ws = createWebSocket!(wsUrl);
       }
 
       ws.onopen = () => {
         if (stopped) return;
         reconnectAttempts = 0;
-        const msg = JSON.stringify({ type: "subscribe", streamId });
+        const msg = JSON.stringify({ type: 'subscribe', streamId });
         ws?.send(msg);
       };
 
@@ -440,7 +434,7 @@ export function watchClaimableWs(
         if (stopped) return;
         try {
           const data = JSON.parse(event.data as string);
-          if (data.type === "claimable" && data.streamId === streamId) {
+          if (data.type === 'claimable' && data.streamId === streamId) {
             const val = BigInt(data.value);
             if (val !== lastEmittedValue) {
               lastEmittedValue = val;
@@ -527,24 +521,27 @@ export function watchClaimableWs(
 // Issue #340: Subscription reference-count cache for watchClaimable.
 // Reuses the same polling interval for identical stream IDs, preventing
 // memory leaks when the same stream is watched multiple times.
-const watchClaimableSubscriptions = new Map<string, {
-  count: number;
-  tickTimer: ReturnType<typeof setInterval>;
-  reconcileTimer: ReturnType<typeof setInterval>;
-  stopWs: (() => void) | null;
-  listeners: Set<(claimable: bigint) => void>;
-  baseValue: bigint;
-  baseTime: number;
-  lastEmitted: bigint | null;
-  stream: Stream;
-  stopped: boolean;
-}>();
+const watchClaimableSubscriptions = new Map<
+  string,
+  {
+    count: number;
+    tickTimer: ReturnType<typeof setInterval>;
+    reconcileTimer: ReturnType<typeof setInterval>;
+    stopWs: (() => void) | null;
+    listeners: Set<(claimable: bigint) => void>;
+    baseValue: bigint;
+    baseTime: number;
+    lastEmitted: bigint | null;
+    stream: Stream;
+    stopped: boolean;
+  }
+>();
 
 export function watchClaimable(
   stream: Stream,
   reconcile: () => Promise<bigint>,
   onTick: (claimable: bigint) => void,
-  options?: WatchClaimableOptions
+  options?: WatchClaimableOptions,
 ): () => void {
   const tickMs = options?.tickMs ?? 200;
   const reconcileMs = options?.reconcileMs ?? 5_000;
@@ -634,7 +631,7 @@ export function watchClaimable(
       },
       options.compression,
       options.webSocketFactory,
-      options.wsReconnectOptions
+      options.wsReconnectOptions,
     );
   }
 
@@ -652,12 +649,12 @@ export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
 // ── Issue #47: Cache reconciliation / drift detection ────────────────────────
 
 const DRIFT_FIELDS: ReadonlyArray<keyof Stream> = [
-  "status",
-  "deposit",
-  "flowRate",
-  "endTime",
-  "lastWithdrawTime",
-  "autoRenew",
+  'status',
+  'deposit',
+  'flowRate',
+  'endTime',
+  'lastWithdrawTime',
+  'autoRenew',
 ];
 
 /**
@@ -710,7 +707,7 @@ export function watchStreamDrift(
   stream: Stream,
   fetchOnChain: () => Promise<Stream>,
   onDrift: (diffs: StreamDrift[], fresh: Stream) => void,
-  options?: ReconcileStreamOptions
+  options?: ReconcileStreamOptions,
 ): () => void {
   const intervalMs = options?.intervalMs ?? 30_000;
   let current = stream;
@@ -748,7 +745,7 @@ export function watchStreamDrift(
  * @param thresholdSeconds - Seconds threshold (default 86400 = 24h).
  */
 export function isStreamExpiring(stream: Stream, thresholdSeconds: number = 86400): boolean {
-  if (stream.status !== "Active") return false;
+  if (stream.status !== 'Active') return false;
   const remaining = timeUntilStreamEnd(stream);
   return remaining > 0 && remaining < thresholdSeconds;
 }
@@ -759,7 +756,7 @@ export function isStreamExpiring(stream: Stream, thresholdSeconds: number = 8640
  * @param staleThresholdSeconds - Seconds since last withdraw to consider stalled (default 604800 = 7d).
  */
 export function isStreamStalled(stream: Stream, staleThresholdSeconds: number = 604800): boolean {
-  if (stream.status !== "Active") return false;
+  if (stream.status !== 'Active') return false;
   const now = Math.floor(Date.now() / 1000);
   return now - stream.lastWithdrawTime > staleThresholdSeconds;
 }
@@ -772,7 +769,7 @@ export function isStreamStalled(stream: Stream, staleThresholdSeconds: number = 
  * @param stream - The stream object.
  */
 export function isStreamUnderfunded(stream: Stream): boolean {
-  if (stream.status !== "Active" || stream.flowRate === 0n) return false;
+  if (stream.status !== 'Active' || stream.flowRate === 0n) return false;
   const streamedSoFar = stream.flowRate * BigInt(stream.lastWithdrawTime - stream.startTime);
   const remainingDeposit = stream.deposit - streamedSoFar;
   const expectedRemaining = stream.flowRate * BigInt(stream.endTime - stream.lastWithdrawTime);
@@ -800,7 +797,7 @@ export function filterStreams(streams: Stream[], filters: StreamFilter): Stream[
     if (filters.sender !== undefined && s.sender !== filters.sender) return false;
     if (filters.recipient !== undefined && s.recipient !== filters.recipient) return false;
     if (filters.token !== undefined && s.token !== filters.token) return false;
-    if (filters.activeOnly && (s.status !== "Active" || isExpired(s))) return false;
+    if (filters.activeOnly && (s.status !== 'Active' || isExpired(s))) return false;
     return true;
   });
 }
@@ -816,18 +813,16 @@ export function filterStreams(streams: Stream[], filters: StreamFilter): Stream[
 export function sortStreams(
   streams: Stream[],
   by: StreamSortField,
-  order: SortOrder = "asc"
+  order: SortOrder = 'asc',
 ): Stream[] {
-  const direction = order === "desc" ? -1 : 1;
+  const direction = order === 'desc' ? -1 : 1;
   return [...streams].sort((a, b) => {
-    const diff =
-      by === "amount" ? a.deposit - b.deposit : BigInt(a[by]) - BigInt(b[by]);
+    const diff = by === 'amount' ? a.deposit - b.deposit : BigInt(a[by]) - BigInt(b[by]);
     return (diff < 0n ? -1 : diff > 0n ? 1 : 0) * direction;
   });
 }
 
 // ── Token aggregation ─────────────────────────────────────────────────────────
-
 
 /**
  * Groups streams by token address and returns per-token aggregates.
@@ -857,8 +852,7 @@ export function aggregateStreamsByToken(streams: Stream[]): TokenAggregate[] {
     existing.streamCount += 1;
     existing.deposited += s.deposit;
     existing.claimable += claimableNow(s);
-    existing.claimedSoFar +=
-      s.deposit - s.flowRate * BigInt(s.endTime - s.lastWithdrawTime);
+    existing.claimedSoFar += s.deposit - s.flowRate * BigInt(s.endTime - s.lastWithdrawTime);
     map.set(s.token, existing);
   }
 
@@ -918,9 +912,13 @@ export function totalValueStreamed(streams: Stream[]): StreamTotals {
  */
 export function watchTotalClaimable(
   streams: Stream[],
-  reconcileMapOrCb?: Array<() => Promise<bigint>> | ((streamId: string) => Promise<bigint>) | Record<string, () => Promise<bigint>> | ((total: bigint) => void),
+  reconcileMapOrCb?:
+    | Array<() => Promise<bigint>>
+    | ((streamId: string) => Promise<bigint>)
+    | Record<string, () => Promise<bigint>>
+    | ((total: bigint) => void),
   onTotalChange?: (total: bigint) => void,
-  options?: WatchClaimableOptions
+  options?: WatchClaimableOptions,
 ): () => void {
   let callback: (total: bigint) => void;
   let reconcileFn: (stream: Stream, idx: number) => Promise<bigint>;
@@ -929,17 +927,17 @@ export function watchTotalClaimable(
     // watchTotalClaimable(streams, [fn, fn, ...], onTotalChange)
     const arr = reconcileMapOrCb as Array<() => Promise<bigint>>;
     callback = onTotalChange ?? (() => {});
-    reconcileFn = (s, idx) => (arr[idx] ? arr[idx]!() : claimableNow(s));
-  } else if (typeof reconcileMapOrCb === "function" && !onTotalChange) {
+    reconcileFn = (s, idx) => (arr[idx] ? arr[idx]!() : Promise.resolve(claimableNow(s)));
+  } else if (typeof reconcileMapOrCb === 'function' && !onTotalChange) {
     // watchTotalClaimable(streams, onTotalChange)
     callback = reconcileMapOrCb as (total: bigint) => void;
     reconcileFn = async (s) => claimableNow(s);
-  } else if (typeof reconcileMapOrCb === "function") {
+  } else if (typeof reconcileMapOrCb === 'function') {
     // watchTotalClaimable(streams, (streamId) => Promise<bigint>, onTotalChange)
     const fn = reconcileMapOrCb as (streamId: string) => Promise<bigint>;
     callback = onTotalChange!;
     reconcileFn = async (s) => fn(s.id);
-  } else if (reconcileMapOrCb && typeof reconcileMapOrCb === "object") {
+  } else if (reconcileMapOrCb && typeof reconcileMapOrCb === 'object') {
     // watchTotalClaimable(streams, { streamId: () => Promise<bigint> }, onTotalChange)
     const map = reconcileMapOrCb as Record<string, () => Promise<bigint>>;
     callback = onTotalChange!;
@@ -989,8 +987,8 @@ export function watchTotalClaimable(
             values.set(stream.id, val);
             if (initialDone) calculateAndEmitTotal();
           },
-          options
-        )
+          options,
+        ),
       );
     }
 
@@ -1021,7 +1019,7 @@ export function watchTotalClaimable(
         values.set(stream.id, val);
         calculateAndEmitTotal();
       },
-      options
+      options,
     );
   });
 
@@ -1044,9 +1042,9 @@ export function aggregateStreamsByStatus(streams: Stream[]): StatusBreakdown {
   let completed = 0;
 
   for (const s of streams) {
-    if (s.status === "Active") active++;
-    else if (s.status === "Cancelled") cancelled++;
-    else if (s.status === "Completed") completed++;
+    if (s.status === 'Active') active++;
+    else if (s.status === 'Cancelled') cancelled++;
+    else if (s.status === 'Completed') completed++;
   }
 
   return { active, cancelled, completed };
@@ -1064,9 +1062,7 @@ export function averageStreamDuration(streams: Stream[]): DurationStats {
     return { average: 0, min: 0, max: 0, median: 0 };
   }
 
-  const durations = streams
-    .map((s) => Math.max(0, s.endTime - s.startTime))
-    .sort((a, b) => a - b);
+  const durations = streams.map((s) => Math.max(0, s.endTime - s.startTime)).sort((a, b) => a - b);
 
   const sum = durations.reduce((a, b) => a + b, 0);
   const mid = Math.floor(durations.length / 2);
@@ -1075,9 +1071,10 @@ export function averageStreamDuration(streams: Stream[]): DurationStats {
     average: Math.round(sum / durations.length),
     min: durations[0]!,
     max: durations[durations.length - 1]!,
-    median: durations.length % 2 === 0
-      ? Math.round((durations[mid - 1]! + durations[mid]!) / 2)
-      : durations[mid]!,
+    median:
+      durations.length % 2 === 0
+        ? Math.round((durations[mid - 1]! + durations[mid]!) / 2)
+        : durations[mid]!,
   };
 }
 
@@ -1093,7 +1090,7 @@ export function averageStreamDuration(streams: Stream[]): DurationStats {
 export function streamHealthSummary(
   streams: Stream[],
   expiringThresholdSeconds = 86400,
-  staleThresholdSeconds = 604800
+  staleThresholdSeconds = 604800,
 ): StreamHealthReport {
   let expiring = 0;
   let stalled = 0;
@@ -1101,7 +1098,7 @@ export function streamHealthSummary(
   let totalActive = 0;
 
   for (const s of streams) {
-    if (s.status !== "Active") continue;
+    if (s.status !== 'Active') continue;
     totalActive++;
     if (isStreamExpiring(s, expiringThresholdSeconds)) expiring++;
     if (isStreamStalled(s, staleThresholdSeconds)) stalled++;
@@ -1160,34 +1157,32 @@ export function aggregateStreamsByRecipient(streams: Stream[]): RecipientAggrega
  */
 export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
   const lines = csv.trim().split(/\r?\n/);
-  if (lines.length < 2)
-    throw new Error("CSV must have a header row and at least one data row");
+  if (lines.length < 2) throw new Error('CSV must have a header row and at least one data row');
 
   const header = lines[0]!.toLowerCase().trim();
-  const cols = header.split(",").map((c) => c.trim());
+  const cols = header.split(',').map((c) => c.trim());
 
-  const recipientIdx = cols.indexOf("recipient");
-  const amountIdx = cols.indexOf("amount");
-  const durationIdx = cols.indexOf("durationseconds");
-  const tokenIdx = cols.indexOf("token");
+  const recipientIdx = cols.indexOf('recipient');
+  const amountIdx = cols.indexOf('amount');
+  const durationIdx = cols.indexOf('durationseconds');
+  const tokenIdx = cols.indexOf('token');
 
   if (recipientIdx === -1) throw new Error("CSV missing 'recipient' column");
   if (amountIdx === -1) throw new Error("CSV missing 'amount' column");
-  if (durationIdx === -1)
-    throw new Error("CSV missing 'durationSeconds' column");
+  if (durationIdx === -1) throw new Error("CSV missing 'durationSeconds' column");
 
   const rows: BulkStreamRow[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i]!.trim();
     if (!line) continue;
-    const fields = line.split(",").map((f) => f.trim());
+    const fields = line.split(',').map((f) => f.trim());
 
     const recipient = fields[recipientIdx];
     if (!recipient) throw new Error(`Row ${i + 1}: missing recipient`);
 
-    const amount = BigInt(fields[amountIdx] ?? "");
-    const durationSeconds = Number(fields[durationIdx] ?? "0");
+    const amount = BigInt(fields[amountIdx] ?? '');
+    const durationSeconds = Number(fields[durationIdx] ?? '0');
 
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
       throw new Error(`Row ${i + 1}: invalid durationSeconds`);
@@ -1203,7 +1198,6 @@ export function parseCsvStreamRows(csv: string): BulkStreamRow[] {
 
   return rows;
 }
-
 
 /**
  * Returns the safe maximum number of operations per Soroban transaction.
@@ -1238,9 +1232,7 @@ export function batchSize(custom?: number): number {
   const MAX = 25;
   if (custom === undefined) return DEFAULT;
   if (!Number.isInteger(custom) || custom <= 0 || custom > MAX) {
-    throw new SoroStreamError(
-      `batchSize must be a positive integer ≤ ${MAX}, got ${custom}`
-    );
+    throw new SoroStreamError(`batchSize must be a positive integer ≤ ${MAX}, got ${custom}`);
   }
   return custom;
 }
@@ -1257,16 +1249,16 @@ export function batchSize(custom?: number): number {
  * @returns A plain object with all BigInt fields converted to string.
  */
 export function streamToJSON(obj: unknown): unknown {
-  if (typeof obj === "bigint") {
+  if (typeof obj === 'bigint') {
     return obj.toString();
   }
   if (Array.isArray(obj)) {
     return obj.map(streamToJSON);
   }
-  if (obj !== null && typeof obj === "object") {
+  if (obj !== null && typeof obj === 'object') {
     const res: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      if (key === "toJSON") continue;
+      if (key === 'toJSON') continue;
       res[key] = streamToJSON(value);
     }
     return res;
@@ -1285,8 +1277,8 @@ export function streamToJSON(obj: unknown): unknown {
 export function jsonStringifyStream(obj: unknown, space?: string | number): string {
   return JSON.stringify(
     obj,
-    (_, value) => (typeof value === "bigint" ? value.toString() : value),
-    space
+    (_, value) => (typeof value === 'bigint' ? value.toString() : value),
+    space,
   );
 }
 
@@ -1334,7 +1326,7 @@ export function validateStringLength(field: string, value: string): void {
   }
 }
 
-const BIGINT_SUFFIX = "_bigint";
+const BIGINT_SUFFIX = '_bigint';
 
 /**
  * Custom JSON.stringify replacer that serializes BigInt values as strings
@@ -1349,7 +1341,7 @@ const BIGINT_SUFFIX = "_bigint";
  * ```
  */
 export function bigintReplacer(_key: string, value: unknown): unknown {
-  return typeof value === "bigint" ? `${value.toString()}${BIGINT_SUFFIX}` : value;
+  return typeof value === 'bigint' ? `${value.toString()}${BIGINT_SUFFIX}` : value;
 }
 
 /**
@@ -1362,7 +1354,7 @@ export function bigintReplacer(_key: string, value: unknown): unknown {
  * ```
  */
 export function bigintReviver(_key: string, value: unknown): unknown {
-  if (typeof value === "string" && value.endsWith(BIGINT_SUFFIX)) {
+  if (typeof value === 'string' && value.endsWith(BIGINT_SUFFIX)) {
     const raw = value.slice(0, -BIGINT_SUFFIX.length);
     try {
       return BigInt(raw);
@@ -1393,7 +1385,10 @@ export function bigintReviver(_key: string, value: unknown): unknown {
  * const restored = deserializeStreamFromJSON(json);
  * ```
  */
-export function serializeStreamToJSON(stream: import("./types.js").Stream, space?: string | number): string {
+export function serializeStreamToJSON(
+  stream: import('./types.js').Stream,
+  space?: string | number,
+): string {
   return JSON.stringify(stream, bigintReplacer, space);
 }
 
@@ -1413,29 +1408,35 @@ export function serializeStreamToJSON(stream: import("./types.js").Stream, space
  * console.log(restored.deposit); // BigInt
  * ```
  */
-export function deserializeStreamFromJSON(json: string): import("./types.js").Stream {
+export function deserializeStreamFromJSON(json: string): import('./types.js').Stream {
   const parsed = JSON.parse(json, bigintReviver) as Record<string, unknown>;
 
-  const id = String(parsed["id"] ?? "");
+  const id = String(parsed['id'] ?? '');
   if (!id) throw new Error("deserializeStreamFromJSON: missing 'id' field");
 
-  const deposit = typeof parsed["deposit"] === "bigint" ? parsed["deposit"] as bigint : BigInt(String(parsed["deposit"] ?? "0"));
-  const flowRate = typeof parsed["flowRate"] === "bigint" ? parsed["flowRate"] as bigint : BigInt(String(parsed["flowRate"] ?? "0"));
+  const deposit =
+    typeof parsed['deposit'] === 'bigint'
+      ? (parsed['deposit'] as bigint)
+      : BigInt(String(parsed['deposit'] ?? '0'));
+  const flowRate =
+    typeof parsed['flowRate'] === 'bigint'
+      ? (parsed['flowRate'] as bigint)
+      : BigInt(String(parsed['flowRate'] ?? '0'));
 
-  const stream: import("./types.js").Stream = {
+  const stream: import('./types.js').Stream = {
     id,
-    sender: String(parsed["sender"] ?? ""),
-    recipient: String(parsed["recipient"] ?? ""),
-    token: String(parsed["token"] ?? ""),
+    sender: String(parsed['sender'] ?? ''),
+    recipient: String(parsed['recipient'] ?? ''),
+    token: String(parsed['token'] ?? ''),
     deposit,
     flowRate,
-    startTime: Number(parsed["startTime"] ?? 0),
-    endTime: Number(parsed["endTime"] ?? 0),
-    lastWithdrawTime: Number(parsed["lastWithdrawTime"] ?? 0),
-    status: (parsed["status"] as import("./types.js").Stream["status"]) ?? "Active",
-    autoRenew: Boolean(parsed["autoRenew"]),
-    ...(parsed["pausedAt"] != null ? { pausedAt: Number(parsed["pausedAt"]) } : {}),
-    ...(parsed["lockUntil"] != null ? { lockUntil: Number(parsed["lockUntil"]) } : {}),
+    startTime: Number(parsed['startTime'] ?? 0),
+    endTime: Number(parsed['endTime'] ?? 0),
+    lastWithdrawTime: Number(parsed['lastWithdrawTime'] ?? 0),
+    status: (parsed['status'] as import('./types.js').Stream['status']) ?? 'Active',
+    autoRenew: Boolean(parsed['autoRenew']),
+    ...(parsed['pausedAt'] != null ? { pausedAt: Number(parsed['pausedAt']) } : {}),
+    ...(parsed['lockUntil'] != null ? { lockUntil: Number(parsed['lockUntil']) } : {}),
   };
 
   return stream;
@@ -1443,7 +1444,7 @@ export function deserializeStreamFromJSON(json: string): import("./types.js").St
 
 // ── Stream ID encoding / decoding (base58, URL-safe) ──────────────────────
 
-const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const BASE58_MAP: Record<string, number> = {};
 for (let i = 0; i < BASE58_ALPHABET.length; i++) {
   BASE58_MAP[BASE58_ALPHABET[i]!] = i;
@@ -1460,11 +1461,13 @@ const U64_MAX = (1n << 64n) - 1n;
  */
 export function encodeStreamId(id: bigint): string {
   if (id < 0n || id > U64_MAX) {
-    throw new RangeError(`encodeStreamId: id must be in range 0..${U64_MAX.toString()}, got ${id.toString()}`);
+    throw new RangeError(
+      `encodeStreamId: id must be in range 0..${U64_MAX.toString()}, got ${id.toString()}`,
+    );
   }
-  if (id === 0n) return "1";
+  if (id === 0n) return '1';
   let n = id;
-  let result = "";
+  let result = '';
   while (n > 0n) {
     const remainder = Number(n % 58n);
     n = n / 58n;
@@ -1483,7 +1486,7 @@ export function encodeStreamId(id: bigint): string {
  */
 export function decodeStreamId(encoded: string): bigint {
   if (encoded.length === 0) {
-    throw new Error("decodeStreamId: empty string");
+    throw new Error('decodeStreamId: empty string');
   }
   let result = 0n;
   for (const ch of encoded) {
@@ -1508,12 +1511,11 @@ export function decodeStreamId(encoded: string): bigint {
  * @param value - The raw memo value.
  * @returns A Stellar Memo object, or Memo-none if null/undefined.
  */
-export function parseMemo(value: string | null | undefined): import("@stellar/stellar-sdk").Memo {
-  const { Memo } = require("@stellar/stellar-sdk");
-  if (value == null || value === "") return Memo.none();
+export function parseMemo(value: string | null | undefined): import('@stellar/stellar-sdk').Memo {
+  const { Memo } = require('@stellar/stellar-sdk');
+  if (value == null || value === '') return Memo.none();
   if (/^[0-9a-fA-F]{64}$/.test(value)) {
-    return Memo.hash(Buffer.from(value, "hex"));
+    return Memo.hash(Buffer.from(value, 'hex'));
   }
   return Memo.text(value);
 }
-

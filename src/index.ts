@@ -1,22 +1,27 @@
-export { SoroStreamClient, createClient } from "./SoroStreamClient.js";
-export type { SoroStreamClientOptions, SimulateOnlyResult, SoroStreamConfigUpdate, ConfigUpdatedEvent } from "./SoroStreamClient.js";
+export { SoroStreamClient, createClient } from './SoroStreamClient.js';
+export type {
+  SoroStreamClientOptions,
+  SimulateOnlyResult,
+  SoroStreamConfigUpdate,
+  ConfigUpdatedEvent,
+} from './SoroStreamClient.js';
 export type {
   StorageAdapter,
   WebSocketFactory,
   FetchAdapter,
   SoroStreamAdapters,
-} from "./adapters.js";
+} from './adapters.js';
 
-export { createDefaultRpcTransport } from "./transport.js";
+export { createDefaultRpcTransport } from './transport.js';
 export type {
   RpcTransportAdapter,
   RpcTransportInitContext,
   RpcTransportGetEventsRequest,
-} from "./transport.js";
+} from './transport.js';
 
-export { MockSoroStreamClient, SoroStreamSandbox } from "./mock.js";
+export { MockSoroStreamClient, SoroStreamSandbox } from './mock.js';
 
-export { WebhookForwarder } from "./webhook.js";
+export { WebhookForwarder } from './webhook.js';
 export {
   toStroops,
   formatUSDC,
@@ -60,27 +65,31 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
-} from "./utils.js";
-export { templates } from "./templates.js";
-export { serializeStream, deserializeStream } from "./serialization.js";
-export type { SerializedStream } from "./serialization.js";
-export { getTransactionHistory, getAddressActivity } from "./horizon.js";
-export type { StreamTransaction, TransactionHistoryPage, TransactionHistoryOptions } from "./horizon.js";
-export { CircuitBreaker } from "./circuitBreaker.js";
-export { withRetry, RetryBackoff } from "./retry.js";
-export type { RetryOptions } from "./retry.js";
-export type { CircuitState, CircuitBreakerOptions } from "./circuitBreaker.js";
-export { ConnectionPool } from "./connectionPool.js";
-export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from "./connectionPool.js";
-export { InMemoryEventBus } from "./eventBus.js";
-export type { IEventBus, Unsubscribe } from "./eventBus.js";
-export type { StreamRetryPolicy, EventPollerOptions } from "./events.js";
-export type { BatchingOptions, BatchMetrics, CompressionOptions } from "./types.js";
-export { createContractEncoder } from "./contractEncoders.js";
-export type { ContractCallEncoder } from "./contractEncoders.js";
-export { createSimplePriceFeed } from "./priceFeed.js";
-export type { SimplePriceFeedOptions } from "./priceFeed.js";
-export { encodeMemo, encodeMemoHash, decodeMemo } from "./memo.js";
+} from './utils.js';
+export { templates } from './templates.js';
+export { serializeStream, deserializeStream } from './serialization.js';
+export type { SerializedStream } from './serialization.js';
+export { getTransactionHistory, getAddressActivity } from './horizon.js';
+export type {
+  StreamTransaction,
+  TransactionHistoryPage,
+  TransactionHistoryOptions,
+} from './horizon.js';
+export { CircuitBreaker } from './circuitBreaker.js';
+export { withRetry, RetryBackoff } from './retry.js';
+export type { RetryOptions } from './retry.js';
+export type { CircuitState, CircuitBreakerOptions } from './circuitBreaker.js';
+export { ConnectionPool } from './connectionPool.js';
+export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from './connectionPool.js';
+export { InMemoryEventBus } from './eventBus.js';
+export type { IEventBus, Unsubscribe } from './eventBus.js';
+export type { StreamRetryPolicy, EventPollerOptions } from './events.js';
+export type { BatchingOptions, BatchMetrics, CompressionOptions } from './types.js';
+export { createContractEncoder } from './contractEncoders.js';
+export type { ContractCallEncoder } from './contractEncoders.js';
+export { createSimplePriceFeed } from './priceFeed.js';
+export type { SimplePriceFeedOptions } from './priceFeed.js';
+export { encodeMemo, encodeMemoHash, decodeMemo } from './memo.js';
 export {
   SoroStreamError,
   InsufficientAmountError,
@@ -100,8 +109,8 @@ export {
   SoroStreamMemoError,
   SelfStreamError,
   SoroStreamTransportError,
-} from "./errors.js";
-export { checkPeerDependencies } from "./peerDependencies.js";
+} from './errors.js';
+export { checkPeerDependencies } from './peerDependencies.js';
 export {
   isSoroStreamError,
   isNetworkError,
@@ -109,16 +118,16 @@ export {
   isValidationError,
   isAuthError,
   matchError,
-} from "./error-guards.js";
+} from './error-guards.js';
 export type {
   NetworkError,
   ContractError,
   ValidationError,
   AuthError,
   ErrorMatchHandlers,
-} from "./error-guards.js";
-export type { BulkCreateFailedSlot, RetryAttempt } from "./errors.js";
-export { parseContractEvent } from "./contractEvents.js";
+} from './error-guards.js';
+export type { BulkCreateFailedSlot, RetryAttempt } from './errors.js';
+export { parseContractEvent } from './contractEvents.js';
 export type {
   ContractEventPayload,
   StreamCreatedPayload,
@@ -130,7 +139,7 @@ export type {
   StreamResumedPayload,
   StreamTransferredPayload,
   UnknownEventPayload,
-} from "./contractEvents.js";
+} from './contractEvents.js';
 export type {
   Stream,
   StreamStatus,
@@ -218,10 +227,9 @@ export type {
   OperationExplanation,
   BalanceDelta,
   SoroStreamClientConfig,
-} from "./types.js";
+} from './types.js';
 
-export { RecipientValidationError } from "./errors.js";
-export { PluginRegistry } from "./pluginRegistry.js";
-export { getPortfolioStats } from "./portfolioAnalytics.js";
-export { scheduleFeeBumpMonitor } from "./feeBump.js";
-
+export { RecipientValidationError } from './errors.js';
+export { PluginRegistry } from './pluginRegistry.js';
+export { getPortfolioStats } from './portfolioAnalytics.js';
+export { scheduleFeeBumpMonitor } from './feeBump.js';

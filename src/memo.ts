@@ -1,6 +1,6 @@
-import { Memo, MemoHash, MemoID, MemoNone, MemoText, MemoReturn } from "@stellar/stellar-sdk";
-import type { MemoType } from "@stellar/stellar-sdk";
-import { SoroStreamMemoError } from "./errors.js";
+import { Memo, MemoHash, MemoID, MemoNone, MemoText, MemoReturn } from '@stellar/stellar-sdk';
+import type { MemoType } from '@stellar/stellar-sdk';
+import { SoroStreamMemoError } from './errors.js';
 
 /** Maximum byte length of a Soroban/Stellar text memo. */
 const TEXT_MEMO_MAX_BYTES = 28;
@@ -24,7 +24,7 @@ export function encodeMemo(text: string): Memo<MemoType.Text> {
   const byteLength = new TextEncoder().encode(text).byteLength;
   if (byteLength > TEXT_MEMO_MAX_BYTES) {
     throw new SoroStreamMemoError(
-      `Text memo exceeds ${TEXT_MEMO_MAX_BYTES} bytes (got ${byteLength} bytes)`
+      `Text memo exceeds ${TEXT_MEMO_MAX_BYTES} bytes (got ${byteLength} bytes)`,
     );
   }
   return Memo.text(text);
@@ -46,7 +46,7 @@ export function encodeMemoHash(data: Buffer | Uint8Array): Memo<MemoType.Hash> {
   const input = Buffer.isBuffer(data) ? data : Buffer.from(data);
   if (input.length > HASH_MEMO_BYTES) {
     console.warn(
-      `encodeMemoHash: input is ${input.length} bytes, truncating to ${HASH_MEMO_BYTES} bytes`
+      `encodeMemoHash: input is ${input.length} bytes, truncating to ${HASH_MEMO_BYTES} bytes`,
     );
   }
   const padded = Buffer.alloc(HASH_MEMO_BYTES);

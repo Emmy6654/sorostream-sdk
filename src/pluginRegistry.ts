@@ -1,24 +1,34 @@
 // ── Issue #338: Plugin registry with ordered execution ──────────────────────
 
-import type { SoroStreamPlugin, IPluginRegistry } from "./types.js";
+import type { SoroStreamPlugin, IPluginRegistry } from './types.js';
 
 /**
  * Plugin registry with topological ordering via before/after constraints.
  * Detects circular dependencies on registration.
  */
 export class PluginRegistry implements IPluginRegistry {
-  private readonly entries: Map<SoroStreamPlugin, {
-    name?: string;
-    before: string[];
-    after: string[];
-  }> = new Map();
+  private readonly entries: Map<
+    SoroStreamPlugin,
+    {
+      name?: string;
+      before: string[];
+      after: string[];
+    }
+  > = new Map();
 
-  register(plugin: SoroStreamPlugin, constraints?: { name?: string; before?: string; after?: string }): void {
+  register(
+    plugin: SoroStreamPlugin,
+    constraints?: { name?: string; before?: string; after?: string },
+  ): void {
     const beforeList = constraints?.before
-      ? (Array.isArray(constraints.before) ? constraints.before : [constraints.before])
+      ? Array.isArray(constraints.before)
+        ? constraints.before
+        : [constraints.before]
       : [];
     const afterList = constraints?.after
-      ? (Array.isArray(constraints.after) ? constraints.after : [constraints.after])
+      ? Array.isArray(constraints.after)
+        ? constraints.after
+        : [constraints.after]
       : [];
 
     // Add entry
@@ -98,9 +108,9 @@ export class PluginRegistry implements IPluginRegistry {
 
     if (sorted.length !== plugins.length) {
       throw new Error(
-        "[SoroStream SDK] Circular dependency detected in plugin registry. " +
-        `Sorted ${sorted.length} of ${plugins.length} plugins. ` +
-        "Check your before/after constraints for cycles."
+        '[SoroStream SDK] Circular dependency detected in plugin registry. ' +
+          `Sorted ${sorted.length} of ${plugins.length} plugins. ` +
+          'Check your before/after constraints for cycles.',
       );
     }
 

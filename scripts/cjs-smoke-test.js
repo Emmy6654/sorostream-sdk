@@ -5,8 +5,16 @@
 const assert = require('assert');
 const sdk = require('../dist/index.js');
 
-assert.strictEqual(typeof sdk.SoroStreamClient, 'function', 'SoroStreamClient should be a constructor');
-assert.strictEqual(typeof sdk.MockSoroStreamClient, 'function', 'MockSoroStreamClient should be a constructor');
+assert.strictEqual(
+  typeof sdk.SoroStreamClient,
+  'function',
+  'SoroStreamClient should be a constructor',
+);
+assert.strictEqual(
+  typeof sdk.MockSoroStreamClient,
+  'function',
+  'MockSoroStreamClient should be a constructor',
+);
 assert.strictEqual(typeof sdk.encodeMemo, 'function', 'encodeMemo should be exported');
 assert.strictEqual(typeof sdk.SoroStreamError, 'function', 'SoroStreamError should be exported');
 

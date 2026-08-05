@@ -9,7 +9,7 @@ try {
   if (baseIndex !== -1 && args[baseIndex + 1]) {
     baseBranch = args[baseIndex + 1];
   } else {
-    const baseArg = args.find(a => a.startsWith('--base='));
+    const baseArg = args.find((a) => a.startsWith('--base='));
     if (baseArg) {
       baseBranch = baseArg.split('=')[1];
     }
@@ -25,18 +25,22 @@ try {
   }
 
   const changedFiles = diffOutput.split('\n').filter(Boolean);
-  
+
   if (changedFiles.length === 0) {
     console.log('No files changed.');
     process.exit(0);
   }
 
   // Define what paths require a changeset
-  const requiresChangeset = changedFiles.some(f => f.startsWith('src/') || f.startsWith('packages/'));
-  
+  const requiresChangeset = changedFiles.some(
+    (f) => f.startsWith('src/') || f.startsWith('packages/'),
+  );
+
   if (requiresChangeset) {
-    const changesetAdded = changedFiles.some(f => f.startsWith('.changeset/') && f.endsWith('.md') && !f.includes('README.md'));
-    
+    const changesetAdded = changedFiles.some(
+      (f) => f.startsWith('.changeset/') && f.endsWith('.md') && !f.includes('README.md'),
+    );
+
     if (!changesetAdded) {
       console.error('❌ Error: Changes to public API detected without a corresponding changeset.');
       console.error('Please run "npx changeset add" to create a changeset file and commit it.');

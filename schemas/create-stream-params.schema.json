@@ -51,13 +51,7 @@
           "description": "Optional namespace for multi-tenant scoping (issue #274). Stored in the stream's metadata field. Filtering by namespace is off-chain only — the contract does not enforce isolation."
         }
       },
-      "required": [
-        "recipient",
-        "token",
-        "amount",
-        "durationSeconds",
-        "autoRenew"
-      ],
+      "required": ["recipient", "token", "amount", "durationSeconds", "autoRenew"],
       "additionalProperties": false,
       "description": "Parameters for creating a new stream."
     }

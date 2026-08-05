@@ -5,13 +5,13 @@
 // schemas into a temp directory and diffs the result against what's
 // committed — mirrors the pattern of scripts/check-changeset.js.
 
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-const { generateSchemas, SCHEMAS, ROOT } = require("./generate-schemas.js");
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { generateSchemas, SCHEMAS, ROOT } = require('./generate-schemas.js');
 
-const committedDir = path.join(ROOT, "schemas");
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sorostream-schemas-"));
+const committedDir = path.join(ROOT, 'schemas');
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sorostream-schemas-'));
 
 try {
   const fresh = generateSchemas(tmpDir);
@@ -27,9 +27,11 @@ try {
       continue;
     }
 
-    const committedContents = fs.readFileSync(committedPath, "utf8");
+    const committedContents = fs.readFileSync(committedPath, 'utf8');
     if (committedContents !== freshContents) {
-      console.error(`❌ schemas/${fileName} is out of date with its TypeScript type (${typeName}).`);
+      console.error(
+        `❌ schemas/${fileName} is out of date with its TypeScript type (${typeName}).`,
+      );
       outOfDate = true;
     }
   }
@@ -39,7 +41,7 @@ try {
     process.exit(1);
   }
 
-  console.log("✅ Schema check passed: all schemas are up to date with their TypeScript types.");
+  console.log('✅ Schema check passed: all schemas are up to date with their TypeScript types.');
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }

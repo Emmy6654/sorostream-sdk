@@ -9,32 +9,34 @@
  *
  * See: fix/bigint-vesting-arithmetic branch.
  */
-import { describe, it, expect } from "vitest";
-import { calculateVestingSchedule } from "../src/utils.js";
-import type { Stream } from "../src/types.js";
+import { describe, it, expect } from 'vitest';
+import { calculateVestingSchedule } from '../src/utils.js';
+import type { Stream } from '../src/types.js';
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 
-function makeStream(overrides: Partial<Stream> & {
-  flowRate: bigint;
-  startTime: number;
-  endTime: number;
-  deposit: bigint;
-}): Stream {
+function makeStream(
+  overrides: Partial<Stream> & {
+    flowRate: bigint;
+    startTime: number;
+    endTime: number;
+    deposit: bigint;
+  },
+): Stream {
   return {
-    id: "0",
-    sender: "GSENDER",
-    recipient: "GRECIPIENT",
-    token: "GTOKEN",
+    id: '0',
+    sender: 'GSENDER',
+    recipient: 'GRECIPIENT',
+    token: 'GTOKEN',
     lastWithdrawTime: overrides.startTime,
-    status: "Active",
+    status: 'Active',
     autoRenew: false,
     ...overrides,
   };
 }
 
-describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAFE_INTEGER)", () => {
-  it("produces exact totalAmount when flowRate Ã— duration exceeds Number.MAX_SAFE_INTEGER", () => {
+describe('calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAFE_INTEGER)', () => {
+  it('produces exact totalAmount when flowRate Ã— duration exceeds Number.MAX_SAFE_INTEGER', () => {
     const startTime = 1_700_000_000;
     // 10 USDC/s Ã— ~3.17 years â‰ˆ 1B USDC total = 10_000_000_000_000_000 stroops
     const flowRate = 100_000_000n;
@@ -50,11 +52,7 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
     });
 
     // Mid-cliff: effectiveClaimable should be 0n, totalAmount should be exact.
-    const result = calculateVestingSchedule(
-      stream,
-      cliff,
-      startTime + cliff / 2
-    );
+    const result = calculateVestingSchedule(stream, cliff, startTime + cliff / 2);
 
     expect(result.totalAmount).toBe(totalAmount);
     expect(result.totalAmount).toBeGreaterThan(MAX_SAFE_INTEGER);
@@ -62,13 +60,13 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
     expect(result.inCliff).toBe(true);
   });
 
-  it("returns exact effectiveClaimable just past cliff when totalAmount > MAX_SAFE_INTEGER", () => {
+  it('returns exact effectiveClaimable just past cliff when totalAmount > MAX_SAFE_INTEGER', () => {
     const startTime = 1_700_000_000;
-    const flowRate = 100_000_000n;        // 10 USDC/s
-    const duration = 100_000_000;         // ~3.17 years
+    const flowRate = 100_000_000n; // 10 USDC/s
+    const duration = 100_000_000; // ~3.17 years
     const totalAmount = 10_000_000_000_000_000n;
     const cliff = 25_000_000;
-    const elapsedAfterCliff = 1_000_000;  // seconds since cliff end
+    const elapsedAfterCliff = 1_000_000; // seconds since cliff end
 
     const stream = makeStream({
       flowRate,
@@ -77,11 +75,7 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
       deposit: totalAmount,
     });
 
-    const result = calculateVestingSchedule(
-      stream,
-      cliff,
-      startTime + cliff + elapsedAfterCliff
-    );
+    const result = calculateVestingSchedule(stream, cliff, startTime + cliff + elapsedAfterCliff);
 
     // Expected: flowRate × (cliff + elapsedAfterCliff) — cliff time is included in the vested amount
     // because the vesting model counts from startTime, not from cliffEnd.
@@ -90,7 +84,7 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
     expect(result.inCliff).toBe(false);
   });
 
-  it("preserves BigInt precision for milestone vested amounts when totalSeconds > MAX_SAFE_INTEGER", () => {
+  it('preserves BigInt precision for milestone vested amounts when totalSeconds > MAX_SAFE_INTEGER', () => {
     // Constructed: totalSeconds above 2^53 so that intermediate
     // `Math.floor(totalSeconds * 0.25)` in the old code rounded to the
     // next representable Number and drifted the vested amount by ~1 stroop.
@@ -128,7 +122,7 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
     // (cliffSeconds=0 just so the cliff milestone exists as 0n.)
   });
 
-  it("preserves exact totalAmount and cliff milestone when endTime-startTime > MAX_SAFE_INTEGER", () => {
+  it('preserves exact totalAmount and cliff milestone when endTime-startTime > MAX_SAFE_INTEGER', () => {
     // Validates the cliff milestone and totalAmount survive the
     // Number subtraction `endTime - startTime` boundary.
     const flowRate = 7n;
@@ -143,18 +137,12 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
       deposit: flowRate * totalSecondsBig,
     });
 
-    const result = calculateVestingSchedule(
-      stream,
-      cliffSeconds,
-      startTime + 1_000
-    );
+    const result = calculateVestingSchedule(stream, cliffSeconds, startTime + 1_000);
 
     expect(result.totalAmount).toBe(flowRate * totalSecondsBig);
     expect(result.totalAmount).toBeGreaterThan(MAX_SAFE_INTEGER);
 
-    const cliffMs = result.milestones.find(
-      (m) => m.time === startTime + cliffSeconds
-    );
+    const cliffMs = result.milestones.find((m) => m.time === startTime + cliffSeconds);
     expect(cliffMs).toBeDefined();
     expect(cliffMs!.vested).toBe(flowRate * BigInt(cliffSeconds));
   });
@@ -190,7 +178,7 @@ describe("calculateVestingSchedule â€” BigInt safety (totalAmount > MAX_SAF
     expect(cliffMs!.vested).toBe(flowRate * BigInt(cliff));
   });
 
-  it("handles zero cliff duration and immediate vesting", () => {
+  it('handles zero cliff duration and immediate vesting', () => {
     const startTime = 1_700_000_000;
     const flowRate = 10_000_000n;
     const duration = 100_000;
@@ -230,8 +218,8 @@ const STELLAR_LEDGER_SECONDS = 5; // ~5 s ledger-close cadence on mainnet/testne
 const ONE_YEAR_SECONDS = 365 * 24 * 3600;
 const ALL_LEDGER_OFFSETS = Array.from({ length: STELLAR_LEDGER_SECONDS }, (_, i) => i);
 
-describe("calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-aligned startTime)", () => {
-  it("startTime not aligned to a Stellar ledger boundary preserves bit-exact cliffEndTime", () => {
+describe('calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-aligned startTime)', () => {
+  it('startTime not aligned to a Stellar ledger boundary preserves bit-exact cliffEndTime', () => {
     // 1_700_000_003 mod 5 === 3 â†’ not aligned with any ~5 s ledger close.
     // If the implementation ever rounds to a ledger boundary
     // (e.g. Math.ceil(x / 5) * 5), cliffEndTime will drift by â‰¥ 2 s and
@@ -248,17 +236,13 @@ describe("calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-al
       deposit: flowRate * BigInt(totalSeconds),
     });
 
-    const result = calculateVestingSchedule(
-      stream,
-      cliffSeconds,
-      startTime + cliffSeconds / 2
-    );
+    const result = calculateVestingSchedule(stream, cliffSeconds, startTime + cliffSeconds / 2);
     expect(result.cliffEndTime).toBe(startTime + cliffSeconds);
     // Cliff milestone must sit at the same bit-exact instant.
     expect(result.milestones[0]!.time).toBe(startTime + cliffSeconds);
   });
 
-  it("cliffEndTime is exact for every Stellar-ledger offset", () => {
+  it('cliffEndTime is exact for every Stellar-ledger offset', () => {
     // Sweep all ledger-offsets (0..4 relative to a 5 s ledger close).
     // A rounding bug would manifest in at least one of these classes.
     const cliffSeconds = ONE_YEAR_SECONDS;
@@ -275,13 +259,11 @@ describe("calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-al
       });
       const result = calculateVestingSchedule(stream, cliffSeconds, startTime);
       expect(result.cliffEndTime, `mod=${mod}`).toBe(startTime + cliffSeconds);
-      expect(result.milestones[0]!.time, `mod=${mod}`).toBe(
-        startTime + cliffSeconds
-      );
+      expect(result.milestones[0]!.time, `mod=${mod}`).toBe(startTime + cliffSeconds);
     }
   });
 
-  it("cliffEndTime is exact across minute-and-second grid alignments", () => {
+  it('cliffEndTime is exact across minute-and-second grid alignments', () => {
     // Sanity sweep across the time grid most consumers slice on (UTC
     // minutes). Any rounding scheme would manifest here.
     const cliffSeconds = 7 * 24 * 3600;
@@ -298,16 +280,12 @@ describe("calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-al
         endTime: startTime + totalSeconds,
         deposit: flowRate * BigInt(totalSeconds),
       });
-      const result = calculateVestingSchedule(
-        stream,
-        cliffSeconds,
-        startTime + cliffSeconds
-      );
+      const result = calculateVestingSchedule(stream, cliffSeconds, startTime + cliffSeconds);
       expect(result.cliffEndTime, `mod=${mod}`).toBe(startTime + cliffSeconds);
     }
   });
 
-  it("inCliff flips on the exact cliffEndTime instant â€” no 1-ledger drift", () => {
+  it('inCliff flips on the exact cliffEndTime instant â€” no 1-ledger drift', () => {
     // startTime is intentionally not aligned to any ledger or minute
     // boundary. A ledger-rounded cliffEndTime would either swallow the
     // last second of cliff (inCliff still true past the true boundary)
@@ -322,25 +300,17 @@ describe("calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-al
     });
 
     // exactly at cliffEndTime â†’ inCliff must be false
-    const atCliff = calculateVestingSchedule(
-      stream,
-      cliffSeconds,
-      startTime + cliffSeconds
-    );
+    const atCliff = calculateVestingSchedule(stream, cliffSeconds, startTime + cliffSeconds);
     expect(atCliff.cliffEndTime).toBe(startTime + cliffSeconds);
     expect(atCliff.inCliff).toBe(false);
 
     // 1 second before cliffEndTime â†’ inCliff must be true
-    const justInside = calculateVestingSchedule(
-      stream,
-      cliffSeconds,
-      startTime + cliffSeconds - 1
-    );
+    const justInside = calculateVestingSchedule(stream, cliffSeconds, startTime + cliffSeconds - 1);
     expect(justInside.cliffEndTime).toBe(startTime + cliffSeconds);
     expect(justInside.inCliff).toBe(true);
   });
 
-  it("small cliffs preserve exactness across every ledger offset", () => {
+  it('small cliffs preserve exactness across every ledger offset', () => {
     // Catches any floor/ceil introduced for "short" cliff paths. Uses
     // small cliff values that are deliberately non-aligned with the 5 s
     // ledger cadence to maximise sensitivity to rounding.
@@ -355,11 +325,7 @@ describe("calculateVestingSchedule â€” cliffEndTime exactness (non-epoch-al
         endTime: startTime + totalSeconds,
         deposit: BigInt(totalSeconds),
       });
-      const result = calculateVestingSchedule(
-        stream,
-        cliffSeconds,
-        startTime + cliffSeconds
-      );
+      const result = calculateVestingSchedule(stream, cliffSeconds, startTime + cliffSeconds);
       expect(result.cliffEndTime, `mod=${mod}`).toBe(startTime + cliffSeconds);
     }
   });

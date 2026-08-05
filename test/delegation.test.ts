@@ -1,12 +1,12 @@
-import { describe, it, expect } from "vitest";
-import { MockSoroStreamClient } from "../src/mock.js";
+import { describe, it, expect } from 'vitest';
+import { MockSoroStreamClient } from '../src/mock.js';
 
-const DELEGATOR = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
-const DELEGATE_1 = "GA2H2AWK2BA4CKP5ORL4T2J5R7OAM7V2O24V2U2S3Q53G2V2O24V2U2S";
-const DELEGATE_2 = "GB3H3AWK3BA3CKP3ORL3T3J3R3OAM3V3O33V3U3S3Q53G3V3O33V3U3S";
+const DELEGATOR = 'GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF';
+const DELEGATE_1 = 'GA2H2AWK2BA4CKP5ORL4T2J5R7OAM7V2O24V2U2S3Q53G2V2O24V2U2S';
+const DELEGATE_2 = 'GB3H3AWK3BA3CKP3ORL3T3J3R3OAM3V3O33V3U3S3Q53G3V3O33V3U3S';
 
-describe("Delegation helpers (Issue #349)", () => {
-  it("addDelegate submits correct instruction and adds delegate to getDelegates", async () => {
+describe('Delegation helpers (Issue #349)', () => {
+  it('addDelegate submits correct instruction and adds delegate to getDelegates', async () => {
     const mock = new MockSoroStreamClient();
     mock.setSender(DELEGATOR);
 
@@ -24,7 +24,7 @@ describe("Delegation helpers (Issue #349)", () => {
     expect(delegatesAfterAdd.length).toBe(1);
   });
 
-  it("handles multiple delegates and getDelegates queries correctly", async () => {
+  it('handles multiple delegates and getDelegates queries correctly', async () => {
     const mock = new MockSoroStreamClient();
     mock.setSender(DELEGATOR);
 
@@ -37,7 +37,7 @@ describe("Delegation helpers (Issue #349)", () => {
     expect(delegates.length).toBe(2);
   });
 
-  it("revokeDelegate removes delegate from getDelegates", async () => {
+  it('revokeDelegate removes delegate from getDelegates', async () => {
     const mock = new MockSoroStreamClient();
     mock.setSender(DELEGATOR);
 

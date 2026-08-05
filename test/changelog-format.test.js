@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { collectChangelogValidationErrors, validateChangelogLine } = require('../scripts/check-changelog-format.js');
+const {
+  collectChangelogValidationErrors,
+  validateChangelogLine,
+} = require('../scripts/check-changelog-format.js');
 
 describe('changelog format validation', () => {
   it('accepts Keep a Changelog style entries', () => {
@@ -12,7 +15,9 @@ describe('changelog format validation', () => {
 
   it('rejects invalid categories and entry formats', () => {
     expect(validateChangelogLine('### Misc')).toContain('Unexpected changelog category');
-    expect(validateChangelogLine('- Add zero cliff duration regression test')).toContain('Expected changelog entries');
+    expect(validateChangelogLine('- Add zero cliff duration regression test')).toContain(
+      'Expected changelog entries',
+    );
   });
 
   it('collects errors from a changelog diff', () => {

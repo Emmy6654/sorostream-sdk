@@ -10,19 +10,19 @@
  *   v2: POST /v2/<method>  with JSON body (no method field), new response shapes
  */
 
-import { rpc, type Account, type Transaction, type FeeBumpTransaction } from "@stellar/stellar-sdk";
-import type { RpcTransportAdapter, RpcTransportGetEventsRequest } from "./transport.js";
-import { createDefaultRpcTransport } from "./transport.js";
+import { rpc, type Account, type Transaction, type FeeBumpTransaction } from '@stellar/stellar-sdk';
+import type { RpcTransportAdapter, RpcTransportGetEventsRequest } from './transport.js';
+import { createDefaultRpcTransport } from './transport.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /** Which RPC protocol version to use. */
-export type RpcVersion = "v1" | "v2" | "auto";
+export type RpcVersion = 'v1' | 'v2' | 'auto';
 
 /** Payload emitted on the `rpcVersionDetected` event. */
 export interface RpcVersionDetectedPayload {
   /** The detected (or explicitly configured) version string, e.g. "v1" or "v2". */
-  version: "v1" | "v2";
+  version: 'v1' | 'v2';
   /** The RPC URL that was probed. */
   rpcUrl: string;
   /** True when the version was auto-detected; false when explicitly overridden. */
@@ -79,24 +79,21 @@ interface V2LatestLedgerResponse {
  *      with a JSON body containing `status`, it is v2.
  *   2. Fall back to v1 on any error or non-200 status.
  */
-export async function detectRpcVersion(
-  rpcUrl: string,
-  timeoutMs = 5_000,
-): Promise<"v1" | "v2"> {
-  const url = rpcUrl.replace(/\/$/, "") + "/v2/health";
+export async function detectRpcVersion(rpcUrl: string, timeoutMs = 5_000): Promise<'v1' | 'v2'> {
+  const url = rpcUrl.replace(/\/$/, '') + '/v2/health';
   try {
     const controller = new AbortController();
     const timerId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, {
-        method: "GET",
-        headers: { Accept: "application/json" },
+        method: 'GET',
+        headers: { Accept: 'application/json' },
         signal: controller.signal,
       });
       if (response.ok) {
         const body = (await response.json()) as V2HealthResponse;
-        if (typeof body?.status === "string") {
-          return "v2";
+        if (typeof body?.status === 'string') {
+          return 'v2';
         }
       }
     } finally {
@@ -105,7 +102,7 @@ export async function detectRpcVersion(
   } catch {
     // Probe failed — treat as v1
   }
-  return "v1";
+  return 'v1';
 }
 
 // ── v2 transport adapter ──────────────────────────────────────────────────────
@@ -135,7 +132,7 @@ class RpcV2TransportAdapter implements RpcTransportAdapter {
   private readonly v1: RpcTransportAdapter;
 
   constructor(rpcUrl: string) {
-    this.baseUrl = rpcUrl.replace(/\/$/, "");
+    this.baseUrl = rpcUrl.replace(/\/$/, '');
     // The stellar-sdk rpc.Server handles XDR encoding/decoding for all
     // mutating calls — we reuse it for those and only override the methods
     // that have response shape changes in v2.
@@ -146,12 +143,12 @@ class RpcV2TransportAdapter implements RpcTransportAdapter {
   private async postV2<TReq, TRes>(method: string, body: TReq): Promise<TRes> {
     const url = `${this.baseUrl}/v2/${method}`;
     const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body),
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
+      const text = await response.text().catch(() => '');
       throw new Error(`RPC v2 ${method} failed (${response.status}): ${text}`);
     }
     return (await response.json()) as TRes;
@@ -160,10 +157,10 @@ class RpcV2TransportAdapter implements RpcTransportAdapter {
   // ── Methods that have changed in v2 ────────────────────────────────────────
 
   async getHealth(): Promise<rpc.Api.GetHealthResponse> {
-    const v2 = await this.postV2<Record<string, never>, V2HealthResponse>("health", {});
+    const v2 = await this.postV2<Record<string, never>, V2HealthResponse>('health', {});
     // Normalize to the v1 shape expected by the rest of the SDK.
     return {
-      status: v2.status as rpc.Api.GetHealthResponse["status"],
+      status: v2.status as rpc.Api.GetHealthResponse['status'],
       ...(v2.latestLedger != null ? { latestLedger: v2.latestLedger } : {}),
       ...(v2.oldestLedger != null ? { oldestLedger: v2.oldestLedger } : {}),
     } as rpc.Api.GetHealthResponse;
@@ -171,7 +168,7 @@ class RpcV2TransportAdapter implements RpcTransportAdapter {
 
   async getLatestLedger(): Promise<rpc.Api.GetLatestLedgerResponse> {
     const v2 = await this.postV2<Record<string, never>, V2LatestLedgerResponse>(
-      "getLatestLedger",
+      'getLatestLedger',
       {},
     );
     return {
@@ -204,9 +201,7 @@ class RpcV2TransportAdapter implements RpcTransportAdapter {
     return this.v1.prepareTransaction(tx);
   }
 
-  sendTransaction(
-    tx: Transaction | FeeBumpTransaction,
-  ): Promise<rpc.Api.SendTransactionResponse> {
+  sendTransaction(tx: Transaction | FeeBumpTransaction): Promise<rpc.Api.SendTransactionResponse> {
     return this.v1.sendTransaction(tx);
   }
 
@@ -238,18 +233,12 @@ export function createRpcCompatTransport(
   rpcUrl: string,
   options: RpcCompatTransportOptions = {},
 ): RpcTransportAdapter {
-  const {
-    rpcVersion = "auto",
-    probeTimeoutMs = 5_000,
-    onVersionDetected,
-  } = options;
+  const { rpcVersion = 'auto', probeTimeoutMs = 5_000, onVersionDetected } = options;
 
   // If a concrete version is requested, skip detection.
-  if (rpcVersion !== "auto") {
+  if (rpcVersion !== 'auto') {
     const resolvedTransport =
-      rpcVersion === "v2"
-        ? new RpcV2TransportAdapter(rpcUrl)
-        : createDefaultRpcTransport(rpcUrl);
+      rpcVersion === 'v2' ? new RpcV2TransportAdapter(rpcUrl) : createDefaultRpcTransport(rpcUrl);
 
     // Fire the callback synchronously if no detection is needed.
     onVersionDetected?.({
@@ -271,9 +260,7 @@ export function createRpcCompatTransport(
 
     detectionPromise = detectRpcVersion(rpcUrl, probeTimeoutMs).then((version) => {
       const adapter =
-        version === "v2"
-          ? new RpcV2TransportAdapter(rpcUrl)
-          : createDefaultRpcTransport(rpcUrl);
+        version === 'v2' ? new RpcV2TransportAdapter(rpcUrl) : createDefaultRpcTransport(rpcUrl);
       resolvedAdapter = adapter;
 
       onVersionDetected?.({

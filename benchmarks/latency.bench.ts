@@ -19,20 +19,20 @@
  *   npx vitest bench --reporter=verbose benchmarks/
  */
 
-import { bench, describe, beforeAll } from "vitest";
-import { MockSoroStreamClient } from "../src/mock.js";
+import { bench, describe, beforeAll } from 'vitest';
+import { MockSoroStreamClient } from '../src/mock.js';
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
-const RECIPIENT = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
-const TOKEN = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
+const RECIPIENT = 'GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF';
+const TOKEN = 'CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T';
 const ITERATIONS = 100;
 
 // Shared mock client — reset once per suite run.
 const mock = new MockSoroStreamClient();
 
 // Pre-seeded stream IDs used for read benchmarks.
-let seedStreamId = "";
+let seedStreamId = '';
 
 // Warm-up: create one stream so read benchmarks have something to read.
 beforeAll(async () => {
@@ -54,7 +54,7 @@ beforeAll(async () => {
  */
 export async function measurePercentiles(
   fn: () => Promise<unknown>,
-  n: number
+  n: number,
 ): Promise<{ p50: number; p95: number; p99: number; mean: number }> {
   const times: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -70,33 +70,33 @@ export async function measurePercentiles(
 
 // ── getStream ─────────────────────────────────────────────────────────────────
 
-describe("getStream latency", () => {
+describe('getStream latency', () => {
   bench(
-    "getStream — 100 iterations",
+    'getStream — 100 iterations',
     async () => {
       await mock.getStream(seedStreamId);
     },
-    { iterations: ITERATIONS, time: 0 }
+    { iterations: ITERATIONS, time: 0 },
   );
 });
 
 // ── getClaimable ──────────────────────────────────────────────────────────────
 
-describe("getClaimable latency", () => {
+describe('getClaimable latency', () => {
   bench(
-    "getClaimable — 100 iterations",
+    'getClaimable — 100 iterations',
     async () => {
       await mock.getClaimable(seedStreamId);
     },
-    { iterations: ITERATIONS, time: 0 }
+    { iterations: ITERATIONS, time: 0 },
   );
 });
 
 // ── createStream ──────────────────────────────────────────────────────────────
 
-describe("createStream latency", () => {
+describe('createStream latency', () => {
   bench(
-    "createStream — 100 iterations",
+    'createStream — 100 iterations',
     async () => {
       await mock.createStream({
         recipient: RECIPIENT,
@@ -106,15 +106,15 @@ describe("createStream latency", () => {
         autoRenew: false,
       });
     },
-    { iterations: ITERATIONS, time: 0 }
+    { iterations: ITERATIONS, time: 0 },
   );
 });
 
 // ── withdraw ──────────────────────────────────────────────────────────────────
 
-describe("withdraw latency", () => {
+describe('withdraw latency', () => {
   bench(
-    "withdraw — 100 iterations",
+    'withdraw — 100 iterations',
     async () => {
       // Create a fresh stream per iteration to ensure there is always
       // something to withdraw.
@@ -127,15 +127,15 @@ describe("withdraw latency", () => {
       });
       await mock.withdraw({ streamId });
     },
-    { iterations: ITERATIONS, time: 0 }
+    { iterations: ITERATIONS, time: 0 },
   );
 });
 
 // ── batchWithdraw ─────────────────────────────────────────────────────────────
 
-describe("batchWithdraw latency", () => {
+describe('batchWithdraw latency', () => {
   bench(
-    "batchWithdraw 10 streams — 100 iterations",
+    'batchWithdraw 10 streams — 100 iterations',
     async () => {
       const ids: string[] = [];
       for (let i = 0; i < 10; i++) {
@@ -152,27 +152,27 @@ describe("batchWithdraw latency", () => {
         await mock.withdraw({ streamId: id });
       }
     },
-    { iterations: ITERATIONS, time: 0 }
+    { iterations: ITERATIONS, time: 0 },
   );
 });
 
 // ── getStreamsBySender ────────────────────────────────────────────────────────
 
-describe("getStreamsBySender latency", () => {
+describe('getStreamsBySender latency', () => {
   bench(
-    "getStreamsBySender — 100 iterations",
+    'getStreamsBySender — 100 iterations',
     async () => {
       await mock.getStreamsBySender(RECIPIENT);
     },
-    { iterations: ITERATIONS, time: 0 }
+    { iterations: ITERATIONS, time: 0 },
   );
 });
 
 // ── WebSocket vs. HTTP Polling Event Subscription Latency ─────────────────────
 
-describe("Event subscription latency — WebSocket vs. HTTP polling (100 events)", () => {
+describe('Event subscription latency — WebSocket vs. HTTP polling (100 events)', () => {
   bench(
-    "WebSocket transport event subscription — 100 events",
+    'WebSocket transport event subscription — 100 events',
     async () => {
       // Mock WebSocket server emitting 100 simulated events
       const listeners = new Set<(msg: string) => void>();
@@ -182,7 +182,7 @@ describe("Event subscription latency — WebSocket vs. HTTP polling (100 events)
           onmessage: null as ((event: { data: string }) => void) | null,
           send: () => {},
           close: () => {},
-        } as unknown as WebSocket);
+        }) as unknown as WebSocket;
 
       const ws = mockWsFactory();
       let receivedCount = 0;
@@ -194,19 +194,21 @@ describe("Event subscription latency — WebSocket vs. HTTP polling (100 events)
       });
 
       for (let i = 0; i < ITERATIONS; i++) {
-        ws.onmessage?.({ data: JSON.stringify({ type: "claimable", streamId: "1", value: "100" }) });
+        ws.onmessage?.({
+          data: JSON.stringify({ type: 'claimable', streamId: '1', value: '100' }),
+        });
       }
       await donePromise;
     },
-    { iterations: 1, time: 0 }
+    { iterations: 1, time: 0 },
   );
 
   bench(
-    "HTTP polling transport event subscription — 100 events",
+    'HTTP polling transport event subscription — 100 events',
     async () => {
       let receivedCount = 0;
       const pollServer = async () => {
-        return { events: [{ value: "100" }] };
+        return { events: [{ value: '100' }] };
       };
 
       for (let i = 0; i < ITERATIONS; i++) {
@@ -215,6 +217,6 @@ describe("Event subscription latency — WebSocket vs. HTTP polling (100 events)
       }
       expect(receivedCount).toBe(ITERATIONS);
     },
-    { iterations: 1, time: 0 }
+    { iterations: 1, time: 0 },
   );
 });

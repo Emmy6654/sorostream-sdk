@@ -31,12 +31,7 @@
     },
     "StreamStatus": {
       "type": "string",
-      "enum": [
-        "Active",
-        "Cancelled",
-        "Completed",
-        "Paused"
-      ],
+      "enum": ["Active", "Cancelled", "Completed", "Paused"],
       "description": "Status of a payment stream."
     }
   },

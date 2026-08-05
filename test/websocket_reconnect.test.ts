@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { watchClaimableWs } from "../src/utils.js";
+import { describe, it, expect, vi } from 'vitest';
+import { watchClaimableWs } from '../src/utils.js';
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
@@ -44,8 +44,8 @@ class MockWebSocket {
   }
 }
 
-describe("WebSocket transport adapter reconnects automatically (Issue #345)", () => {
-  it("reconnects after an unexpected close and continues receiving events without duplicates", async () => {
+describe('WebSocket transport adapter reconnects automatically (Issue #345)', () => {
+  it('reconnects after an unexpected close and continues receiving events without duplicates', async () => {
     MockWebSocket.instances = [];
     const eventsReceived: bigint[] = [];
     const onClaimable = vi.fn((val: bigint) => {
@@ -56,12 +56,12 @@ describe("WebSocket transport adapter reconnects automatically (Issue #345)", ()
       new MockWebSocket(url, opts) as unknown as WebSocket;
 
     const stop = watchClaimableWs(
-      "wss://mock.rpc.example/ws",
-      "stream-123",
+      'wss://mock.rpc.example/ws',
+      'stream-123',
       onClaimable,
       false,
       webSocketFactory,
-      { reconnect: true, backoffMs: 20 }
+      { reconnect: true, backoffMs: 20 },
     );
 
     // Wait for first connection to open
@@ -71,11 +71,11 @@ describe("WebSocket transport adapter reconnects automatically (Issue #345)", ()
 
     // Verify subscription message sent
     expect(ws1.sentMessages).toContain(
-      JSON.stringify({ type: "subscribe", streamId: "stream-123" })
+      JSON.stringify({ type: 'subscribe', streamId: 'stream-123' }),
     );
 
     // Emit event 1
-    ws1.emitMessage({ type: "claimable", streamId: "stream-123", value: "100" });
+    ws1.emitMessage({ type: 'claimable', streamId: 'stream-123', value: '100' });
     expect(eventsReceived).toEqual([100n]);
 
     // Simulate unexpected disconnect
@@ -91,15 +91,15 @@ describe("WebSocket transport adapter reconnects automatically (Issue #345)", ()
     // Wait for ws2 to open and resubscribe
     await new Promise((r) => setTimeout(r, 10));
     expect(ws2.sentMessages).toContain(
-      JSON.stringify({ type: "subscribe", streamId: "stream-123" })
+      JSON.stringify({ type: 'subscribe', streamId: 'stream-123' }),
     );
 
     // Emit duplicate event 1 on reconnected socket — should be deduplicated
-    ws2.emitMessage({ type: "claimable", streamId: "stream-123", value: "100" });
+    ws2.emitMessage({ type: 'claimable', streamId: 'stream-123', value: '100' });
     expect(eventsReceived).toEqual([100n]); // No duplicate!
 
     // Emit new event 2 after reconnect
-    ws2.emitMessage({ type: "claimable", streamId: "stream-123", value: "200" });
+    ws2.emitMessage({ type: 'claimable', streamId: 'stream-123', value: '200' });
     expect(eventsReceived).toEqual([100n, 200n]);
 
     stop();

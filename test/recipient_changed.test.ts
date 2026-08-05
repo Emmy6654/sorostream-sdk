@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { MockSoroStreamClient } from "../src/mock.js";
-import { Keypair } from "@stellar/stellar-sdk";
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { MockSoroStreamClient } from '../src/mock.js';
+import { Keypair } from '@stellar/stellar-sdk';
 
-describe("#148 onRecipientChanged", () => {
+describe('#148 onRecipientChanged', () => {
   let mock: MockSoroStreamClient;
   const RECIPIENT_A = Keypair.random().publicKey();
   const RECIPIENT_B = Keypair.random().publicKey();
@@ -17,10 +17,10 @@ describe("#148 onRecipientChanged", () => {
     vi.useRealTimers();
   });
 
-  it("registers handler and returns an unsubscribe function", async () => {
+  it('registers handler and returns an unsubscribe function', async () => {
     const { streamId } = await mock.createStream({
       recipient: RECIPIENT_A,
-      token: "GTOKEN",
+      token: 'GTOKEN',
       amount: 1_000_000_000n,
       durationSeconds: 3600,
       autoRenew: false,
@@ -28,14 +28,14 @@ describe("#148 onRecipientChanged", () => {
 
     const cb = vi.fn();
     const unsub = mock.onRecipientChanged(streamId, cb);
-    expect(typeof unsub).toBe("function");
+    expect(typeof unsub).toBe('function');
     unsub();
   });
 
-  it("invokes callback with correct payload when recipient changes", async () => {
+  it('invokes callback with correct payload when recipient changes', async () => {
     const { streamId } = await mock.createStream({
       recipient: RECIPIENT_A,
-      token: "GTOKEN",
+      token: 'GTOKEN',
       amount: 1_000_000_000n,
       durationSeconds: 3600,
       autoRenew: false,
@@ -59,14 +59,14 @@ describe("#148 onRecipientChanged", () => {
         streamId,
         oldRecipient: RECIPIENT_A,
         newRecipient: RECIPIENT_B,
-      })
+      }),
     );
   });
 
-  it("does not invoke callback before recipient changes", async () => {
+  it('does not invoke callback before recipient changes', async () => {
     const { streamId } = await mock.createStream({
       recipient: RECIPIENT_A,
-      token: "GTOKEN",
+      token: 'GTOKEN',
       amount: 1_000_000_000n,
       durationSeconds: 3600,
       autoRenew: false,
@@ -81,10 +81,10 @@ describe("#148 onRecipientChanged", () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it("stops polling after unsubscribe", async () => {
+  it('stops polling after unsubscribe', async () => {
     const { streamId } = await mock.createStream({
       recipient: RECIPIENT_A,
-      token: "GTOKEN",
+      token: 'GTOKEN',
       amount: 1_000_000_000n,
       durationSeconds: 3600,
       autoRenew: false,

@@ -1,26 +1,26 @@
-import type { Rule } from "eslint";
+import type { Rule } from 'eslint';
 
 /** SDK methods that return a Promise. Overridable via the `methods` option. */
 const DEFAULT_ASYNC_METHODS = [
-  "createStream",
-  "withdraw",
-  "cancelStream",
-  "topUp",
-  "getStream",
-  "getClaimable",
-  "getStreamsBySender",
-  "getStreamsByRecipient",
-  "batchWithdraw",
-  "batchCancel",
-  "bulkCreateStreams",
-  "transferStream",
-  "pauseStream",
-  "resumeStream",
-  "setOperator",
-  "operatorTopUp",
-  "splitStream",
-  "cloneStream",
-  "updateFlowRate",
+  'createStream',
+  'withdraw',
+  'cancelStream',
+  'topUp',
+  'getStream',
+  'getClaimable',
+  'getStreamsBySender',
+  'getStreamsByRecipient',
+  'batchWithdraw',
+  'batchCancel',
+  'bulkCreateStreams',
+  'transferStream',
+  'pauseStream',
+  'resumeStream',
+  'setOperator',
+  'operatorTopUp',
+  'splitStream',
+  'cloneStream',
+  'updateFlowRate',
 ];
 
 /**
@@ -30,19 +30,19 @@ const DEFAULT_ASYNC_METHODS = [
  */
 const rule: Rule.RuleModule = {
   meta: {
-    type: "problem",
+    type: 'problem',
     docs: {
-      description: "Require `await` when calling SDK async methods",
+      description: 'Require `await` when calling SDK async methods',
       recommended: true,
-      url: "https://github.com/SoroStream/sorostream-sdk/blob/main/packages/eslint-plugin/README.md#await-async-sdk-methods",
+      url: 'https://github.com/SoroStream/sorostream-sdk/blob/main/packages/eslint-plugin/README.md#await-async-sdk-methods',
     },
     schema: [
       {
-        type: "object",
+        type: 'object',
         properties: {
           methods: {
-            type: "array",
-            items: { type: "string" },
+            type: 'array',
+            items: { type: 'string' },
           },
         },
         additionalProperties: false,
@@ -60,10 +60,10 @@ const rule: Rule.RuleModule = {
     return {
       CallExpression(node: Rule.Node) {
         if (
-          node.type !== "CallExpression" ||
-          node.callee.type !== "MemberExpression" ||
+          node.type !== 'CallExpression' ||
+          node.callee.type !== 'MemberExpression' ||
           node.callee.computed ||
-          node.callee.property.type !== "Identifier" ||
+          node.callee.property.type !== 'Identifier' ||
           !methods.has(node.callee.property.name)
         ) {
           return;
@@ -73,10 +73,10 @@ const rule: Rule.RuleModule = {
         // calls have an AwaitExpression parent, not ExpressionStatement,
         // and returned/assigned calls are consumed by the caller.
         const parent = node.parent;
-        if (parent && parent.type === "ExpressionStatement") {
+        if (parent && parent.type === 'ExpressionStatement') {
           context.report({
             node,
-            messageId: "missingAwait",
+            messageId: 'missingAwait',
             data: { method: node.callee.property.name },
           });
         }

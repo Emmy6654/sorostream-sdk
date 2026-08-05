@@ -47,8 +47,8 @@ import type {
   WithdrawParams,
   WriteOptions,
   OperationExplanation,
-} from "./types.js";
-import { streamToJSON } from "./utils.js";
+} from './types.js';
+import { streamToJSON } from './utils.js';
 
 let nextId = 1;
 
@@ -57,10 +57,10 @@ function nowSec(): number {
 }
 
 function claimableAt(stream: Stream, atSec: number): bigint {
-  if (stream.status === "Cancelled" || stream.status === "Completed") return 0n;
+  if (stream.status === 'Cancelled' || stream.status === 'Completed') return 0n;
   // Enforce lockUntil: no withdrawals until the lock expires
   if (stream.lockUntil !== undefined && atSec < stream.lockUntil) return 0n;
-  if (stream.status === "Paused") {
+  if (stream.status === 'Paused') {
     const effectiveNow = Math.min(stream.pausedAt ?? atSec, stream.endTime);
     const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
     return stream.flowRate * BigInt(elapsed);
@@ -80,7 +80,7 @@ export class MockSoroStreamClient {
   private listeners = new Map<string, Listener>();
   private senderKey: string;
 
-  constructor(senderKey = "GMOCK_SENDER") {
+  constructor(senderKey = 'GMOCK_SENDER') {
     this.senderKey = senderKey;
   }
 
@@ -115,11 +115,11 @@ export class MockSoroStreamClient {
   async createStream(
     params: CreateStreamParams,
     _signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<{ streamId: string; txHash: string }> {
     if (options?.explain || (params as any)?.explain) {
       return {
-        operation: "createStream",
+        operation: 'createStream',
         summary: `Explain mode dry-run for createStream to ${params.recipient}`,
         affectedAddresses: [this.senderKey, params.recipient],
         balanceDeltas: [],
@@ -127,8 +127,8 @@ export class MockSoroStreamClient {
         minResourceFee: 100,
       } as any;
     }
-    if (params.amount <= 0n) throw new Error("Amount must be > 0");
-    if (params.durationSeconds <= 0) throw new Error("Duration must be > 0");
+    if (params.amount <= 0n) throw new Error('Amount must be > 0');
+    if (params.durationSeconds <= 0) throw new Error('Duration must be > 0');
 
     const id = String(nextId++);
     const now = nowSec();
@@ -143,7 +143,7 @@ export class MockSoroStreamClient {
       startTime: now,
       endTime: now + params.durationSeconds,
       lastWithdrawTime: now,
-      status: "Active",
+      status: 'Active',
       autoRenew: params.autoRenew,
       ...(params.lockUntil !== undefined ? { lockUntil: params.lockUntil } : {}),
       toJSON() {
@@ -152,7 +152,7 @@ export class MockSoroStreamClient {
     };
     this.streams.set(id, stream);
     this.emit({
-      type: "StreamCreated",
+      type: 'StreamCreated',
       streamId: id,
       txHash: `mock-tx-create-${id}`,
       ledger: 0,
@@ -165,11 +165,11 @@ export class MockSoroStreamClient {
   async withdraw(
     params: WithdrawParams,
     _signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<{ txHash: string; amount: string }> {
     if (options?.explain || (params as any)?.explain) {
       return {
-        operation: "withdraw",
+        operation: 'withdraw',
         summary: `Explain mode dry-run for withdraw stream ${params.streamId}`,
         affectedAddresses: [this.senderKey],
         balanceDeltas: [],
@@ -179,13 +179,12 @@ export class MockSoroStreamClient {
     }
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
 
     const now = nowSec();
     const amount = claimableAt(stream, now);
     const newLastWithdraw = Math.min(now, stream.endTime);
-    const newStatus: Stream["status"] =
-      newLastWithdraw >= stream.endTime ? "Completed" : "Active";
+    const newStatus: Stream['status'] = newLastWithdraw >= stream.endTime ? 'Completed' : 'Active';
 
     this.streams.set(params.streamId, {
       ...stream,
@@ -194,7 +193,7 @@ export class MockSoroStreamClient {
     });
 
     this.emit({
-      type: "StreamWithdrawn",
+      type: 'StreamWithdrawn',
       streamId: params.streamId,
       txHash: `mock-tx-withdraw-${params.streamId}-${now}`,
       ledger: 0,
@@ -202,9 +201,9 @@ export class MockSoroStreamClient {
       data: { amount: amount.toString() },
     });
 
-    if (newStatus === "Completed") {
+    if (newStatus === 'Completed') {
       this.emit({
-        type: "StreamCompleted",
+        type: 'StreamCompleted',
         streamId: params.streamId,
         txHash: `mock-tx-complete-${params.streamId}`,
         ledger: 0,
@@ -222,11 +221,11 @@ export class MockSoroStreamClient {
   async cancelStream(
     params: CancelStreamParams,
     _signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<{ txHash: string }> {
     if (options?.explain || (params as any)?.explain) {
       return {
-        operation: "cancelStream",
+        operation: 'cancelStream',
         summary: `Explain mode dry-run for cancelStream ${params.streamId}`,
         affectedAddresses: [this.senderKey],
         balanceDeltas: [],
@@ -236,12 +235,12 @@ export class MockSoroStreamClient {
     }
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
 
-    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+    this.streams.set(params.streamId, { ...stream, status: 'Cancelled' });
     const now = nowSec();
     this.emit({
-      type: "StreamCancelled",
+      type: 'StreamCancelled',
       streamId: params.streamId,
       txHash: `mock-tx-cancel-${params.streamId}`,
       ledger: 0,
@@ -254,11 +253,11 @@ export class MockSoroStreamClient {
   async topUp(
     params: TopUpParams,
     _signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<{ txHash: string; newEndTime: Date }> {
     if (options?.explain || (params as any)?.explain) {
       return {
-        operation: "topUp",
+        operation: 'topUp',
         summary: `Explain mode dry-run for topUp stream ${params.streamId}`,
         affectedAddresses: [this.senderKey],
         balanceDeltas: [],
@@ -266,10 +265,10 @@ export class MockSoroStreamClient {
         minResourceFee: 100,
       } as any;
     }
-    if (params.amount <= 0n) throw new Error("Amount must be > 0");
+    if (params.amount <= 0n) throw new Error('Amount must be > 0');
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
 
     const extraSeconds = Number(params.amount / stream.flowRate);
     const newEndTime = stream.endTime + extraSeconds;
@@ -281,7 +280,7 @@ export class MockSoroStreamClient {
     });
 
     this.emit({
-      type: "StreamToppedUp",
+      type: 'StreamToppedUp',
       streamId: params.streamId,
       txHash: `mock-tx-topup-${params.streamId}`,
       ledger: 0,
@@ -295,18 +294,15 @@ export class MockSoroStreamClient {
     };
   }
 
-  async batchCancel(
-    streamIds: string[],
-    _batchSize = 8
-  ): Promise<BatchCancelResult[]> {
+  async batchCancel(streamIds: string[], _batchSize = 8): Promise<BatchCancelResult[]> {
     const results: BatchCancelResult[] = [];
     for (const id of streamIds) {
       const stream = this.streams.get(id);
       if (!stream) throw new Error(`Stream not found: ${id}`);
-      if (stream.status !== "Active") throw new Error("Stream is not active");
-      this.streams.set(id, { ...stream, status: "Cancelled" });
+      if (stream.status !== 'Active') throw new Error('Stream is not active');
+      this.streams.set(id, { ...stream, status: 'Cancelled' });
       this.emit({
-        type: "StreamCancelled",
+        type: 'StreamCancelled',
         streamId: id,
         txHash: `mock-tx-cancel-${id}`,
         ledger: 0,
@@ -314,17 +310,15 @@ export class MockSoroStreamClient {
         data: {},
       });
     }
-    results.push({ txHash: "mock-tx-batch-cancel", streamIds });
+    results.push({ txHash: 'mock-tx-batch-cancel', streamIds });
     return results;
   }
 
-  async updateFlowRate(
-    params: UpdateFlowRateParams
-  ): Promise<{ txHash: string }> {
-    if (params.newFlowRate <= 0n) throw new Error("Flow rate must be > 0");
+  async updateFlowRate(params: UpdateFlowRateParams): Promise<{ txHash: string }> {
+    if (params.newFlowRate <= 0n) throw new Error('Flow rate must be > 0');
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
 
     const streamedSoFar = stream.flowRate * BigInt(nowSec() - stream.startTime);
     const remaining = stream.deposit - streamedSoFar;
@@ -364,9 +358,7 @@ export class MockSoroStreamClient {
     return { txHash: `mock-tx-revoke-delegate-${delegate}` };
   }
 
-  async setOperator(
-    params: SetOperatorParams
-  ): Promise<{ txHash: string }> {
+  async setOperator(params: SetOperatorParams): Promise<{ txHash: string }> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
 
@@ -378,33 +370,29 @@ export class MockSoroStreamClient {
     } else {
       this.operators.set(
         params.streamId,
-        existing.filter((o) => o !== params.operator)
+        existing.filter((o) => o !== params.operator),
       );
     }
 
     return { txHash: `mock-tx-set-op-${params.streamId}` };
   }
 
-  async operatorCancelStream(
-    params: { streamId: string }
-  ): Promise<{ txHash: string }> {
+  async operatorCancelStream(params: { streamId: string }): Promise<{ txHash: string }> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
     const ops = this.operators.get(params.streamId) ?? [];
-    if (!ops.includes(this.senderKey)) throw new Error("Not an authorised operator");
+    if (!ops.includes(this.senderKey)) throw new Error('Not an authorised operator');
 
-    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+    this.streams.set(params.streamId, { ...stream, status: 'Cancelled' });
     return { txHash: `mock-tx-op-cancel-${params.streamId}` };
   }
 
-  async operatorTopUp(
-    params: OperatorTopUpParams
-  ): Promise<{ txHash: string }> {
-    if (params.amount <= 0n) throw new Error("Amount must be > 0");
+  async operatorTopUp(params: OperatorTopUpParams): Promise<{ txHash: string }> {
+    if (params.amount <= 0n) throw new Error('Amount must be > 0');
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
     const ops = this.operators.get(params.streamId) ?? [];
-    if (!ops.includes(this.senderKey)) throw new Error("Not an authorised operator");
+    if (!ops.includes(this.senderKey)) throw new Error('Not an authorised operator');
 
     const extraSeconds = Number(params.amount / stream.flowRate);
     const newEndTime = stream.endTime + extraSeconds;
@@ -420,16 +408,16 @@ export class MockSoroStreamClient {
   async splitStream(params: SplitStreamParams): Promise<SplitStreamResult> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
     if (params.ratioNumerator <= 0 || params.ratioDenominator <= 0) {
-      throw new Error("Ratio must be positive");
+      throw new Error('Ratio must be positive');
     }
     if (params.ratioNumerator >= params.ratioDenominator) {
-      throw new Error("Ratio numerator must be less than denominator");
+      throw new Error('Ratio numerator must be less than denominator');
     }
 
     // Cancel the original stream
-    this.streams.set(params.streamId, { ...stream, status: "Cancelled" });
+    this.streams.set(params.streamId, { ...stream, status: 'Cancelled' });
 
     const now = nowSec();
     const remainingDuration = stream.endTime - Math.max(now, stream.lastWithdrawTime);
@@ -459,7 +447,7 @@ export class MockSoroStreamClient {
       startTime: now,
       endTime: now + remainingDuration,
       lastWithdrawTime: now,
-      status: "Active",
+      status: 'Active',
       autoRenew: false,
     };
 
@@ -473,7 +461,7 @@ export class MockSoroStreamClient {
       startTime: now,
       endTime: now + remainingDuration,
       lastWithdrawTime: now,
-      status: "Active",
+      status: 'Active',
       autoRenew: false,
     };
 
@@ -483,7 +471,7 @@ export class MockSoroStreamClient {
     const txHash = `mock-tx-split-${params.streamId}`;
 
     this.emit({
-      type: "StreamCancelled",
+      type: 'StreamCancelled',
       streamId: params.streamId,
       txHash,
       ledger: 0,
@@ -492,7 +480,7 @@ export class MockSoroStreamClient {
     });
 
     this.emit({
-      type: "StreamCreated",
+      type: 'StreamCreated',
       streamId: idA,
       txHash,
       ledger: 0,
@@ -501,7 +489,7 @@ export class MockSoroStreamClient {
     });
 
     this.emit({
-      type: "StreamCreated",
+      type: 'StreamCreated',
       streamId: idB,
       txHash,
       ledger: 0,
@@ -512,12 +500,10 @@ export class MockSoroStreamClient {
     return { txHash, streamIdA: idA, streamIdB: idB };
   }
 
-  async transferStream(
-    params: TransferStreamParams
-  ): Promise<{ txHash: string }> {
+  async transferStream(params: TransferStreamParams): Promise<{ txHash: string }> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
 
     this.streams.set(params.streamId, {
       ...stream,
@@ -525,7 +511,7 @@ export class MockSoroStreamClient {
     });
 
     this.emit({
-      type: "StreamTransferred",
+      type: 'StreamTransferred',
       streamId: params.streamId,
       txHash: `mock-tx-transfer-${params.streamId}`,
       ledger: 0,
@@ -536,22 +522,20 @@ export class MockSoroStreamClient {
     return { txHash: `mock-tx-transfer-${params.streamId}` };
   }
 
-  async pause(
-    params: PauseStreamParams
-  ): Promise<{ txHash: string }> {
+  async pause(params: PauseStreamParams): Promise<{ txHash: string }> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Active") throw new Error("Stream is not active");
+    if (stream.status !== 'Active') throw new Error('Stream is not active');
 
     const now = nowSec();
     this.streams.set(params.streamId, {
       ...stream,
-      status: "Paused",
+      status: 'Paused',
       pausedAt: now,
     });
 
     this.emit({
-      type: "StreamPaused",
+      type: 'StreamPaused',
       streamId: params.streamId,
       txHash: `mock-tx-pause-${params.streamId}`,
       ledger: 0,
@@ -562,25 +546,23 @@ export class MockSoroStreamClient {
     return { txHash: `mock-tx-pause-${params.streamId}` };
   }
 
-  async resume(
-    params: ResumeStreamParams
-  ): Promise<{ txHash: string }> {
+  async resume(params: ResumeStreamParams): Promise<{ txHash: string }> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
-    if (stream.status !== "Paused") throw new Error("Stream is not paused");
+    if (stream.status !== 'Paused') throw new Error('Stream is not paused');
 
     const now = nowSec();
     const pauseDuration = now - (stream.pausedAt ?? now);
 
     this.streams.set(params.streamId, {
       ...stream,
-      status: "Active",
+      status: 'Active',
       pausedAt: undefined,
       endTime: stream.endTime + pauseDuration,
     });
 
     this.emit({
-      type: "StreamResumed",
+      type: 'StreamResumed',
       streamId: params.streamId,
       txHash: `mock-tx-resume-${params.streamId}`,
       ledger: 0,
@@ -605,33 +587,24 @@ export class MockSoroStreamClient {
 
   async getStreamsBySender(
     sender: string,
-    pagination?: PaginationParams
+    pagination?: PaginationParams,
   ): Promise<Stream[] | PaginatedStreams> {
-    const all = Array.from(this.streams.values()).filter(
-      (s) => s.sender === sender
-    );
+    const all = Array.from(this.streams.values()).filter((s) => s.sender === sender);
     return this._paginate(all, pagination);
   }
 
   async getStreamsByRecipient(
     recipient: string,
-    pagination?: PaginationParams
+    pagination?: PaginationParams,
   ): Promise<Stream[] | PaginatedStreams> {
-    const all = Array.from(this.streams.values()).filter(
-      (s) => s.recipient === recipient
-    );
+    const all = Array.from(this.streams.values()).filter((s) => s.recipient === recipient);
     return this._paginate(all, pagination);
   }
 
-  private _paginate(
-    all: Stream[],
-    pagination?: PaginationParams
-  ): Stream[] | PaginatedStreams {
+  private _paginate(all: Stream[], pagination?: PaginationParams): Stream[] | PaginatedStreams {
     if (!pagination) return all;
     const limit = pagination.limit ?? 20;
-    const start = pagination.cursor
-      ? all.findIndex((s) => s.id === pagination.cursor) + 1
-      : 0;
+    const start = pagination.cursor ? all.findIndex((s) => s.id === pagination.cursor) + 1 : 0;
     const page = all.slice(start, start + limit);
     const last = page[page.length - 1];
     return {
@@ -643,7 +616,7 @@ export class MockSoroStreamClient {
 
   async cloneStream(
     streamId: string,
-    overrides?: CloneStreamOverrides
+    overrides?: CloneStreamOverrides,
   ): Promise<{ streamId: string; txHash: string }> {
     const source = await this.getStream(streamId);
     const durationSeconds = source.endTime - source.startTime;
@@ -660,7 +633,7 @@ export class MockSoroStreamClient {
 
   subscribeEvents(
     filter: StreamEventFilter,
-    callback: (event: StreamEvent) => void
+    callback: (event: StreamEvent) => void,
   ): StreamSubscription {
     const key = `mock-sub-${Date.now()}-${Math.random()}`;
     this.listeners.set(key, {
@@ -683,7 +656,11 @@ export class MockSoroStreamClient {
     return {
       version: 1,
       exportedAt: Date.now(),
-      stream: { ...stream, deposit: stream.deposit.toString(), flowRate: stream.flowRate.toString() },
+      stream: {
+        ...stream,
+        deposit: stream.deposit.toString(),
+        flowRate: stream.flowRate.toString(),
+      },
       claimableAtExport: claimable.toString(),
       vestingProjection: [],
       history: [],
@@ -708,8 +685,13 @@ export class MockSoroStreamClient {
 
   onRecipientChanged(
     streamId: string,
-    callback: (event: { streamId: string; oldRecipient: string; newRecipient: string; timestamp: number }) => void,
-    options?: { intervalMs?: number }
+    callback: (event: {
+      streamId: string;
+      oldRecipient: string;
+      newRecipient: string;
+      timestamp: number;
+    }) => void,
+    options?: { intervalMs?: number },
   ): () => void {
     const intervalMs = options?.intervalMs ?? 5_000;
     let stopped = false;
@@ -720,15 +702,25 @@ export class MockSoroStreamClient {
       try {
         const stream = await this.getStream(streamId);
         if (lastRecipient !== null && stream.recipient !== lastRecipient) {
-          callback({ streamId, oldRecipient: lastRecipient, newRecipient: stream.recipient, timestamp: Math.floor(Date.now() / 1000) });
+          callback({
+            streamId,
+            oldRecipient: lastRecipient,
+            newRecipient: stream.recipient,
+            timestamp: Math.floor(Date.now() / 1000),
+          });
         }
         lastRecipient = stream.recipient;
-      } catch { /* swallow */ }
+      } catch {
+        /* swallow */
+      }
     };
 
     void poll();
     const timer = setInterval(poll, intervalMs);
-    return () => { stopped = true; clearInterval(timer); };
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   }
 
   // ── Issue #149: Connection pooling ────────────────────────────────────────
@@ -736,12 +728,11 @@ export class MockSoroStreamClient {
   getConnectionStats(): { maxConnections: number; active: number; idle: number; reused: number } {
     return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
   }
-
 }
 
 // ── Issue #348: SDK Sandbox Mode ─────────────────────────────────────────────
 
-export type SandboxUnexpectedCallPolicy = "error" | "allow" | "warn";
+export type SandboxUnexpectedCallPolicy = 'error' | 'allow' | 'warn';
 
 export interface SandboxCallLog {
   method: string;
@@ -757,15 +748,15 @@ export interface SandboxCallLog {
 export class SoroStreamSandbox extends MockSoroStreamClient {
   private callLog: SandboxCallLog[] = [];
   private scenarios = new Map<string, (...args: any[]) => any>();
-  private unexpectedCallPolicy: SandboxUnexpectedCallPolicy = "allow";
+  private unexpectedCallPolicy: SandboxUnexpectedCallPolicy = 'allow';
 
-  constructor(senderKey = "GSANDBOX_SENDER") {
+  constructor(senderKey = 'GSANDBOX_SENDER') {
     super(senderKey);
     return new Proxy(this, {
       get(target, prop, receiver) {
-        if (typeof prop === "string" && !(prop in target)) {
+        if (typeof prop === 'string' && !(prop in target)) {
           return (...args: unknown[]) =>
-            target["recordAndExecute"](prop, () => Promise.resolve(undefined), args);
+            target['recordAndExecute'](prop, () => Promise.resolve(undefined), args);
         }
         return Reflect.get(target, prop, receiver);
       },
@@ -805,7 +796,7 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
     const calls = this.getCalls(method);
     if (calls.length < times) {
       throw new Error(
-        `Expected method "${method}" to be called at least ${times} times, but was called ${calls.length} times.`
+        `Expected method "${method}" to be called at least ${times} times, but was called ${calls.length} times.`,
       );
     }
   }
@@ -816,7 +807,7 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
     const matched = calls.some((c) => matcher(c.args));
     if (!matched) {
       throw new Error(
-        `Expected method "${method}" to be called with matching arguments, but no call matched.`
+        `Expected method "${method}" to be called with matching arguments, but no call matched.`,
       );
     }
   }
@@ -824,7 +815,7 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
   private recordAndExecute<T>(
     method: string,
     defaultFn: () => Promise<T>,
-    args: unknown[]
+    args: unknown[],
   ): Promise<T> {
     this.callLog.push({ method, args, timestamp: Date.now() });
 
@@ -833,13 +824,8 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
       return Promise.resolve(scenario(...args));
     }
 
-    if (
-      this.unexpectedCallPolicy === "error" &&
-      !this.isDefaultOperation(method)
-    ) {
-      throw new Error(
-        `Unexpected call to unconfigured sandbox operation: "${method}"`
-      );
+    if (this.unexpectedCallPolicy === 'error' && !this.isDefaultOperation(method)) {
+      throw new Error(`Unexpected call to unconfigured sandbox operation: "${method}"`);
     }
 
     return defaultFn();
@@ -847,105 +833,99 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
 
   private isDefaultOperation(method: string): boolean {
     return [
-      "createStream",
-      "withdraw",
-      "cancelStream",
-      "topUp",
-      "getStream",
-      "getClaimable",
-      "getStreamsBySender",
-      "getStreamsByRecipient",
-      "watchClaimable",
-      "batchCancel",
-      "updateFlowRate",
-      "pause",
-      "resume",
-      "splitStream",
-      "transferStream",
+      'createStream',
+      'withdraw',
+      'cancelStream',
+      'topUp',
+      'getStream',
+      'getClaimable',
+      'getStreamsBySender',
+      'getStreamsByRecipient',
+      'watchClaimable',
+      'batchCancel',
+      'updateFlowRate',
+      'pause',
+      'resume',
+      'splitStream',
+      'transferStream',
     ].includes(method);
   }
 
   override async createStream(
     params: CreateStreamParams,
     signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<any> {
     return this.recordAndExecute(
-      "createStream",
+      'createStream',
       () => super.createStream(params, signal, options),
-      [params, signal, options]
+      [params, signal, options],
     );
   }
 
   override async withdraw(
     params: WithdrawParams,
     signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<any> {
-    return this.recordAndExecute(
-      "withdraw",
-      () => super.withdraw(params, signal, options),
-      [params, signal, options]
-    );
+    return this.recordAndExecute('withdraw', () => super.withdraw(params, signal, options), [
+      params,
+      signal,
+      options,
+    ]);
   }
 
   override async cancelStream(
     params: CancelStreamParams,
     signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<any> {
     return this.recordAndExecute(
-      "cancelStream",
+      'cancelStream',
       () => super.cancelStream(params, signal, options),
-      [params, signal, options]
+      [params, signal, options],
     );
   }
 
   override async topUp(
     params: TopUpParams,
     signal?: AbortSignal,
-    options?: WriteOptions
+    options?: WriteOptions,
   ): Promise<any> {
-    return this.recordAndExecute(
-      "topUp",
-      () => super.topUp(params, signal, options),
-      [params, signal, options]
-    );
-  }
-
-  override async getStream(streamId: string): Promise<Stream> {
-    return this.recordAndExecute("getStream", () => super.getStream(streamId), [
-      streamId,
+    return this.recordAndExecute('topUp', () => super.topUp(params, signal, options), [
+      params,
+      signal,
+      options,
     ]);
   }
 
+  override async getStream(streamId: string): Promise<Stream> {
+    return this.recordAndExecute('getStream', () => super.getStream(streamId), [streamId]);
+  }
+
   override async getClaimable(streamId: string): Promise<bigint> {
-    return this.recordAndExecute(
-      "getClaimable",
-      () => super.getClaimable(streamId),
-      [streamId]
-    );
+    return this.recordAndExecute('getClaimable', () => super.getClaimable(streamId), [streamId]);
   }
 
   override async getStreamsBySender(
     sender: string,
-    pagination?: PaginationParams
+    pagination?: PaginationParams,
   ): Promise<Stream[] | PaginatedStreams> {
     return this.recordAndExecute(
-      "getStreamsBySender",
+      'getStreamsBySender',
       () => super.getStreamsBySender(sender, pagination),
-      [sender, pagination]
+      [sender, pagination],
     );
   }
 
   override async getStreamsByRecipient(
     recipient: string,
-    pagination?: PaginationParams
+    pagination?: PaginationParams,
   ): Promise<Stream[] | PaginatedStreams> {
     return this.recordAndExecute(
-      "getStreamsByRecipient",
+      'getStreamsByRecipient',
       () => super.getStreamsByRecipient(recipient, pagination),
-      [recipient, pagination]
+      [recipient, pagination],
     );
   }
 }

@@ -1,22 +1,22 @@
-import type { FetchAdapter, WebSocketFactory } from "./adapters.js";
-import type { CircuitBreakerOptions } from "./circuitBreaker.js";
-import type { RetryOptions } from "./retry.js";
-import type { StreamRetryPolicy } from "./events.js";
+import type { FetchAdapter, WebSocketFactory } from './adapters.js';
+import type { CircuitBreakerOptions } from './circuitBreaker.js';
+import type { RetryOptions } from './retry.js';
+import type { StreamRetryPolicy } from './events.js';
 
 /** Status of a payment stream. */
-export type StreamStatus = "Active" | "Cancelled" | "Completed" | "Paused";
+export type StreamStatus = 'Active' | 'Cancelled' | 'Completed' | 'Paused';
 
 // ── Event types (#1) ─────────────────────────────────────────────────────────
 
 export type StreamEventType =
-  | "StreamCreated"
-  | "StreamWithdrawn"
-  | "StreamCancelled"
-  | "StreamCompleted"
-  | "StreamToppedUp"
-  | "StreamPaused"
-  | "StreamResumed"
-  | "StreamTransferred";
+  | 'StreamCreated'
+  | 'StreamWithdrawn'
+  | 'StreamCancelled'
+  | 'StreamCompleted'
+  | 'StreamToppedUp'
+  | 'StreamPaused'
+  | 'StreamResumed'
+  | 'StreamTransferred';
 
 export interface StreamEvent<TData = Record<string, unknown>> {
   type: StreamEventType;
@@ -184,7 +184,7 @@ export interface TopUpParams {
 }
 
 /** Network configuration. */
-export type Network = "mainnet" | "testnet" | "futurenet";
+export type Network = 'mainnet' | 'testnet' | 'futurenet';
 
 /** Fee estimate returned by prepareTransaction. */
 export interface FeeEstimate {
@@ -356,12 +356,11 @@ export interface WatchClaimableOptions {
    * subscription. Required in environments without a native `WebSocket`
    * global (issue #199).
    */
-   webSocketFactory?: WebSocketFactory;
+  webSocketFactory?: WebSocketFactory;
 }
 
 /** Options for {@link watchTotalClaimable}. */
 export interface WatchTotalClaimableOptions extends WatchClaimableOptions {}
-
 
 /**
  * Wallet adapter interface. Implement this to support custom signing backends.
@@ -574,7 +573,7 @@ export interface FeeBumpOptions {
  */
 export interface HorizonTransactionRecord {
   /** The memo encoding used, or `"none"` when no memo was set. */
-  memo_type?: "none" | "text" | "id" | "hash" | "return";
+  memo_type?: 'none' | 'text' | 'id' | 'hash' | 'return';
   /**
    * The raw memo value as returned by Horizon: plain text for `"text"`/`"id"`,
    * base64 for `"hash"`/`"return"`. Absent when `memo_type` is `"none"`.
@@ -585,7 +584,7 @@ export interface HorizonTransactionRecord {
 /** The result of decoding a Horizon transaction record's memo. */
 export interface ParsedMemo {
   /** The memo's encoding, or `"none"` when the transaction had no memo. */
-  type: "none" | "text" | "id" | "hash" | "return";
+  type: 'none' | 'text' | 'id' | 'hash' | 'return';
   /**
    * The decoded value: the plain string for `"text"`/`"id"`, a 32-byte
    * `Buffer` for `"hash"`/`"return"`, or `null` when `type` is `"none"`.
@@ -605,6 +604,8 @@ export type MemoHash = Buffer;
 export interface WriteOptions {
   /** If true, simulate only without submitting. */
   simulateOnly?: boolean;
+  /** Optional AbortSignal to cancel in-flight transaction polling. */
+  signal?: AbortSignal;
   /** Override fee-bump for this specific transaction. */
   feeBump?: FeeBumpOptions;
   /**
@@ -705,7 +706,7 @@ export interface OperationExplanation {
 // ── Contract versioning (#Issue 4) ───────────────────────────────────────────
 
 /** Supported contract versions for call encoding. */
-export type ContractVersion = "v1" | "v2";
+export type ContractVersion = 'v1' | 'v2';
 
 // ── Issue #209: Contract compatibility checking ──────────────────────────────
 
@@ -807,19 +808,16 @@ export interface StreamFilterCriteria {
 export type StreamFilter = StreamFilterCriteria;
 
 /** Field to sort streams by in {@link sortStreams}. `"amount"` sorts by `deposit`. */
-export type StreamSortField = "startTime" | "endTime" | "amount";
+export type StreamSortField = 'startTime' | 'endTime' | 'amount';
 
 /** Sort direction for {@link sortStreams}. */
-export type SortOrder = "asc" | "desc";
+export type SortOrder = 'asc' | 'desc';
 
 // ── Issue #166: Stream activity log ─────────────────────────────────────────
 
 /** The type of activity recorded in a stream's activity log. */
 export type StreamActivityType =
-  | "StreamCreated"
-  | "StreamWithdrawn"
-  | "StreamCancelled"
-  | "StreamToppedUp";
+  'StreamCreated' | 'StreamWithdrawn' | 'StreamCancelled' | 'StreamToppedUp';
 
 /** A single entry in a stream's on-chain activity log. */
 export interface StreamActivityEntry {
@@ -870,7 +868,7 @@ export interface StreamSnapshot {
   /** Unix timestamp (ms) when the snapshot was taken. */
   exportedAt: number;
   /** The full stream parameter set. */
-  stream: Omit<Stream, "deposit" | "flowRate"> & {
+  stream: Omit<Stream, 'deposit' | 'flowRate'> & {
     deposit: string;
     flowRate: string;
   };
@@ -1006,17 +1004,17 @@ export interface WalletAdapterChangedPayload {
  * loosely typed so any framework-agnostic bus can implement it.
  */
 export interface SoroStreamEventMap {
-  "stream.created": StreamCreatedEventPayload;
-  "stream.withdrawn": StreamWithdrawnEventPayload;
-  "stream.cancelled": StreamCancelledEventPayload;
-  "rpc.error": RpcErrorEventPayload;
-  "walletAdapterChanged": WalletAdapterChangedEventPayload;
-  "cacheInvalidated": CacheInvalidatedEventPayload;
+  'stream.created': StreamCreatedEventPayload;
+  'stream.withdrawn': StreamWithdrawnEventPayload;
+  'stream.cancelled': StreamCancelledEventPayload;
+  'rpc.error': RpcErrorEventPayload;
+  walletAdapterChanged: WalletAdapterChangedEventPayload;
+  cacheInvalidated: CacheInvalidatedEventPayload;
 }
 
 /** Payload emitted when the client read cache is invalidated (issue #342). */
 export interface CacheInvalidatedEventPayload {
-  reason: "networkSwitch" | "manual" | string;
+  reason: 'networkSwitch' | 'manual' | string;
   network: Network;
   previousNetwork?: Network;
   streamId?: string;
@@ -1053,7 +1051,7 @@ export interface HealthCheckResult {
 /** Options for exportStreamHistory (issue #307). */
 export interface ExportStreamHistoryOptions {
   /** Output format: 'json' (array) or 'ndjson' (line-delimited stream). Defaults to 'json'. */
-  format?: "json" | "ndjson";
+  format?: 'json' | 'ndjson';
   /** Target writable stream (Node.js WritableStream, browser WritableStream, or object with write()). */
   writable?: any;
   /** Maximum items per page fetch. Defaults to 100. */
@@ -1087,9 +1085,9 @@ export interface SoroStreamClientConfig {
   /** Maximum time in ms to wait for a transaction to confirm (default: 120000). */
   txTimeoutMs?: number;
   /** Retry policy for read methods (getStream, getClaimable, etc.). */
-  readRetry?: Omit<RetryOptions, "signal">;
+  readRetry?: Omit<RetryOptions, 'signal'>;
   /** Retry policy for transaction submission RPC calls. */
-  submitRetry?: Omit<RetryOptions, "signal">;
+  submitRetry?: Omit<RetryOptions, 'signal'>;
   /** Contract version to use for call encoding (default: "v1"). */
   contractVersion?: ContractVersion;
   /** Maximum number of pooled HTTP connections reused across RPC calls (default: 5). */
@@ -1110,3 +1108,42 @@ export interface SoroStreamClientConfig {
   auditLog?: boolean;
 }
 
+/** Portfolio statistics aggregated across all of an address's streams. Issue #336. */
+export interface PortfolioStats {
+  activeSentCount: number;
+  activeReceivedCount: number;
+  totalClaimable: bigint;
+  totalMonthlyOutflow: bigint;
+  totalMonthlyInflow: bigint;
+}
+
+/** Auto fee-bump monitoring configuration. Issue #337. */
+export interface FeeBumpMonitoringOptions {
+  enabled: boolean;
+  expiryThreshold?: number;
+  feeMultiplier?: number;
+}
+
+/** Plugin registry interface for managing ordered plugin execution. Issue #338. */
+export interface IPluginRegistry {
+  register(
+    plugin: SoroStreamPlugin,
+    constraints?: { name?: string; before?: string; after?: string },
+  ): void;
+  list(): SoroStreamPlugin[];
+  unregister(plugin: SoroStreamPlugin): boolean;
+}
+
+/** Partial configuration update accepted by `updateConfig`. */
+export interface SoroStreamConfigUpdate {
+  txTimeoutMs?: number;
+  contractId?: string;
+  rpcUrl?: string;
+}
+
+/** Describes a single field change emitted by `configUpdated` events. */
+export interface ConfigUpdatedEvent {
+  field: string;
+  oldValue: unknown;
+  newValue: unknown;
+}

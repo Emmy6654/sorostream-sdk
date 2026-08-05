@@ -33,7 +33,7 @@ export interface SoroStreamAdapters {
 
 /** Returns a {@link StorageAdapter} backed by the global `localStorage`, or `null` if unavailable. */
 export function getDefaultStorageAdapter(): StorageAdapter | null {
-  if (typeof localStorage === "undefined") return null;
+  if (typeof localStorage === 'undefined') return null;
   return {
     getItem: (key) => localStorage.getItem(key),
     setItem: (key, value) => localStorage.setItem(key, value),
@@ -43,7 +43,7 @@ export function getDefaultStorageAdapter(): StorageAdapter | null {
 
 /** Returns a {@link WebSocketFactory} backed by the global `WebSocket`, or `null` if unavailable. */
 export function getDefaultWebSocketFactory(): WebSocketFactory | null {
-  if (typeof WebSocket === "undefined") return null;
+  if (typeof WebSocket === 'undefined') return null;
   return (url, opts) =>
     opts
       ? new (WebSocket as unknown as new (u: string, o: unknown) => WebSocket)(url, opts)
@@ -52,5 +52,5 @@ export function getDefaultWebSocketFactory(): WebSocketFactory | null {
 
 /** Returns a {@link FetchAdapter} backed by the global `fetch`, or `null` if unavailable. */
 export function getDefaultFetchAdapter(): FetchAdapter | null {
-  return typeof fetch === "undefined" ? null : fetch;
+  return typeof fetch === 'undefined' ? null : fetch;
 }

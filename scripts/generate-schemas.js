@@ -10,19 +10,19 @@
 // against the committed `schemas/` directory to catch schemas that have
 // drifted out of sync with the TypeScript types.
 
-const fs = require("fs");
-const path = require("path");
-const tsj = require("ts-json-schema-generator");
+const fs = require('fs');
+const path = require('path');
+const tsj = require('ts-json-schema-generator');
 
-const ROOT = path.resolve(__dirname, "..");
-const TSCONFIG = path.join(ROOT, "tsconfig.json");
-const SOURCE = path.join(ROOT, "src", "types.ts");
+const ROOT = path.resolve(__dirname, '..');
+const TSCONFIG = path.join(ROOT, 'tsconfig.json');
+const SOURCE = path.join(ROOT, 'src', 'types.ts');
 
 /** Type name -> output filename. */
 const SCHEMAS = {
-  SoroStreamClientConfig: "sorostream-client-config.schema.json",
-  CreateStreamParams: "create-stream-params.schema.json",
-  StreamFilter: "stream-filter.schema.json",
+  SoroStreamClientConfig: 'sorostream-client-config.schema.json',
+  CreateStreamParams: 'create-stream-params.schema.json',
+  StreamFilter: 'stream-filter.schema.json',
 };
 
 /**
@@ -35,13 +35,13 @@ const SCHEMAS = {
  * actually use for large numbers.
  */
 const BIGINT_FIELDS = {
-  CreateStreamParams: ["amount"],
+  CreateStreamParams: ['amount'],
 };
 
 const BIGINT_STRING_SCHEMA = {
-  type: "string",
-  pattern: "^[0-9]+$",
-  description: "Stroops, encoded as a decimal string to avoid precision loss for large values.",
+  type: 'string',
+  pattern: '^[0-9]+$',
+  description: 'Stroops, encoded as a decimal string to avoid precision loss for large values.',
 };
 
 function patchBigintFields(schema, typeName) {
@@ -52,7 +52,10 @@ function patchBigintFields(schema, typeName) {
   for (const field of fields) {
     const existing = definition.properties[field];
     if (existing) {
-      definition.properties[field] = { ...BIGINT_STRING_SCHEMA, description: existing.description ?? BIGINT_STRING_SCHEMA.description };
+      definition.properties[field] = {
+        ...BIGINT_STRING_SCHEMA,
+        description: existing.description ?? BIGINT_STRING_SCHEMA.description,
+      };
     }
   }
   return schema;
@@ -77,7 +80,7 @@ function generateSchemas(outDir) {
     schema.$id = `https://github.com/SoroStream/sorostream-sdk/blob/main/schemas/${fileName}`;
 
     const outputPath = path.join(outDir, fileName);
-    const contents = JSON.stringify(schema, null, 2) + "\n";
+    const contents = JSON.stringify(schema, null, 2) + '\n';
     fs.writeFileSync(outputPath, contents);
     results[typeName] = { outputPath, contents };
   }
@@ -85,7 +88,7 @@ function generateSchemas(outDir) {
 }
 
 if (require.main === module) {
-  const outDir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, "schemas");
+  const outDir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(ROOT, 'schemas');
   const results = generateSchemas(outDir);
   for (const [typeName, { outputPath }] of Object.entries(results)) {
     console.log(`Generated ${typeName} -> ${path.relative(ROOT, outputPath)}`);

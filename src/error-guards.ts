@@ -44,7 +44,7 @@ import {
   SoroStreamMemoError,
   NonceNotSupportedError,
   SoroStreamDependencyError,
-} from "./errors.js";
+} from './errors.js';
 
 // ── Error union types ─────────────────────────────────────────────────────────
 
@@ -181,10 +181,7 @@ export function isSoroStreamError(err: unknown): err is SoroStreamError {
  * ```
  */
 export function isNetworkError(err: unknown): err is NetworkError {
-  return (
-    err instanceof SoroStreamRetryExhaustedError ||
-    err instanceof FederationResolutionError
-  );
+  return err instanceof SoroStreamRetryExhaustedError || err instanceof FederationResolutionError;
 }
 
 /**
@@ -267,10 +264,7 @@ export function isValidationError(err: unknown): err is ValidationError {
  * ```
  */
 export function isAuthError(err: unknown): err is AuthError {
-  return (
-    err instanceof NonceNotSupportedError ||
-    err instanceof SoroStreamDependencyError
-  );
+  return err instanceof NonceNotSupportedError || err instanceof SoroStreamDependencyError;
 }
 
 // ── matchError helper ─────────────────────────────────────────────────────────
@@ -363,7 +357,7 @@ export function matchError<
   TOtherwise = undefined,
 >(
   err: unknown,
-  handlers: ErrorMatchHandlers<TNetwork, TContract, TValidation, TAuth, TOtherwise>
+  handlers: ErrorMatchHandlers<TNetwork, TContract, TValidation, TAuth, TOtherwise>,
 ): TNetwork | TContract | TValidation | TAuth | TOtherwise | undefined {
   if (isNetworkError(err) && handlers.onNetwork) {
     return handlers.onNetwork(err) as TNetwork;

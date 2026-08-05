@@ -1,16 +1,16 @@
-import { describe, it, expect } from "vitest";
-import { MockSoroStreamClient } from "../src/mock.js";
+import { describe, it, expect } from 'vitest';
+import { MockSoroStreamClient } from '../src/mock.js';
 
-describe("lockUntil parameter", () => {
+describe('lockUntil parameter', () => {
   const baseParams = {
-    recipient: "GABC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJ",
-    token: "GUSDC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHI",
+    recipient: 'GABC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJ',
+    token: 'GUSDC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHI',
     amount: 1_000_000n,
     durationSeconds: 3600,
     autoRenew: false,
   };
 
-  it("accepts a lockUntil within stream bounds", async () => {
+  it('accepts a lockUntil within stream bounds', async () => {
     const client = new MockSoroStreamClient();
     const now = Math.floor(Date.now() / 1000);
     const { streamId } = await client.createStream({
@@ -20,7 +20,7 @@ describe("lockUntil parameter", () => {
     expect(streamId).toBeTruthy();
   });
 
-  it("getClaimable returns 0 before lockUntil expires", async () => {
+  it('getClaimable returns 0 before lockUntil expires', async () => {
     const client = new MockSoroStreamClient();
     const now = Math.floor(Date.now() / 1000);
     const { streamId } = await client.createStream({
@@ -31,7 +31,7 @@ describe("lockUntil parameter", () => {
     expect(claimable).toBe(0n);
   });
 
-  it("lockUntil is stored on the stream object", async () => {
+  it('lockUntil is stored on the stream object', async () => {
     const client = new MockSoroStreamClient();
     const now = Math.floor(Date.now() / 1000);
     const lockUntil = now + 1800;

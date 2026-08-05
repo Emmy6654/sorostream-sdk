@@ -1,15 +1,15 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SoroStreamClient } from "../src/SoroStreamClient.js";
-import type { WalletAdapter, Stream } from "../src/types.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { SoroStreamClient } from '../src/SoroStreamClient.js';
+import type { WalletAdapter, Stream } from '../src/types.js';
 
-const VALID_CONTRACT = "CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T";
-const VALID_ACCOUNT = "GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF";
-const VALID_RECIPIENT = "GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ";
+const VALID_CONTRACT = 'CAVTXNC2WCHINDNP4VBLSOQA2667VE3RPQZNGD5TFI4U2QSHTVAC667T';
+const VALID_ACCOUNT = 'GDDZFLD7ZQTSSDLWEMSD6UML2MTU4KKNCH765GZOVHAYKZNRJMWV4GMF';
+const VALID_RECIPIENT = 'GAXXZ5XSL2VTQPGWB3LPU5273HSJXMK7VHLZTF2XKW65QFZVA3XKULQZ';
 
 function makeMockAdapter(): WalletAdapter {
   return {
     getPublicKey: vi.fn().mockResolvedValue(VALID_ACCOUNT),
-    signTransaction: vi.fn().mockResolvedValue("signed_xdr"),
+    signTransaction: vi.fn().mockResolvedValue('signed_xdr'),
     isConnected: vi.fn().mockResolvedValue(true),
   };
 }
@@ -17,7 +17,7 @@ function makeMockAdapter(): WalletAdapter {
 function makeStream(overrides: Partial<Stream> = {}): Stream {
   const now = Math.floor(Date.now() / 1000);
   return {
-    id: "1",
+    id: '1',
     sender: VALID_ACCOUNT,
     recipient: VALID_ACCOUNT,
     token: VALID_CONTRACT,
@@ -26,13 +26,13 @@ function makeStream(overrides: Partial<Stream> = {}): Stream {
     startTime: now,
     endTime: now + 3600,
     lastWithdrawTime: now,
-    status: "Active",
+    status: 'Active',
     autoRenew: false,
     ...overrides,
   };
 }
 
-describe("Drain flow integration test", () => {
+describe('Drain flow integration test', () => {
   let adapter: WalletAdapter;
 
   beforeEach(() => {
@@ -43,11 +43,11 @@ describe("Drain flow integration test", () => {
     vi.restoreAllMocks();
   });
 
-  it("queues 5 mutations and drains them in correct order when RPC is available", async () => {
+  it('queues 5 mutations and drains them in correct order when RPC is available', async () => {
     const submissionOrder: string[] = [];
 
     const client = new SoroStreamClient({
-      network: "testnet",
+      network: 'testnet',
       contractId: VALID_CONTRACT,
       walletAdapter: adapter,
       skipPeerCheck: true,
@@ -68,7 +68,7 @@ describe("Drain flow integration test", () => {
 
     // Mock getStreamsBySender to return a stream
     let streamCounter = 0;
-    vi.spyOn(client, "getStreamsBySender").mockImplementation(async () => {
+    vi.spyOn(client, 'getStreamsBySender').mockImplementation(async () => {
       streamCounter++;
       return [makeStream({ id: String(streamCounter) })];
     });
@@ -86,20 +86,20 @@ describe("Drain flow integration test", () => {
 
     // Verify all 5 mutations were submitted in order
     expect(submissionOrder).toEqual([
-      "mutation-0",
-      "mutation-1",
-      "mutation-2",
-      "mutation-3",
-      "mutation-4",
+      'mutation-0',
+      'mutation-1',
+      'mutation-2',
+      'mutation-3',
+      'mutation-4',
     ]);
   });
 
-  it("drains queued mutations sequentially with correct ordering", async () => {
+  it('drains queued mutations sequentially with correct ordering', async () => {
     const submissionOrder: number[] = [];
     let submissionCounter = 0;
 
     const client = new SoroStreamClient({
-      network: "testnet",
+      network: 'testnet',
       contractId: VALID_CONTRACT,
       walletAdapter: adapter,
       skipPeerCheck: true,
@@ -117,7 +117,7 @@ describe("Drain flow integration test", () => {
     });
 
     let streamCounter = 0;
-    vi.spyOn(client, "getStreamsBySender").mockImplementation(async () => {
+    vi.spyOn(client, 'getStreamsBySender').mockImplementation(async () => {
       streamCounter++;
       return [makeStream({ id: String(streamCounter) })];
     });
@@ -137,7 +137,7 @@ describe("Drain flow integration test", () => {
     expect(submissionOrder).toEqual([1, 2, 3, 4, 5]);
   });
 
-  it("queueDrained event fires with correct results after all mutations complete", async () => {
+  it('queueDrained event fires with correct results after all mutations complete', async () => {
     const events: Array<{ type: string; data: unknown }> = [];
 
     const eventBus = {
@@ -149,7 +149,7 @@ describe("Drain flow integration test", () => {
     };
 
     const client = new SoroStreamClient({
-      network: "testnet",
+      network: 'testnet',
       contractId: VALID_CONTRACT,
       walletAdapter: adapter,
       skipPeerCheck: true,
@@ -166,7 +166,7 @@ describe("Drain flow integration test", () => {
     });
 
     let streamCounter = 0;
-    vi.spyOn(client, "getStreamsBySender").mockImplementation(async () => {
+    vi.spyOn(client, 'getStreamsBySender').mockImplementation(async () => {
       streamCounter++;
       return [makeStream({ id: String(streamCounter) })];
     });
@@ -183,25 +183,25 @@ describe("Drain flow integration test", () => {
     }
 
     // Verify stream.created events were emitted
-    const createdEvents = events.filter((e) => e.type === "stream.created");
+    const createdEvents = events.filter((e) => e.type === 'stream.created');
     expect(createdEvents).toHaveLength(3);
 
     // Each created event should have the correct data shape
     for (const event of createdEvents) {
       const data = event.data as Record<string, unknown>;
-      expect(data).toHaveProperty("streamId");
-      expect(data).toHaveProperty("sender", VALID_ACCOUNT);
-      expect(data).toHaveProperty("recipient", VALID_RECIPIENT);
-      expect(data).toHaveProperty("token", VALID_CONTRACT);
-      expect(data).toHaveProperty("txHash");
+      expect(data).toHaveProperty('streamId');
+      expect(data).toHaveProperty('sender', VALID_ACCOUNT);
+      expect(data).toHaveProperty('recipient', VALID_RECIPIENT);
+      expect(data).toHaveProperty('token', VALID_CONTRACT);
+      expect(data).toHaveProperty('txHash');
     }
   });
 
-  it("maintains queue order across multiple drain cycles", async () => {
+  it('maintains queue order across multiple drain cycles', async () => {
     const allSubmissions: string[] = [];
 
     const client = new SoroStreamClient({
-      network: "testnet",
+      network: 'testnet',
       contractId: VALID_CONTRACT,
       walletAdapter: adapter,
       skipPeerCheck: true,
@@ -219,7 +219,7 @@ describe("Drain flow integration test", () => {
     });
 
     let streamCounter = 0;
-    vi.spyOn(client, "getStreamsBySender").mockImplementation(async () => {
+    vi.spyOn(client, 'getStreamsBySender').mockImplementation(async () => {
       streamCounter++;
       return [makeStream({ id: String(streamCounter) })];
     });
@@ -254,11 +254,11 @@ describe("Drain flow integration test", () => {
 
     // Verify ordering is maintained across batches
     expect(allSubmissions).toEqual([
-      "tx-hash-1",
-      "tx-hash-2",
-      "tx-hash-3",
-      "tx-hash-4",
-      "tx-hash-5",
+      'tx-hash-1',
+      'tx-hash-2',
+      'tx-hash-3',
+      'tx-hash-4',
+      'tx-hash-5',
     ]);
   });
 });

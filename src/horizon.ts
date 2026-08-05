@@ -1,15 +1,15 @@
 /**
  * Horizon API integration for transaction history lookup (issue #200).
- * 
+ *
  * Provides methods to retrieve historical stream transactions from the Stellar Horizon API.
  */
 
-import type { Network } from "./types.js";
+import type { Network } from './types.js';
 
 const HORIZON_URLS: Record<Network, string> = {
-  mainnet: "https://horizon.stellar.org",
-  testnet: "https://horizon-testnet.stellar.org",
-  futurenet: "https://horizon-futurenet.stellar.org",
+  mainnet: 'https://horizon.stellar.org',
+  testnet: 'https://horizon-testnet.stellar.org',
+  futurenet: 'https://horizon-futurenet.stellar.org',
 };
 
 /**
@@ -61,20 +61,20 @@ export interface TransactionHistoryOptions {
 
 /**
  * Fetches transaction history for a specific stream ID.
- * 
+ *
  * @param streamId - The stream ID to query
  * @param network - The Stellar network to query
  * @param options - Pagination and filter options
  * @returns Paginated transaction history
- * 
+ *
  * @example
  * ```ts
  * const history = await getTransactionHistory("123", "testnet", { limit: 20 });
  * console.log(`Found ${history.transactions.length} transactions`);
- * 
+ *
  * if (history.hasMore) {
- *   const nextPage = await getTransactionHistory("123", "testnet", { 
- *     cursor: history.nextCursor 
+ *   const nextPage = await getTransactionHistory("123", "testnet", {
+ *     cursor: history.nextCursor
  *   });
  * }
  * ```
@@ -82,7 +82,7 @@ export interface TransactionHistoryOptions {
 export async function getTransactionHistory(
   streamId: string,
   network: Network,
-  options: TransactionHistoryOptions = {}
+  options: TransactionHistoryOptions = {},
 ): Promise<TransactionHistoryPage> {
   const { limit = 10, cursor, contractId } = options;
   const horizonUrl = HORIZON_URLS[network];
@@ -90,40 +90,40 @@ export async function getTransactionHistory(
   // Build query parameters
   const params = new URLSearchParams({
     limit: Math.min(limit, 200).toString(),
-    order: "desc",
+    order: 'desc',
   });
-  
+
   if (cursor) {
-    params.set("cursor", cursor);
+    params.set('cursor', cursor);
   }
 
   // Note: This is a simplified implementation. In production, you would need to:
   // 1. Query operations for the contract
   // 2. Filter by stream ID in the operation details
   // 3. Parse contract invocation results
-  
-  const url = contractId 
+
+  const url = contractId
     ? `${horizonUrl}/accounts/${contractId}/operations?${params}`
     : `${horizonUrl}/operations?${params}`;
 
   const response = await fetch(url);
-  
+
   if (!response.ok) {
     throw new Error(`Horizon API error: ${response.status} ${response.statusText}`);
   }
 
   const data = await response.json();
-  
+
   // Parse Horizon response into our format
   const transactions: StreamTransaction[] = [];
-  
+
   for (const record of data._embedded?.records ?? []) {
     // Filter for stream-related operations
-    if (record.type === "invoke_host_function") {
+    if (record.type === 'invoke_host_function') {
       // Check if this operation relates to our stream
       // In a real implementation, you'd parse the contract invocation details
       const streamDetails = parseStreamOperation(record, streamId);
-      
+
       if (streamDetails !== null) {
         transactions.push({
           hash: record.transaction_hash,
@@ -139,7 +139,7 @@ export async function getTransactionHistory(
 
   // Extract next cursor from Horizon links
   const nextLink = data._links?.next?.href;
-  const nextCursor = nextLink ? new URL(nextLink).searchParams.get("cursor") : null;
+  const nextCursor = nextLink ? new URL(nextLink).searchParams.get('cursor') : null;
 
   return {
     transactions,
@@ -150,12 +150,12 @@ export async function getTransactionHistory(
 
 /**
  * Fetches all stream-related transactions for a given address.
- * 
+ *
  * @param address - The Stellar address to query
  * @param network - The Stellar network to query
  * @param options - Pagination and filter options
  * @returns Paginated transaction history
- * 
+ *
  * @example
  * ```ts
  * const activity = await getAddressActivity("GUSER...", "mainnet");
@@ -167,23 +167,23 @@ export async function getTransactionHistory(
 export async function getAddressActivity(
   address: string,
   network: Network,
-  options: TransactionHistoryOptions = {}
+  options: TransactionHistoryOptions = {},
 ): Promise<TransactionHistoryPage> {
   const { limit = 10, cursor, contractId } = options;
   const horizonUrl = HORIZON_URLS[network];
 
   const params = new URLSearchParams({
     limit: Math.min(limit, 200).toString(),
-    order: "desc",
+    order: 'desc',
   });
-  
+
   if (cursor) {
-    params.set("cursor", cursor);
+    params.set('cursor', cursor);
   }
 
   const url = `${horizonUrl}/accounts/${address}/operations?${params}`;
   const response = await fetch(url);
-  
+
   if (!response.ok) {
     throw new Error(`Horizon API error: ${response.status} ${response.statusText}`);
   }
@@ -192,14 +192,14 @@ export async function getAddressActivity(
   const transactions: StreamTransaction[] = [];
 
   for (const record of data._embedded?.records ?? []) {
-    if (record.type === "invoke_host_function") {
+    if (record.type === 'invoke_host_function') {
       // Filter by contract if specified
       if (contractId && record.contract !== contractId) {
         continue;
       }
 
       const streamDetails = parseStreamOperation(record);
-      
+
       transactions.push({
         hash: record.transaction_hash,
         ledger: record.ledger,
@@ -212,7 +212,7 @@ export async function getAddressActivity(
   }
 
   const nextLink = data._links?.next?.href;
-  const nextCursor = nextLink ? new URL(nextLink).searchParams.get("cursor") : null;
+  const nextCursor = nextLink ? new URL(nextLink).searchParams.get('cursor') : null;
 
   return {
     transactions,
@@ -227,36 +227,36 @@ export async function getAddressActivity(
  */
 function parseStreamOperation(
   record: Record<string, unknown>,
-  filterStreamId?: string
-): StreamTransaction["streamDetails"] | null {
+  filterStreamId?: string,
+): StreamTransaction['streamDetails'] | null {
   // In a real implementation, you would:
   // 1. Parse the function name from the operation
   // 2. Decode the parameters based on the function
   // 3. Extract stream ID, amounts, addresses, etc.
   // 4. Filter by streamId if provided
-  
+
   // Placeholder implementation
   const functionName = record.function as string;
-  
+
   // Check if this is a stream-related function
   const streamFunctions = [
-    "create_stream",
-    "withdraw",
-    "cancel_stream",
-    "top_up",
-    "update_flow_rate",
-    "transfer_stream",
-    "pause_stream",
-    "resume_stream",
+    'create_stream',
+    'withdraw',
+    'cancel_stream',
+    'top_up',
+    'update_flow_rate',
+    'transfer_stream',
+    'pause_stream',
+    'resume_stream',
   ];
-  
+
   if (!functionName || !streamFunctions.includes(functionName)) {
     return null;
   }
 
   // If filtering by stream ID, check if this operation matches
   // (In real implementation, parse parameters to extract stream ID)
-  
+
   return {
     // These would be parsed from the actual operation parameters
     streamId: undefined,

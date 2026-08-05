@@ -1,5 +1,5 @@
-import { SoroStreamRetryExhaustedError } from "./errors.js";
-import type { RetryAttempt } from "./errors.js";
+import { SoroStreamRetryExhaustedError } from './errors.js';
+import type { RetryAttempt } from './errors.js';
 
 export interface RetryOptions {
   /** Maximum number of attempts (default: 3). */
@@ -88,10 +88,7 @@ export class RetryBackoff {
  * @param fn - Async function to execute.
  * @param options - Retry configuration.
  */
-export async function withRetry<T>(
-  fn: () => Promise<T>,
-  options?: RetryOptions
-): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>, options?: RetryOptions): Promise<T> {
   const maxAttempts = options?.maxAttempts ?? 3;
   const baseDelayMs = options?.baseDelayMs ?? 200;
   const maxDelayMs = options?.maxDelayMs ?? 5_000;
@@ -103,7 +100,7 @@ export async function withRetry<T>(
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) {
-      throw new DOMException("Retry aborted", "AbortError");
+      throw new DOMException('Retry aborted', 'AbortError');
     }
 
     try {
@@ -116,15 +113,15 @@ export async function withRetry<T>(
         error: err,
       });
       // Capture response body from RPC errors when available
-      if (err && typeof err === "object") {
-        const body = (err as Record<string, unknown>)["body"];
-        if (body && typeof body === "string") {
+      if (err && typeof err === 'object') {
+        const body = (err as Record<string, unknown>)['body'];
+        if (body && typeof body === 'string') {
           finalResponseBody = body;
         }
-        const response = (err as Record<string, unknown>)["response"];
-        if (response && typeof response === "object") {
-          const responseBody = (response as Record<string, unknown>)["body"];
-          if (responseBody && typeof responseBody === "string") {
+        const response = (err as Record<string, unknown>)['response'];
+        if (response && typeof response === 'object') {
+          const responseBody = (response as Record<string, unknown>)['body'];
+          if (responseBody && typeof responseBody === 'string') {
             finalResponseBody = responseBody;
           }
         }
@@ -138,10 +135,5 @@ export async function withRetry<T>(
     }
   }
 
-  throw new SoroStreamRetryExhaustedError(
-    lastError,
-    maxAttempts,
-    attempts,
-    finalResponseBody
-  );
+  throw new SoroStreamRetryExhaustedError(lastError, maxAttempts, attempts, finalResponseBody);
 }

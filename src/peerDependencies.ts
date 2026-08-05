@@ -1,8 +1,8 @@
-import { SoroStreamDependencyError } from "./errors.js";
+import { SoroStreamDependencyError } from './errors.js';
 
 /** The `@stellar/stellar-sdk` semver range this SDK is built against (see package.json). */
-const REQUIRED_STELLAR_SDK_RANGE = "^13.0.0";
-const PEER_PACKAGE_NAME = "@stellar/stellar-sdk";
+const REQUIRED_STELLAR_SDK_RANGE = '^13.0.0';
+const PEER_PACKAGE_NAME = '@stellar/stellar-sdk';
 
 interface ParsedVersion {
   major: number;
@@ -36,16 +36,16 @@ export function getInstalledStellarSdkVersion(): string | null {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const entry = require.resolve(PEER_PACKAGE_NAME);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const path = require("path");
+    const path = require('path');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require("fs");
+    const fs = require('fs');
 
     let dir = path.dirname(entry);
     for (let i = 0; i < 8; i++) {
-      const pkgPath = path.join(dir, "package.json");
+      const pkgPath = path.join(dir, 'package.json');
       if (fs.existsSync(pkgPath)) {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-        if (pkg.name === PEER_PACKAGE_NAME && typeof pkg.version === "string") {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        if (pkg.name === PEER_PACKAGE_NAME && typeof pkg.version === 'string') {
           return pkg.version;
         }
       }
@@ -76,7 +76,7 @@ export function getInstalledStellarSdkVersion(): string | null {
  * Issue #213.
  */
 export function checkPeerDependencies(
-  installedVersion: string | null = getInstalledStellarSdkVersion()
+  installedVersion: string | null = getInstalledStellarSdkVersion(),
 ): void {
   if (!installedVersion) return;
 
@@ -88,7 +88,7 @@ export function checkPeerDependencies(
     throw new SoroStreamDependencyError(
       PEER_PACKAGE_NAME,
       REQUIRED_STELLAR_SDK_RANGE,
-      installedVersion
+      installedVersion,
     );
   }
 
@@ -96,7 +96,7 @@ export function checkPeerDependencies(
     console.warn(
       `[SoroStream SDK] ${PEER_PACKAGE_NAME}@${installedVersion} is newer than the tested range ` +
         `${REQUIRED_STELLAR_SDK_RANGE}. Newer minor versions are usually compatible but have not ` +
-        `been tested against this SDK release.`
+        `been tested against this SDK release.`,
     );
   }
 }

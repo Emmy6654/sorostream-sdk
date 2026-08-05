@@ -115,9 +115,7 @@ export class PriorityRequestQueue {
 
   constructor(config: RequestQueueConfig = {}) {
     this.maxConcurrent = Math.max(1, config.maxConcurrent ?? 10);
-    this.priorityLanes = config.priorityLanes?.length
-      ? config.priorityLanes
-      : ["write", "read"];
+    this.priorityLanes = config.priorityLanes?.length ? config.priorityLanes : ['write', 'read'];
 
     for (const lane of this.priorityLanes) {
       this.queues.set(lane, []);
@@ -253,8 +251,7 @@ export class PriorityRequestQueue {
 
   private estimateWait(queueDepth: number): number {
     if (this.recentDurations.length === 0) return 0;
-    const avg =
-      this.recentDurations.reduce((a, b) => a + b, 0) / this.recentDurations.length;
+    const avg = this.recentDurations.reduce((a, b) => a + b, 0) / this.recentDurations.length;
     // Estimate: how many "rounds" of maxConcurrent tasks before this one runs.
     const rounds = Math.ceil((queueDepth + 1) / this.maxConcurrent);
     return Math.round(avg * rounds);

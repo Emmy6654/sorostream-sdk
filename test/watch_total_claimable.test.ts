@@ -1,20 +1,20 @@
-import { describe, it, expect, vi } from "vitest";
-import { watchTotalClaimable } from "../src/utils.js";
-import type { Stream } from "../src/types.js";
+import { describe, it, expect, vi } from 'vitest';
+import { watchTotalClaimable } from '../src/utils.js';
+import type { Stream } from '../src/types.js';
 
 function makeStream(id: string, flowRate = 100n): Stream {
   const now = Math.floor(Date.now() / 1000);
   return {
     id,
-    sender: "GSENDER",
-    recipient: "GRECIPIENT",
-    token: "GTOKEN",
+    sender: 'GSENDER',
+    recipient: 'GRECIPIENT',
+    token: 'GTOKEN',
     deposit: 1000000n,
     flowRate,
     startTime: now - 100,
     endTime: now + 3600,
     lastWithdrawTime: now - 100,
-    status: "Active",
+    status: 'Active',
     autoRenew: false,
     toJSON() {
       return {};
@@ -22,8 +22,8 @@ function makeStream(id: string, flowRate = 100n): Stream {
   };
 }
 
-describe("watchTotalClaimable aggregator (Issue #346)", () => {
-  it("handles zero streams edge case (total = 0)", () => {
+describe('watchTotalClaimable aggregator (Issue #346)', () => {
+  it('handles zero streams edge case (total = 0)', () => {
     const onTotalChange = vi.fn();
     const unsub = watchTotalClaimable([], [], onTotalChange);
 
@@ -31,19 +31,14 @@ describe("watchTotalClaimable aggregator (Issue #346)", () => {
     unsub();
   });
 
-  it("correctly sums claimable amounts across 10 streams", async () => {
+  it('correctly sums claimable amounts across 10 streams', async () => {
     const streams: Stream[] = Array.from({ length: 10 }, (_, i) =>
-      makeStream(`stream-${i + 1}`, 10n)
+      makeStream(`stream-${i + 1}`, 10n),
     );
 
-    const initialClaimableValues = [
-      100n, 200n, 300n, 400n, 500n,
-      600n, 700n, 800n, 900n, 1000n,
-    ];
+    const initialClaimableValues = [100n, 200n, 300n, 400n, 500n, 600n, 700n, 800n, 900n, 1000n];
 
-    const reconciles = initialClaimableValues.map(
-      (val) => async () => val
-    );
+    const reconciles = initialClaimableValues.map((val) => async () => val);
 
     let emittedTotal = 0n;
     const onTotalChange = vi.fn((total: bigint) => {
@@ -63,15 +58,13 @@ describe("watchTotalClaimable aggregator (Issue #346)", () => {
     unsub();
   });
 
-  it("updates total when individual stream balance changes", async () => {
-    const streams: Stream[] = Array.from({ length: 10 }, (_, i) =>
-      makeStream(`stream-${i + 1}`, 0n) // flowRate 0 so no tick interpolation
+  it('updates total when individual stream balance changes', async () => {
+    const streams: Stream[] = Array.from(
+      { length: 10 },
+      (_, i) => makeStream(`stream-${i + 1}`, 0n), // flowRate 0 so no tick interpolation
     );
 
-    const claimableStates = [
-      10n, 20n, 30n, 40n, 50n,
-      60n, 70n, 80n, 90n, 100n,
-    ];
+    const claimableStates = [10n, 20n, 30n, 40n, 50n, 60n, 70n, 80n, 90n, 100n];
 
     const reconcileCallbacks: Array<(newVal: bigint) => void> = [];
 

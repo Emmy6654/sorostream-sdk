@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import type { SoroStreamClient } from "@sorostream/sdk";
+import { useState, useEffect } from 'react';
+import type { SoroStreamClient } from '@sorostream/sdk';
 
 interface UseClaimableResult {
   claimable: bigint | null;
@@ -18,7 +18,7 @@ interface UseClaimableResult {
 export function useClaimable(
   client: SoroStreamClient | null,
   streamId: string | null,
-  pollInterval: number = 30_000
+  pollInterval: number = 30_000,
 ): UseClaimableResult {
   const [claimable, setClaimable] = useState<bigint | null>(null);
   const [loading, setLoading] = useState(false);

@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import type { SoroStreamClient, Stream } from "@sorostream/sdk";
+import { useState, useEffect } from 'react';
+import type { SoroStreamClient, Stream } from '@sorostream/sdk';
 
 interface UseStreamResult {
   stream: Stream | null;
@@ -16,7 +16,7 @@ interface UseStreamResult {
  */
 export function useStream(
   client: SoroStreamClient | null,
-  streamId: string | null
+  streamId: string | null,
 ): UseStreamResult {
   const [stream, setStream] = useState<Stream | null>(null);
   const [loading, setLoading] = useState(false);

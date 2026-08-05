@@ -1,7 +1,7 @@
-import { rpc } from "@stellar/stellar-sdk";
-import { EventPoller } from "./events.js";
+import { rpc } from '@stellar/stellar-sdk';
+import { EventPoller } from './events.js';
 
-export type PoolEventType = "pool:full" | "pool:reconnect" | "pool:drain";
+export type PoolEventType = 'pool:full' | 'pool:reconnect' | 'pool:drain';
 
 export interface PoolEvent {
   type: PoolEventType;
@@ -70,7 +70,7 @@ export class ConnectionPool {
     }
 
     if (best.subscriptions >= this.maxSubs) {
-      this._emit({ type: "pool:full" });
+      this._emit({ type: 'pool:full' });
     }
 
     best.subscriptions++;
@@ -85,7 +85,7 @@ export class ConnectionPool {
         released = true;
         slot.subscriptions = Math.max(0, slot.subscriptions - 1);
         if (this.slots.every((s) => s.subscriptions === 0)) {
-          this._emit({ type: "pool:drain" });
+          this._emit({ type: 'pool:drain' });
         }
       },
     };
@@ -120,10 +120,7 @@ export class ConnectionPool {
     const now = Date.now();
     for (let i = 0; i < this.slots.length; i++) {
       const slot = this.slots[i]!;
-      if (
-        slot.subscriptions === 0 &&
-        now - slot.lastActive > this.idleTimeoutMs
-      ) {
+      if (slot.subscriptions === 0 && now - slot.lastActive > this.idleTimeoutMs) {
         slot.poller.destroy();
         const server = new rpc.Server(this.rpcUrl, { allowHttp: false });
         this.slots[i] = {
@@ -132,7 +129,7 @@ export class ConnectionPool {
           subscriptions: 0,
           lastActive: now,
         };
-        this._emit({ type: "pool:reconnect" });
+        this._emit({ type: 'pool:reconnect' });
       }
     }
   }

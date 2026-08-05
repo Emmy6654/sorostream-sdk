@@ -1,4 +1,4 @@
-import type { Rule } from "eslint";
+import type { Rule } from 'eslint';
 
 // Stellar/Soroban contract addresses ("C..." strkeys): 56 chars, base32 alphabet.
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
@@ -11,11 +11,12 @@ const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
  */
 const rule: Rule.RuleModule = {
   meta: {
-    type: "problem",
+    type: 'problem',
     docs: {
-      description: "Disallow hardcoded Stellar contract IDs; load them from environment/config instead",
+      description:
+        'Disallow hardcoded Stellar contract IDs; load them from environment/config instead',
       recommended: true,
-      url: "https://github.com/SoroStream/sorostream-sdk/blob/main/packages/eslint-plugin/README.md#no-hardcoded-contract-id",
+      url: 'https://github.com/SoroStream/sorostream-sdk/blob/main/packages/eslint-plugin/README.md#no-hardcoded-contract-id',
     },
     schema: [],
     messages: {
@@ -27,11 +28,11 @@ const rule: Rule.RuleModule = {
     return {
       Literal(node: Rule.Node) {
         if (
-          node.type === "Literal" &&
-          typeof node.value === "string" &&
+          node.type === 'Literal' &&
+          typeof node.value === 'string' &&
           CONTRACT_ID_PATTERN.test(node.value)
         ) {
-          context.report({ node, messageId: "hardcoded", data: { value: node.value } });
+          context.report({ node, messageId: 'hardcoded', data: { value: node.value } });
         }
       },
     };

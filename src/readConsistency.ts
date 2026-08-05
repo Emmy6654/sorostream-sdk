@@ -1,4 +1,6 @@
-import { rpc } from "@stellar/stellar-sdk";
+import { rpc } from '@stellar/stellar-sdk';
+
+type LedgerProvider = { getLatestLedger(): Promise<rpc.Api.GetLatestLedgerResponse> };
 
 /**
  * Options for {@link waitForLedger}.
@@ -47,9 +49,9 @@ export interface WaitForLedgerOptions {
  * ```
  */
 export async function waitForLedger(
-  server: rpc.Server,
+  server: LedgerProvider,
   targetSequence: number,
-  options: WaitForLedgerOptions = {}
+  options: WaitForLedgerOptions = {},
 ): Promise<void> {
   const timeoutMs = options.timeoutMs ?? 10_000;
   const pollIntervalMs = options.pollIntervalMs ?? 500;
@@ -59,7 +61,7 @@ export async function waitForLedger(
 
   while (true) {
     if (signal?.aborted) {
-      throw new DOMException("waitForLedger aborted", "AbortError");
+      throw new DOMException('waitForLedger aborted', 'AbortError');
     }
 
     const latest = await server.getLatestLedger();
@@ -71,19 +73,19 @@ export async function waitForLedger(
     if (remaining <= 0) {
       throw new Error(
         `waitForLedger: timed out after ${timeoutMs}ms waiting for ledger ${targetSequence} ` +
-          `(current: ${latest.sequence})`
+          `(current: ${latest.sequence})`,
       );
     }
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, Math.min(pollIntervalMs, remaining));
       signal?.addEventListener(
-        "abort",
+        'abort',
         () => {
           clearTimeout(timer);
-          reject(new DOMException("waitForLedger aborted", "AbortError"));
+          reject(new DOMException('waitForLedger aborted', 'AbortError'));
         },
-        { once: true }
+        { once: true },
       );
     });
   }

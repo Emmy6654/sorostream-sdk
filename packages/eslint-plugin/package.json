@@ -17,7 +17,15 @@
     "lint": "tsc --noEmit",
     "test": "vitest run"
   },
-  "keywords": ["stellar", "soroban", "streaming", "payments", "eslint", "eslint-plugin", "eslintplugin"],
+  "keywords": [
+    "stellar",
+    "soroban",
+    "streaming",
+    "payments",
+    "eslint",
+    "eslint-plugin",
+    "eslintplugin"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "eslint": "^8.57.0 || ^9.0.0"
@@ -28,7 +36,9 @@
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/SoroStream/sorostream-sdk.git"

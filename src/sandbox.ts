@@ -5,7 +5,7 @@ import type {
   CancelStreamParams,
   StreamEventType,
   StreamEvent,
-} from "./types.js";
+} from './types.js';
 
 /**
  * Error thrown when a sandbox method is called with no registered scenario
@@ -17,9 +17,9 @@ export class SandboxUnexpectedCallError extends Error {
   constructor(method: string) {
     super(
       `SoroStreamSandbox: unexpected call to "${method}" — no scenario registered and defaultBehavior is "error". ` +
-        `Register a scenario via the ScenarioMap constructor argument.`
+        `Register a scenario via the ScenarioMap constructor argument.`,
     );
-    this.name = "SandboxUnexpectedCallError";
+    this.name = 'SandboxUnexpectedCallError';
   }
 }
 
@@ -38,8 +38,13 @@ export type ScenarioMap = {
   estimateFee?: (params: unknown) => Promise<bigint>;
   getStreamsBySender?: (sender: string) => Promise<Stream[]>;
   getStreamsByRecipient?: (recipient: string) => Promise<Stream[]>;
-  topUp?: (params: { streamId: string; amount: bigint }) => Promise<{ txHash: string; newEndTime: Date }>;
-  batchWithdraw?: (streamIds: string[]) => Promise<{ successes: string[]; failures: { id: string; error: Error }[] }>;
+  topUp?: (params: {
+    streamId: string;
+    amount: bigint;
+  }) => Promise<{ txHash: string; newEndTime: Date }>;
+  batchWithdraw?: (
+    streamIds: string[],
+  ) => Promise<{ successes: string[]; failures: { id: string; error: Error }[] }>;
   batchCancel?: (streamIds: string[]) => Promise<{ txHash: string; streamIds: string[] }[]>;
 };
 
@@ -54,7 +59,7 @@ export type SandboxOptions = {
    * - `"error"` (default): throws {@link SandboxUnexpectedCallError}.
    * - `"empty"`: returns a sensible empty/null value.
    */
-  defaultBehavior?: "error" | "empty";
+  defaultBehavior?: 'error' | 'empty';
   /**
    * When `true`, event handlers registered via `on()` / `off()` are invoked
    * with synthetic events when write operations succeed (matching the real
@@ -93,14 +98,14 @@ export type SandboxOptions = {
  */
 export class SoroStreamSandbox {
   private readonly scenarios: ScenarioMap;
-  private readonly defaultBehavior: "error" | "empty";
+  private readonly defaultBehavior: 'error' | 'empty';
   private readonly emitEvents: boolean;
 
   private readonly eventHandlers = new Map<string, Set<Function>>();
 
   constructor(scenarios: ScenarioMap = {}, options?: SandboxOptions) {
     this.scenarios = scenarios;
-    this.defaultBehavior = options?.defaultBehavior ?? "error";
+    this.defaultBehavior = options?.defaultBehavior ?? 'error';
     this.emitEvents = options?.emitEvents ?? false;
   }
 
@@ -116,8 +121,8 @@ export class SoroStreamSandbox {
     if (!handlers) return;
     const event: StreamEvent = {
       type,
-      streamId: (data["streamId"] as string) ?? "",
-      txHash: (data["txHash"] as string) ?? "",
+      streamId: (data['streamId'] as string) ?? '',
+      txHash: (data['txHash'] as string) ?? '',
       ledger: 0,
       timestamp: Math.floor(Date.now() / 1000),
       data,
@@ -158,13 +163,13 @@ export class SoroStreamSandbox {
   async createStream(params: CreateStreamParams): Promise<{ streamId: string; txHash: string }> {
     if (this.scenarios.createStream) {
       const result = await this.scenarios.createStream(params);
-      this.emitEvent("StreamCreated", { streamId: result.streamId, txHash: result.txHash });
+      this.emitEvent('StreamCreated', { streamId: result.streamId, txHash: result.txHash });
       return result;
     }
-    if (this.defaultBehavior === "empty") {
-      return { streamId: "", txHash: "" };
+    if (this.defaultBehavior === 'empty') {
+      return { streamId: '', txHash: '' };
     }
-    this.unexpected("createStream");
+    this.unexpected('createStream');
   }
 
   /**
@@ -174,10 +179,10 @@ export class SoroStreamSandbox {
     if (this.scenarios.getStream) {
       return this.scenarios.getStream(streamId);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return null as unknown as Stream;
     }
-    this.unexpected("getStream");
+    this.unexpected('getStream');
   }
 
   /**
@@ -186,13 +191,17 @@ export class SoroStreamSandbox {
   async withdraw(params: WithdrawParams): Promise<{ txHash: string; amount: string }> {
     if (this.scenarios.withdraw) {
       const result = await this.scenarios.withdraw(params);
-      this.emitEvent("StreamWithdrawn", { streamId: params.streamId, txHash: result.txHash, amount: result.amount });
+      this.emitEvent('StreamWithdrawn', {
+        streamId: params.streamId,
+        txHash: result.txHash,
+        amount: result.amount,
+      });
       return result;
     }
-    if (this.defaultBehavior === "empty") {
-      return { txHash: "", amount: "0" };
+    if (this.defaultBehavior === 'empty') {
+      return { txHash: '', amount: '0' };
     }
-    this.unexpected("withdraw");
+    this.unexpected('withdraw');
   }
 
   /**
@@ -201,13 +210,13 @@ export class SoroStreamSandbox {
   async cancelStream(params: CancelStreamParams): Promise<{ txHash: string }> {
     if (this.scenarios.cancelStream) {
       const result = await this.scenarios.cancelStream(params);
-      this.emitEvent("StreamCancelled", { streamId: params.streamId, txHash: result.txHash });
+      this.emitEvent('StreamCancelled', { streamId: params.streamId, txHash: result.txHash });
       return result;
     }
-    if (this.defaultBehavior === "empty") {
-      return { txHash: "" };
+    if (this.defaultBehavior === 'empty') {
+      return { txHash: '' };
     }
-    this.unexpected("cancelStream");
+    this.unexpected('cancelStream');
   }
 
   /**
@@ -217,10 +226,10 @@ export class SoroStreamSandbox {
     if (this.scenarios.getClaimable) {
       return this.scenarios.getClaimable(streamId);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return 0n;
     }
-    this.unexpected("getClaimable");
+    this.unexpected('getClaimable');
   }
 
   /**
@@ -230,10 +239,10 @@ export class SoroStreamSandbox {
     if (this.scenarios.estimateFee) {
       return this.scenarios.estimateFee(params);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return 0n;
     }
-    this.unexpected("estimateFee");
+    this.unexpected('estimateFee');
   }
 
   /**
@@ -243,10 +252,10 @@ export class SoroStreamSandbox {
     if (this.scenarios.getStreamsBySender) {
       return this.scenarios.getStreamsBySender(sender);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return [];
     }
-    this.unexpected("getStreamsBySender");
+    this.unexpected('getStreamsBySender');
   }
 
   /**
@@ -256,52 +265,53 @@ export class SoroStreamSandbox {
     if (this.scenarios.getStreamsByRecipient) {
       return this.scenarios.getStreamsByRecipient(recipient);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return [];
     }
-    this.unexpected("getStreamsByRecipient");
+    this.unexpected('getStreamsByRecipient');
   }
 
   /**
    * Tops up a stream using the registered `topUp` scenario.
    */
-  async topUp(params: { streamId: string; amount: bigint }): Promise<{ txHash: string; newEndTime: Date }> {
+  async topUp(params: {
+    streamId: string;
+    amount: bigint;
+  }): Promise<{ txHash: string; newEndTime: Date }> {
     if (this.scenarios.topUp) {
       return this.scenarios.topUp(params);
     }
-    if (this.defaultBehavior === "empty") {
-      return { txHash: "", newEndTime: new Date() };
+    if (this.defaultBehavior === 'empty') {
+      return { txHash: '', newEndTime: new Date() };
     }
-    this.unexpected("topUp");
+    this.unexpected('topUp');
   }
 
   /**
    * Batch-withdraws from multiple streams using the registered `batchWithdraw` scenario.
    */
   async batchWithdraw(
-    streamIds: string[]
+    streamIds: string[],
   ): Promise<{ successes: string[]; failures: { id: string; error: Error }[] }> {
     if (this.scenarios.batchWithdraw) {
       return this.scenarios.batchWithdraw(streamIds);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return { successes: [], failures: [] };
     }
-    this.unexpected("batchWithdraw");
+    this.unexpected('batchWithdraw');
   }
 
   /**
    * Batch-cancels multiple streams using the registered `batchCancel` scenario.
    */
-  async batchCancel(
-    streamIds: string[]
-  ): Promise<{ txHash: string; streamIds: string[] }[]> {
+  async batchCancel(streamIds: string[]): Promise<{ txHash: string; streamIds: string[] }[]> {
     if (this.scenarios.batchCancel) {
       return this.scenarios.batchCancel(streamIds);
     }
-    if (this.defaultBehavior === "empty") {
+    if (this.defaultBehavior === 'empty') {
       return [];
     }
-    this.unexpected("batchCancel");
+    this.unexpected('batchCancel');
   }
 }

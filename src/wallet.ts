@@ -1,5 +1,11 @@
-import { Keypair, TransactionBuilder, xdr, hash, nativeToScVal } from "@stellar/stellar-sdk";
-import type { WalletAdapter, Network, MultisigSigner, PasskeyAdapterConfig, KmsWalletAdapterConfig } from "./types.js";
+import { Keypair, TransactionBuilder, xdr, hash, nativeToScVal } from '@stellar/stellar-sdk';
+import type {
+  WalletAdapter,
+  Network,
+  MultisigSigner,
+  PasskeyAdapterConfig,
+  KmsWalletAdapterConfig,
+} from './types.js';
 
 /**
  * Configuration for a claim-delegation adapter.
@@ -46,16 +52,16 @@ export interface ClaimDelegateConfig {
 }
 
 const NETWORK_PASSPHRASES: Record<Network, string> = {
-  mainnet: "Public Global Stellar Network ; September 2015",
-  testnet: "Test SDF Network ; September 2015",
-  futurenet: "Test SDF Future Network ; October 2022",
+  mainnet: 'Public Global Stellar Network ; September 2015',
+  testnet: 'Test SDF Network ; September 2015',
+  futurenet: 'Test SDF Future Network ; October 2022',
 };
 
 /** Maps Freighter's network identifiers to the SDK's {@link Network} type. */
 const FREIGHTER_NETWORK_MAP: Record<string, Network> = {
-  PUBLIC: "mainnet",
-  TESTNET: "testnet",
-  FUTURENET: "futurenet",
+  PUBLIC: 'mainnet',
+  TESTNET: 'testnet',
+  FUTURENET: 'futurenet',
 };
 
 /**
@@ -75,7 +81,7 @@ const FREIGHTER_NETWORK_MAP: Record<string, Network> = {
  * ```
  */
 export async function createFreighterAdapter(): Promise<WalletAdapter> {
-  const freighter = await import("@stellar/freighter-api");
+  const freighter = await import('@stellar/freighter-api');
 
   return {
     async isConnected(): Promise<boolean> {
@@ -157,12 +163,9 @@ export function createKeypairAdapter(secretKey: string): WalletAdapter {
     },
 
     async signTransaction(xdrStr: string, network: Network): Promise<string> {
-      const tx = TransactionBuilder.fromXDR(
-        xdrStr,
-        NETWORK_PASSPHRASES[network]
-      );
+      const tx = TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASES[network]);
       tx.sign(keypair);
-      return tx.toEnvelope().toXDR("base64");
+      return tx.toEnvelope().toXDR('base64');
     },
   };
 }
@@ -172,10 +175,10 @@ export function createKeypairAdapter(secretKey: string): WalletAdapter {
  * Throws if Freighter is not installed or the user rejects.
  */
 export async function connectWallet(): Promise<string> {
-  const freighter = await import("@stellar/freighter-api");
+  const freighter = await import('@stellar/freighter-api');
   const connected = await freighter.isConnected();
   if (!connected.isConnected) {
-    throw new Error("Freighter extension is not installed");
+    throw new Error('Freighter extension is not installed');
   }
   const result = await freighter.getAddress();
   if (result.error) throw new Error(result.error.message);
@@ -192,9 +195,7 @@ export async function connectWallet(): Promise<string> {
  * This enables automated claiming daemons that never hold the recipient's primary
  * secret key. See {@link ClaimDelegateConfig} for the full setup guide.
  */
-export function createClaimDelegateAdapter(
-  config: ClaimDelegateConfig
-): WalletAdapter {
+export function createClaimDelegateAdapter(config: ClaimDelegateConfig): WalletAdapter {
   return {
     async isConnected(): Promise<boolean> {
       return true;
@@ -251,9 +252,7 @@ export async function createMultisigAdapter(config: {
         const tx = TransactionBuilder.fromXDR(signedXdr, passphrase);
 
         for (const sig of tx.signatures) {
-          const key =
-            sig.hint().toString("base64") +
-            sig.signature().toString("base64");
+          const key = sig.hint().toString('base64') + sig.signature().toString('base64');
           if (!seen.has(key)) {
             seen.add(key);
             if (!combined) {
@@ -266,10 +265,10 @@ export async function createMultisigAdapter(config: {
       }
 
       if (!combined) {
-        throw new Error("No signatures were collected");
+        throw new Error('No signatures were collected');
       }
 
-      return combined.toEnvelope().toXDR("base64");
+      return combined.toEnvelope().toXDR('base64');
     },
   };
 }
@@ -282,16 +281,16 @@ export async function createMultisigAdapter(config: {
  */
 function derToCompact(der: Uint8Array): Uint8Array {
   let offset = 0;
-  if (der[offset++] !== 0x30) throw new Error("Invalid DER signature: expected 0x30");
+  if (der[offset++] !== 0x30) throw new Error('Invalid DER signature: expected 0x30');
   offset++; // skip total length byte
-  if (der[offset++] !== 0x02) throw new Error("Invalid DER signature: expected 0x02 for r");
+  if (der[offset++] !== 0x02) throw new Error('Invalid DER signature: expected 0x02 for r');
   const rLen = der[offset++];
-  if (rLen === undefined) throw new Error("Invalid DER signature: truncated r length");
+  if (rLen === undefined) throw new Error('Invalid DER signature: truncated r length');
   const r = der.slice(offset, offset + rLen);
   offset += rLen;
-  if (der[offset++] !== 0x02) throw new Error("Invalid DER signature: expected 0x02 for s");
+  if (der[offset++] !== 0x02) throw new Error('Invalid DER signature: expected 0x02 for s');
   const sLen = der[offset++];
-  if (sLen === undefined) throw new Error("Invalid DER signature: truncated s length");
+  if (sLen === undefined) throw new Error('Invalid DER signature: truncated s length');
   const s = der.slice(offset, offset + sLen);
 
   const compact = new Uint8Array(64);
@@ -332,23 +331,21 @@ function derToCompact(der: Uint8Array): Uint8Array {
  * const client = new SoroStreamClient({ network: "testnet", contractId: "...", walletAdapter: adapter });
  * ```
  */
-export async function createPasskeyAdapter(
-  config: PasskeyAdapterConfig
-): Promise<WalletAdapter> {
+export async function createPasskeyAdapter(config: PasskeyAdapterConfig): Promise<WalletAdapter> {
   if (
-    typeof window === "undefined" ||
-    !("credentials" in navigator) ||
-    !("PublicKeyCredential" in window)
+    typeof window === 'undefined' ||
+    !('credentials' in navigator) ||
+    !('PublicKeyCredential' in window)
   ) {
-    throw new Error("WebAuthn is not available in this environment");
+    throw new Error('WebAuthn is not available in this environment');
   }
 
   return {
     async isConnected(): Promise<boolean> {
       return (
-        typeof window !== "undefined" &&
-        "credentials" in navigator &&
-        "PublicKeyCredential" in window
+        typeof window !== 'undefined' &&
+        'credentials' in navigator &&
+        'PublicKeyCredential' in window
       );
     },
 
@@ -360,13 +357,13 @@ export async function createPasskeyAdapter(
       const passphrase = NETWORK_PASSPHRASES[network];
 
       // Parse the raw transaction envelope so we can read and mutate auth entries
-      const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, "base64");
+      const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, 'base64');
       const v1Body = txEnvelope.v1().tx();
       let modified = false;
 
       for (const op of v1Body.operations()) {
         const body = op.body();
-        if (body.switch().name !== "invokeHostFunction") continue;
+        if (body.switch().name !== 'invokeHostFunction') continue;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const invokeOp = (body as any).invokeHostFunction() as xdr.InvokeHostFunctionOp;
@@ -376,7 +373,7 @@ export async function createPasskeyAdapter(
           const entry = authArr[i];
           if (!entry) continue;
           const creds = entry.credentials();
-          if (creds.switch().name !== "sorobanCredentialsAddress") continue;
+          if (creds.switch().name !== 'sorobanCredentialsAddress') continue;
 
           const addrCreds = creds.address();
 
@@ -389,7 +386,7 @@ export async function createPasskeyAdapter(
               nonce: addrCreds.nonce(),
               signatureExpirationLedger: addrCreds.signatureExpirationLedger(),
               invocation: entry.rootInvocation(),
-            })
+            }),
           );
           const challengeHash = hash(preimage.toXDR());
           // Convert to a plain Uint8Array backed by a fresh ArrayBuffer (required by WebAuthn API)
@@ -400,15 +397,13 @@ export async function createPasskeyAdapter(
             publicKey: {
               challenge,
               rpId: config.rpId,
-              allowCredentials: [
-                { type: "public-key" as const, id: config.credentialId },
-              ],
-              userVerification: "required",
+              allowCredentials: [{ type: 'public-key' as const, id: config.credentialId }],
+              userVerification: 'required',
             },
           })) as PublicKeyCredential | null;
 
           if (!assertion) {
-            throw new Error("WebAuthn: authentication was cancelled or failed");
+            throw new Error('WebAuthn: authentication was cancelled or failed');
           }
 
           const response = assertion.response as AuthenticatorAssertionResponse;
@@ -428,7 +423,7 @@ export async function createPasskeyAdapter(
                   client_data_json: Buffer.from(response.clientDataJSON),
                   signature: Buffer.from(compactSig),
                 }),
-              })
+              }),
             ),
             rootInvocation: entry.rootInvocation(),
           });
@@ -439,7 +434,7 @@ export async function createPasskeyAdapter(
 
       if (!modified) return xdrStr;
 
-      return txEnvelope.toXDR("base64");
+      return txEnvelope.toXDR('base64');
     },
   };
 }
@@ -457,7 +452,7 @@ export async function createPasskeyAdapter(
  */
 export function createLedgerAdapter(config: { transport: unknown }): WalletAdapter {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const hwAppStr = require("@ledgerhq/hw-app-str");
+  const hwAppStr = require('@ledgerhq/hw-app-str');
   const StrClass = hwAppStr.default ?? hwAppStr;
   const str = new StrClass(config.transport);
 
@@ -470,17 +465,19 @@ export function createLedgerAdapter(config: { transport: unknown }): WalletAdapt
       return result.publicKey as string;
     },
     async signTransaction(xdrStr: string, _network: Network): Promise<string> {
-      const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, "base64");
+      const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, 'base64');
       const txHash = hash(txEnvelope.toXDR());
       const result = await str.signHash("44'/148'/0'", txHash);
-      const kp = Keypair.fromPublicKey(await str.getPublicKey("44'/148'/0'").then((r: { publicKey: string }) => r.publicKey));
+      const kp = Keypair.fromPublicKey(
+        await str.getPublicKey("44'/148'/0'").then((r: { publicKey: string }) => r.publicKey),
+      );
       const decorated = new xdr.DecoratedSignature({
         hint: kp.signatureHint(),
         signature: result.signature as Buffer,
       });
       const tx = txEnvelope.v1().tx();
       txEnvelope.v1().signatures().push(decorated);
-      return txEnvelope.toXDR("base64");
+      return txEnvelope.toXDR('base64');
     },
   };
 }
@@ -495,10 +492,10 @@ export class KmsWalletAdapter implements WalletAdapter {
 
   constructor(config: KmsWalletAdapterConfig) {
     if (!config.publicKey) {
-      throw new Error("KmsWalletAdapter requires a valid publicKey");
+      throw new Error('KmsWalletAdapter requires a valid publicKey');
     }
-    if (typeof config.sign !== "function") {
-      throw new Error("KmsWalletAdapter requires a sign function");
+    if (typeof config.sign !== 'function') {
+      throw new Error('KmsWalletAdapter requires a sign function');
     }
     this.publicKey = config.publicKey;
     this.signFn = config.sign;
@@ -513,22 +510,22 @@ export class KmsWalletAdapter implements WalletAdapter {
   }
 
   async signTransaction(xdrStr: string, _network: Network): Promise<string> {
-    const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, "base64");
+    const txEnvelope = xdr.TransactionEnvelope.fromXDR(xdrStr, 'base64');
     const txHash = hash(txEnvelope.toXDR());
-    
+
     // Delegate signing to provided async KMS function
     const signatureBytes = await this.signFn(new Uint8Array(txHash));
-    
+
     const kp = Keypair.fromPublicKey(this.publicKey);
     const decorated = new xdr.DecoratedSignature({
       hint: kp.signatureHint(),
       signature: Buffer.from(signatureBytes),
     });
-    
+
     const v1 = txEnvelope.v1();
     v1.signatures().push(decorated);
-    
-    return txEnvelope.toXDR("base64");
+
+    return txEnvelope.toXDR('base64');
   }
 }
 
@@ -551,4 +548,3 @@ export function createKmsWalletAdapter(config: KmsWalletAdapterConfig): WalletAd
 
 /** Alias for createKmsWalletAdapter. */
 export const createKmsAdapter = createKmsWalletAdapter;
-

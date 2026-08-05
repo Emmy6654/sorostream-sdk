@@ -5,7 +5,7 @@
  * to work with the structured clone algorithm and Web Workers.
  */
 
-import type { Stream } from "./types.js";
+import type { Stream } from './types.js';
 
 /**
  * Serialized representation of a Stream with BigInt fields converted to strings.
@@ -23,7 +23,7 @@ export interface SerializedStream {
   startTime: number;
   endTime: number;
   lastWithdrawTime: number;
-  status: "Active" | "Cancelled" | "Completed" | "Paused";
+  status: 'Active' | 'Cancelled' | 'Completed' | 'Paused';
   autoRenew: boolean;
   pausedAt?: number;
   lockUntil?: number;
