@@ -1,7 +1,7 @@
 import { SoroStreamDependencyError } from './errors.js';
 
 /** The `@stellar/stellar-sdk` semver range this SDK is built against (see package.json). */
-const REQUIRED_STELLAR_SDK_RANGE = '^13.0.0';
+const REQUIRED_STELLAR_SDK_RANGE = '^13.3.0';
 const PEER_PACKAGE_NAME = '@stellar/stellar-sdk';
 
 interface ParsedVersion {

@@ -10,10 +10,6 @@ dist/
 # test artefacts
 coverage/
 
-# test snapshots — auto-generated, not tracked
-test/__snapshots__/
-**/*.snap
-
 # generated API docs (produced by `npm run docs`)
 docs/api/
 

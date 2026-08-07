@@ -42,7 +42,7 @@ describe('checkPeerDependencies', () => {
       expect(err).toBeInstanceOf(SoroStreamDependencyError);
       const depErr = err as SoroStreamDependencyError;
       expect(depErr.packageName).toBe('@stellar/stellar-sdk');
-      expect(depErr.requiredRange).toBe('^13.0.0');
+      expect(depErr.requiredRange).toBe('^13.3.0');
       expect(depErr.installedVersion).toBe('14.2.0');
     }
   });
@@ -54,12 +54,12 @@ describe('checkPeerDependencies', () => {
   });
 
   it('produces no output for an exact version match', () => {
-    expect(() => checkPeerDependencies('13.0.0')).not.toThrow();
+    expect(() => checkPeerDependencies('13.3.0')).not.toThrow();
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('produces no output for a patch-level difference within the same minor', () => {
-    expect(() => checkPeerDependencies('13.0.7')).not.toThrow();
+    expect(() => checkPeerDependencies('13.3.7')).not.toThrow();
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
@@ -82,7 +82,7 @@ describe('SoroStreamClient peer dependency check integration', () => {
 
   it('runs the peer check by default when constructing a client', () => {
     // The real installed @stellar/stellar-sdk in this environment satisfies
-    // ^13.0.0 (same major), so construction must not throw either way.
+    // ^13.3.0 (same major), so construction must not throw either way.
     expect(
       () =>
         new SoroStreamClient({
