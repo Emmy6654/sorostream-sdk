@@ -597,8 +597,12 @@ export interface ParsedMemo {
 /**
  * A 32-byte hash memo, as required by Stellar's `MEMO_HASH` type (issue #201).
  * Any value whose length is not exactly 32 bytes is rejected at submission time.
+ *
+ * Issue #406: Changed from `Buffer` to `Uint8Array` for Cloudflare Workers compatibility.
+ * `Buffer` is a Node.js-only subclass of `Uint8Array`; using `Uint8Array` directly works
+ * in all environments (Node.js, Bun, Deno, Cloudflare Workers, browsers).
  */
-export type MemoHash = Buffer;
+export type MemoHash = Uint8Array;
 
 /** Options for write operations (create, withdraw, cancel, top-up). */
 export interface WriteOptions {
@@ -618,7 +622,7 @@ export interface WriteOptions {
    * Optional transaction memo for off-chain reconciliation (issue #201),
    * e.g. tagging a transaction with an invoice ID or order reference.
    * - `string` — encoded as `MEMO_TEXT`. Must be <= 28 bytes once UTF-8 encoded.
-   * - {@link MemoHash} (`Buffer`) — encoded as `MEMO_HASH`. Must be exactly 32 bytes.
+   * - {@link MemoHash} (`Uint8Array`) — encoded as `MEMO_HASH`. Must be exactly 32 bytes.
    */
   memo?: string | MemoHash;
   /**
@@ -791,6 +795,46 @@ export interface RecipientAggregate {
   /** Total claimed so far in stroops. */
   claimedSoFar: bigint;
 }
+
+// ── Issue #405: Recipient trust score integration ────────────────────────────
+
+/**
+ * Result returned by a recipient trust score provider.
+ */
+export interface RecipientTrustScore {
+  /** Numeric trust score (0–100, where 100 is fully trusted). */
+  score: number;
+  /**
+   * Optional human-readable label for the score (e.g. `"KYC_VERIFIED"`,
+   * `"UNVERIFIED"`, `"BLOCKED"`).
+   */
+  label?: string;
+  /** Optional raw provider metadata for logging/auditing. */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Hook called before every `createStream` transaction is submitted.
+ *
+ * Receives the recipient address and must return a {@link RecipientTrustScore}.
+ * Throw any error to block stream creation — the error propagates unchanged to
+ * the caller so the app can present a meaningful message.
+ *
+ * @example
+ * ```ts
+ * const client = new SoroStreamClient({
+ *   // ...
+ *   onRecipientTrustScore: async (recipient) => {
+ *     const result = await myKycProvider.score(recipient);
+ *     if (result.blocked) throw new Error(`Recipient ${recipient} is blocked`);
+ *     return { score: result.score, label: result.tier };
+ *   },
+ * });
+ * ```
+ */
+export type RecipientTrustScoreProvider = (
+  recipient: string,
+) => RecipientTrustScore | Promise<RecipientTrustScore>;
 
 // ── Stream filtering (issue #204) ───────────────────────────────────────────
 

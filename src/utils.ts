@@ -1,6 +1,7 @@
 import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from './errors.js';
 import { getDefaultWebSocketFactory } from './adapters.js';
 import type { FetchAdapter, WebSocketFactory } from './adapters.js';
+import { Memo } from '@stellar/stellar-sdk';
 import type {
   PriceFeedAdapter,
   Stream,
@@ -635,11 +636,39 @@ export function watchClaimable(
     );
   }
 
+  // Issue #407: On wake from device sleep, `setInterval` callbacks may be
+  // delayed or skipped entirely. Register `visibilitychange` and `pageshow`
+  // listeners to immediately re-anchor the base time and trigger a
+  // reconciliation so the displayed claimable balance is not stale.
+  function handleWake(): void {
+    if (stopped) return;
+    // Only act when the page becomes visible (not on hide).
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    // Re-anchor the base time so interpolation doesn't jump backward.
+    baseTime = Date.now();
+    // Trigger an immediate reconcile to get a fresh on-chain value.
+    void reconcileTick();
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleWake);
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pageshow', handleWake);
+  }
+
   return () => {
     stopped = true;
     clearInterval(tickTimer);
     clearInterval(reconcileTimer);
     stopWs?.();
+    // Issue #407: clean up wake listeners
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleWake);
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pageshow', handleWake);
+    }
   };
 }
 
@@ -1508,14 +1537,20 @@ export function decodeStreamId(encoded: string): bigint {
  * Parses a raw memo value (from a JSON/JS object) into a Stellar Memo object.
  * Accepts string (text), hex string (hash), or null/undefined (none).
  *
+ * Issue #406: Replaced `require('@stellar/stellar-sdk')` dynamic call and
+ * `Buffer.from(value, 'hex')` with a static import. The 64-char hex string
+ * is passed directly to `Memo.hash()` which accepts hex natively, keeping
+ * this function free of Node.js Buffer APIs and safe in Cloudflare Workers.
+ *
  * @param value - The raw memo value.
  * @returns A Stellar Memo object, or Memo-none if null/undefined.
  */
 export function parseMemo(value: string | null | undefined): import('@stellar/stellar-sdk').Memo {
-  const { Memo } = require('@stellar/stellar-sdk');
   if (value == null || value === '') return Memo.none();
   if (/^[0-9a-fA-F]{64}$/.test(value)) {
-    return Memo.hash(Buffer.from(value, 'hex'));
+    // Stellar SDK's Memo.hash accepts a 64-char hex string directly —
+    // no Buffer required, works in all environments including CF Workers.
+    return Memo.hash(value);
   }
   return Memo.text(value);
 }

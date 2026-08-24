@@ -227,6 +227,8 @@ export type {
   OperationExplanation,
   BalanceDelta,
   SoroStreamClientConfig,
+  RecipientTrustScore,
+  RecipientTrustScoreProvider,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';

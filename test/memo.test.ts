@@ -29,38 +29,46 @@ describe('encodeMemo', () => {
 
 describe('encodeMemoHash', () => {
   it('encodes a 32-byte input unchanged', () => {
-    const data = Buffer.alloc(32, 7);
+    const data = new Uint8Array(32).fill(7);
     const memo = encodeMemoHash(data);
     expect(memo.type).toBe('hash');
-    expect((memo.value as Buffer).equals(data)).toBe(true);
+    const val = memo.value as Uint8Array;
+    expect(val.length).toBe(32);
+    for (const byte of val) expect(byte).toBe(7);
   });
 
   it('pads short input to 32 bytes', () => {
-    const data = Buffer.from([1, 2, 3]);
+    const data = new Uint8Array([1, 2, 3]);
     const memo = encodeMemoHash(data);
-    const value = memo.value as Buffer;
+    const value = memo.value as Uint8Array;
     expect(value.length).toBe(32);
-    expect(value.subarray(0, 3).equals(data)).toBe(true);
-    expect(value.subarray(3).every((b) => b === 0)).toBe(true);
+    expect(value[0]).toBe(1);
+    expect(value[1]).toBe(2);
+    expect(value[2]).toBe(3);
+    // Remaining bytes should be zero
+    for (let i = 3; i < 32; i++) expect(value[i]).toBe(0);
   });
 
   it('truncates long input to 32 bytes and warns', () => {
-    const data = Buffer.alloc(40, 9);
+    const data = new Uint8Array(40).fill(9);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const memo = encodeMemoHash(data);
-    const value = memo.value as Buffer;
+    const value = memo.value as Uint8Array;
     expect(value.length).toBe(32);
-    expect(value.equals(data.subarray(0, 32))).toBe(true);
+    for (const byte of value) expect(byte).toBe(9);
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
 
-  it('accepts a Uint8Array', () => {
+  it('accepts a plain Uint8Array', () => {
     const data = new Uint8Array([1, 2, 3, 4]);
     const memo = encodeMemoHash(data);
-    const value = memo.value as Buffer;
+    const value = memo.value as Uint8Array;
     expect(value.length).toBe(32);
-    expect(value.subarray(0, 4)).toEqual(Buffer.from(data));
+    expect(value[0]).toBe(1);
+    expect(value[1]).toBe(2);
+    expect(value[2]).toBe(3);
+    expect(value[3]).toBe(4);
   });
 });
 
@@ -77,18 +85,25 @@ describe('decodeMemo', () => {
     expect(decodeMemo(Memo.id('12345'))).toBe('12345');
   });
 
-  it('decodes a hash memo as a Buffer', () => {
+  it('decodes a hash memo as a Uint8Array', () => {
     const data = Buffer.alloc(32, 1);
     const decoded = decodeMemo(Memo.hash(data));
-    expect(Buffer.isBuffer(decoded)).toBe(true);
-    expect((decoded as Buffer).equals(data)).toBe(true);
+    expect(decoded).toBeInstanceOf(Uint8Array);
+    expect((decoded as Uint8Array).length).toBe(32);
+    // Every byte should be 0x01
+    for (const byte of decoded as Uint8Array) {
+      expect(byte).toBe(1);
+    }
   });
 
-  it('decodes a return memo as a Buffer', () => {
+  it('decodes a return memo as a Uint8Array', () => {
     const data = Buffer.alloc(32, 2);
     const decoded = decodeMemo(Memo.return(data));
-    expect(Buffer.isBuffer(decoded)).toBe(true);
-    expect((decoded as Buffer).equals(data)).toBe(true);
+    expect(decoded).toBeInstanceOf(Uint8Array);
+    expect((decoded as Uint8Array).length).toBe(32);
+    for (const byte of decoded as Uint8Array) {
+      expect(byte).toBe(2);
+    }
   });
 
   it('round-trips a memo produced by encodeMemo', () => {
@@ -97,10 +112,14 @@ describe('decodeMemo', () => {
   });
 
   it('round-trips a memo produced by encodeMemoHash', () => {
-    const data = Buffer.from([9, 9, 9]);
+    const data = new Uint8Array([9, 9, 9]);
     const memo = encodeMemoHash(data);
-    const decoded = decodeMemo(memo) as Buffer;
-    expect(decoded.subarray(0, 3).equals(data)).toBe(true);
+    const decoded = decodeMemo(memo) as Uint8Array;
+    expect(decoded).toBeInstanceOf(Uint8Array);
+    // First 3 bytes should be 9
+    expect(decoded[0]).toBe(9);
+    expect(decoded[1]).toBe(9);
+    expect(decoded[2]).toBe(9);
   });
 
   it('returns null via MemoNone constant match', () => {

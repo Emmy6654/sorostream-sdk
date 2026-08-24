@@ -9,6 +9,9 @@ dist/
 
 # test artefacts
 coverage/
+test/__snapshots__/
+**/__snapshots__/
+*.snap
 
 # generated API docs (produced by `npm run docs`)
 docs/api/
@@ -28,3 +31,6 @@ yarn-error.log*
 # environment files
 .env
 .env.*
+
+# Bun lock file (local only)
+bun.lockb
