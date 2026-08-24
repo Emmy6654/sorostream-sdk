@@ -129,6 +129,18 @@ export class MockSoroStreamClient {
     }
     if (params.amount <= 0n) throw new Error('Amount must be > 0');
     if (params.durationSeconds <= 0) throw new Error('Duration must be > 0');
+    const mockNow = nowSec();
+    const startTimeParam =
+      params.startTime ?? (params as CreateStreamParams & { start_time?: number }).start_time;
+    if (startTimeParam !== undefined && startTimeParam < mockNow) {
+      console.warn(
+        `[SoroStream SDK] createStream: start_time (${startTimeParam}) is earlier than ` +
+          `the current ledger timestamp (${mockNow}). The contract will reject this transaction.`,
+      );
+      throw new Error(
+        `start_time (${startTimeParam}) is earlier than the current ledger timestamp (${mockNow})`,
+      );
+    }
 
     const id = String(nextId++);
     const now = nowSec();

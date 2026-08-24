@@ -91,6 +91,7 @@ export {
   InsufficientAllowanceError,
   FederationResolutionError,
   SoroStreamValidationError,
+  StartTimeInPastError,
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
 } from './errors.js';

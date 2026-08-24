@@ -44,6 +44,7 @@ import {
   SoroStreamMemoError,
   NonceNotSupportedError,
   SoroStreamDependencyError,
+  StartTimeInPastError,
 } from './errors.js';
 
 // ── Error union types ─────────────────────────────────────────────────────────
@@ -116,7 +117,8 @@ export type ValidationError =
   | InvalidAddressError
   | AccountNotFoundError
   | SoroStreamValidationError
-  | SoroStreamMemoError;
+  | SoroStreamMemoError
+  | StartTimeInPastError;
 
 /**
  * Errors related to wallet authentication, signing capability, and
@@ -242,7 +244,8 @@ export function isValidationError(err: unknown): err is ValidationError {
     err instanceof InvalidAddressError ||
     err instanceof AccountNotFoundError ||
     err instanceof SoroStreamValidationError ||
-    err instanceof SoroStreamMemoError
+    err instanceof SoroStreamMemoError ||
+    err instanceof StartTimeInPastError
   );
 }
 

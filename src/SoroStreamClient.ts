@@ -105,6 +105,7 @@ import {
   NonceNotSupportedError,
   SelfStreamError,
   RecipientValidationError,
+  StartTimeInPastError,
 } from './errors.js';
 import type { BulkCreateFailedSlot } from './errors.js';
 import type {
@@ -396,6 +397,40 @@ export type SimulateOnlyResult = {
  * await client.withdraw({ streamId: "stream-id" });
  * ```
  */
+interface ClientOwnedTimers {
+  eventPoller: EventPoller | null;
+  pool: ConnectionPool | null;
+  offlineQueue?: OfflineWriteQueue;
+  feeBumpCancels: Map<string, (() => void) | number | ReturnType<typeof setTimeout>>;
+  extraStops: Set<() => void>;
+  unsubWalletNetwork: (() => void) | null;
+  unsubWalletConnection: (() => void) | null;
+}
+
+function runClientCleanup(res: ClientOwnedTimers): void {
+  res.eventPoller?.destroy();
+  res.eventPoller = null;
+  res.pool?.destroy();
+  res.pool = null;
+  res.offlineQueue?.stopHealthCheck();
+  for (const cancel of res.feeBumpCancels.values()) {
+    if (typeof cancel === 'function') cancel();
+    else clearTimeout(cancel);
+  }
+  res.feeBumpCancels.clear();
+  for (const stop of res.extraStops) stop();
+  res.extraStops.clear();
+  res.unsubWalletNetwork?.();
+  res.unsubWalletNetwork = null;
+  res.unsubWalletConnection?.();
+  res.unsubWalletConnection = null;
+}
+
+const clientFinalizers: FinalizationRegistry<ClientOwnedTimers> | null =
+  typeof FinalizationRegistry !== 'undefined'
+    ? new FinalizationRegistry((res) => runClientCleanup(res))
+    : null;
+
 export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private server: RpcTransportAdapter;
   /** The user-supplied transport, if any — kept across `setNetwork` calls instead of being rebuilt. */
@@ -411,6 +446,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private readonly defaultFeeBump: FeeBumpOptions | null = null;
   private readonly priceFeed: PriceFeedAdapter | null = null;
   private eventPoller: EventPoller | null = null;
+  // Issue #412: resources stopped by destroy() / GC so polling cannot pin the event loop
+  private destroyed = false;
   /** Per-stream read cache, keyed by `${network}:${streamId}`. */
   private readonly streamCache = new Cache<string, Stream>(STREAM_CACHE_TTL_MS);
   /**
@@ -436,6 +473,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     (() => void) | number | ReturnType<typeof setTimeout>
   >();
   private readonly feeBumpedTxs = new Set<string>();
+  private readonly ownedTimers: ClientOwnedTimers = {
+    eventPoller: null,
+    pool: null,
+    feeBumpCancels: this.feeBumpTimers,
+    extraStops: new Set(),
+    unsubWalletNetwork: null,
+    unsubWalletConnection: null,
+  };
   // Issue #338: Plugin registry
   private readonly _pluginRegistry: PluginRegistry;
   private readonly checkDuplicate: boolean;
@@ -564,6 +609,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         this.eventBus,
       );
       this.offlineQueue.startHealthCheck();
+      this.ownedTimers.offlineQueue = this.offlineQueue;
     }
     this.walletAdapter = options.walletAdapter;
     this.contract = new Contract(options.contractId);
@@ -631,6 +677,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         rpcUrl: options.rpcUrl ?? RPC_URLS[this.network],
         contractId: options.contractId,
       } satisfies ConnectionPoolOptions);
+      this.ownedTimers.pool = this.pool;
     }
 
     // Issue #215: automatic network switch handling.
@@ -638,17 +685,44 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       this.networkChangedCbs.add(options.onNetworkChange);
     }
     if (this.walletAdapter?.onNetworkChange) {
-      this.walletAdapter.onNetworkChange((newNetwork) => {
+      this.ownedTimers.unsubWalletNetwork = this.walletAdapter.onNetworkChange((newNetwork) => {
         if (newNetwork === this.network) return;
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
       });
     }
+    if (this.walletAdapter?.onConnectionChange) {
+      this.ownedTimers.unsubWalletConnection = this.walletAdapter.onConnectionChange(() => {
+        // Connection state is tracked inside the adapter; this subscription
+        // keeps WatchWalletChanges alive for lock/unlock detection (#410).
+      });
+    }
+
+    // Issue #412: auto-stop polling if this instance is garbage-collected
+    // without an explicit destroy() call.
+    clientFinalizers?.register(this, this.ownedTimers);
 
     // Issue #209: Version negotiation check
     if (!options.skipVersionCheck) {
       void this.checkContractVersion();
     }
+  }
+
+  /**
+   * Stops all internal polling and timers owned by this client.
+   *
+   * Call this when the client is no longer needed. If omitted, a
+   * `FinalizationRegistry` callback still tears timers down when the instance
+   * is garbage-collected, and Node.js interval handles are `unref()`'d so they
+   * do not keep the event loop alive (issue #412).
+   */
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    clientFinalizers?.unregister(this);
+    this.eventPoller = null;
+    this.pool = null;
+    runClientCleanup(this.ownedTimers);
   }
 
   /**
@@ -671,12 +745,22 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const previousAdapter = this.walletAdapter;
     this.walletAdapter = adapter;
 
+    this.ownedTimers.unsubWalletNetwork?.();
+    this.ownedTimers.unsubWalletConnection?.();
+    this.ownedTimers.unsubWalletNetwork = null;
+    this.ownedTimers.unsubWalletConnection = null;
+
     // Re-register network change listener if supported
     if (adapter.onNetworkChange) {
-      adapter.onNetworkChange((newNetwork) => {
+      this.ownedTimers.unsubWalletNetwork = adapter.onNetworkChange((newNetwork) => {
         if (newNetwork === this.network) return;
         this.setNetwork(newNetwork);
         for (const cb of this.networkChangedCbs) cb(newNetwork);
+      });
+    }
+    if (adapter.onConnectionChange) {
+      this.ownedTimers.unsubWalletConnection = adapter.onConnectionChange(() => {
+        /* keep Freighter WatchWalletChanges alive for lock/unlock (#410) */
       });
     }
 
@@ -1022,6 +1106,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (this.eventPoller) {
       this.eventPoller.destroy();
       this.eventPoller = null;
+      this.ownedTimers.eventPoller = null;
     }
 
     // 3. Update the network and rebuild the RPC server for the new endpoint.
@@ -1711,7 +1796,19 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // local system clock so that a clock-skewed machine does not incorrectly
     // accept or reject stream creation.
     const ledgerNow = await this.getLedgerTimestamp();
-    const startTime = ledgerNow;
+    const startTimeParam =
+      params.startTime ?? (params as CreateStreamParams & { start_time?: number }).start_time;
+    if (startTimeParam !== undefined && startTimeParam < ledgerNow) {
+      // Issue #411: the contract rejects a start_time in the past. Surface a
+      // client-side warning and throw instead of submitting a doomed tx.
+      console.warn(
+        `[SoroStream SDK] createStream: start_time (${startTimeParam}) is earlier than ` +
+          `the current ledger timestamp (${ledgerNow}). The contract will reject this ` +
+          `transaction. Pass a start_time >= ${ledgerNow} or omit it to use ledger time.`,
+      );
+      throw new StartTimeInPastError(startTimeParam, ledgerNow);
+    }
+    const startTime = startTimeParam ?? ledgerNow;
     const endTime = startTime + params.durationSeconds;
     if (endTime <= startTime) {
       throw new ZeroDurationError(
@@ -2699,6 +2796,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         batchingOptions: this.batchingOptions,
       };
       this.eventPoller = new EventPoller(this.server, this.contract.contractId(), opts);
+      this.ownedTimers.eventPoller = this.eventPoller;
     }
     return this.eventPoller;
   }
@@ -3487,14 +3585,18 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     void poll();
     let timer: ReturnType<typeof setInterval> | null = null;
     timer = setInterval(poll, intervalMs);
+    if (timer) (timer as { unref?: () => void }).unref?.();
 
-    return () => {
+    const stop = () => {
       stopped = true;
       if (timer) {
         clearInterval(timer);
         timer = null;
       }
+      this.ownedTimers.extraStops.delete(stop);
     };
+    this.ownedTimers.extraStops.add(stop);
+    return stop;
   }
 
   // ── Issue #149: Connection pooling ────────────────────────────────────────
@@ -3937,16 +4039,21 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     handle = setInterval(() => {
       void poll();
     }, intervalMs);
+    (handle as { unref?: () => void }).unref?.();
+
+    const unsubscribe = () => {
+      active = false;
+      if (handle !== null) {
+        clearInterval(handle);
+        handle = null;
+      }
+      callbacks.clear();
+      this.ownedTimers.extraStops.delete(unsubscribe);
+    };
+    this.ownedTimers.extraStops.add(unsubscribe);
 
     return {
-      unsubscribe: () => {
-        active = false;
-        if (handle !== null) {
-          clearInterval(handle);
-          handle = null;
-        }
-        callbacks.clear();
-      },
+      unsubscribe,
       on: (cb: (total: bigint) => void) => {
         callbacks.add(cb);
         // Emit the last known total immediately if available

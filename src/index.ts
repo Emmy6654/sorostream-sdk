@@ -104,6 +104,7 @@ export {
   InsufficientAllowanceError,
   FederationResolutionError,
   SoroStreamValidationError,
+  StartTimeInPastError,
   NonceNotSupportedError,
   SoroStreamRetryExhaustedError,
   SoroStreamMemoError,

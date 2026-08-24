@@ -250,6 +250,7 @@ export class StreamMonitor {
     this.intervalId = setInterval(() => {
       void this.poll();
     }, this.pollIntervalMs);
+    (this.intervalId as { unref?: () => void }).unref?.();
   }
 
   private async poll(): Promise<void> {
