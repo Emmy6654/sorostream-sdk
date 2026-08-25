@@ -83,6 +83,11 @@ export interface PollerEntry {
 /**
  * Polls the Soroban RPC for contract events and dispatches them
  * to matching subscribers.
+ *
+ * Issue #407: Registers `visibilitychange` and `pageshow` listeners so that
+ * polling resumes immediately after the browser/device wakes from sleep,
+ * preventing stale subscriptions when the interval timer was silently halted
+ * by the OS/browser during sleep.
  */
 export class EventPoller {
   private server: RpcTransportAdapter;
@@ -115,6 +120,9 @@ export class EventPoller {
     lastFlushAt: null,
   };
 
+  // Issue #407: wake-from-sleep recovery
+  private readonly _wakeHandler: () => void;
+
   constructor(server: RpcTransportAdapter, contractId: string, options?: EventPollerOptions) {
     this.server = server;
     this.contractId = contractId;
@@ -127,6 +135,20 @@ export class EventPoller {
     this.onDisconnected = options?.onDisconnected;
     this.maxBatchSize = options?.batchingOptions?.maxBatchSize ?? 50;
     this.maxBatchDelayMs = options?.batchingOptions?.maxBatchDelayMs ?? 10;
+
+    // Issue #407: trigger an immediate poll on wake so the interval gap caused
+    // by OS/browser sleep doesn't leave subscribers stale.
+    this._wakeHandler = () => {
+      if (this.intervalId !== null) {
+        void this.poll();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this._wakeHandler);
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pageshow', this._wakeHandler);
+    }
   }
 
   subscribe(key: string, entry: PollerEntry): StreamSubscription {
@@ -291,5 +313,12 @@ export class EventPoller {
       this.batchFlushTimer = null;
     }
     this.batchBuffer = [];
+    // Issue #407: remove wake-from-sleep listeners
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this._wakeHandler);
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pageshow', this._wakeHandler);
+    }
   }
 }

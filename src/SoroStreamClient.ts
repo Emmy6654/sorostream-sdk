@@ -26,6 +26,7 @@ import {
   resolveFederationAddress,
   validateStringLength,
   detectNetworkFromRpcUrl,
+  filterStreams,
 } from './utils.js';
 import { ConnectionPool } from './connectionPool.js';
 import type { ConnectionPoolOptions, PoolEvent } from './connectionPool.js';
@@ -163,6 +164,8 @@ import type {
   WalletAdapterChangedPayload,
   SoroStreamConfigUpdate,
   ConfigUpdatedEvent,
+  RecipientTrustScore,
+  RecipientTrustScoreProvider,
 } from './types.js';
 import { withRetry, type RetryOptions } from './retry.js';
 import type { EventPollerOptions, StreamRetryPolicy } from './events.js';
@@ -272,6 +275,23 @@ export interface SoroStreamClientOptions {
    * Opt-in check for duplicate stream creation.
    */
   checkDuplicate?: boolean;
+  /**
+   * Optional hook for recipient trust score / KYC integration (issue #405).
+   *
+   * When provided, this function is called with the resolved recipient address
+   * before the `createStream` transaction is submitted. It must return a
+   * {@link RecipientTrustScore}; throwing any error blocks stream creation.
+   *
+   * @example
+   * ```ts
+   * onRecipientTrustScore: async (recipient) => {
+   *   const res = await myKycProvider.check(recipient);
+   *   if (res.blocked) throw new Error(`Recipient ${recipient} is blocked by KYC provider`);
+   *   return { score: res.score, label: res.tier };
+   * },
+   * ```
+   */
+  onRecipientTrustScore?: RecipientTrustScoreProvider;
   /**
    * When true, write a JSON entry to the `sorostream_audit_log` storage key
    * (via `adapters.storage`, `localStorage` by default) for each SDK write
@@ -439,6 +459,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   // Issue #338: Plugin registry
   private readonly _pluginRegistry: PluginRegistry;
   private readonly checkDuplicate: boolean;
+  // Issue #405: optional recipient trust score / KYC integration hook
+  private readonly onRecipientTrustScore: RecipientTrustScoreProvider | undefined;
   // Issue #149: connection pool stats (legacy, used when poolSize is not set)
   private readonly connectionPool: {
     maxConnections: number;
@@ -602,6 +624,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.feeBumpMonitoring = options.feeBumpMonitoring ?? { enabled: false };
     this._pluginRegistry = new PluginRegistry();
     this.checkDuplicate = options.checkDuplicate ?? false;
+    this.onRecipientTrustScore = options.onRecipientTrustScore;
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
     this.auditLogEnabled = options.auditLog ?? false;
@@ -1350,7 +1373,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (memo.length !== 32) {
       throw new Error(`Hash memo must be exactly 32 bytes (got ${memo.length})`);
     }
-    return Memo.hash(memo);
+    // Issue #406: Stellar SDK's Memo.hash accepts a 64-char lowercase hex string
+    // in all environments (including Cloudflare Workers where Buffer is unavailable).
+    const hex = Array.from(memo)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    return Memo.hash(hex);
   }
 
   private async buildAndSubmit(
@@ -1858,6 +1886,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       // shadowed by an AccountNotFoundError from the on-chain account lookup.
       if (params.recipient === sender) {
         throw new SelfStreamError();
+      }
+
+      // Issue #405: optional trust score / KYC integration.
+      // Called after the self-stream check but before on-chain validation so
+      // the provider sees the resolved (non-federation) recipient address.
+      // Any error thrown by the provider propagates unchanged to the caller.
+      if (this.onRecipientTrustScore) {
+        await this.onRecipientTrustScore(params.recipient);
       }
 
       if (this.checkDuplicate) {
@@ -3064,18 +3100,28 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * switches. The cache is invalidated by {@link setNetwork}. (Issue #230.)
    * Automatically retries on transient RPC errors.
    *
+   * Issue #408: Added optional `filter` parameter. When `filter.activeOnly` is `true`
+   * (or `filter.status` is `'Active'`), the returned list is filtered client-side
+   * after the RPC fetch. Completed streams that happen to exist in the same ledger as
+   * the query are excluded, fixing the false-positive inclusion of completed streams.
+   *
    * @param recipient - The recipient address to query.
    * @param pagination - Optional limit/cursor for paginated results.
+   * @param filter - Optional client-side filter criteria (e.g. `{ activeOnly: true }`).
    * @returns A `Stream[]` when `pagination` is omitted, otherwise a `PaginatedStreams` page.
    */
   async getStreamsByRecipient(
     recipient: string,
     pagination?: PaginationParams,
+    filter?: StreamFilterCriteria,
   ): Promise<Stream[] | PaginatedStreams> {
     // Network-keyed cache for non-paginated calls (issue #230 & #342).
+    // When a filter is provided, bypass the cache so filtered results don't
+    // poison the unfiltered cache entry for subsequent calls.
     const networkAtCallTime = this.network;
     const cacheKey = `${networkAtCallTime}:${recipient}`;
-    if (!pagination) {
+    const hasFilter = filter && Object.keys(filter).length > 0;
+    if (!pagination && !hasFilter) {
       const cached = this.recipientCache.get(cacheKey);
       if (cached) return cached;
     }
@@ -3106,11 +3152,18 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     const raw = scValToNative(returnVal) as Record<string, unknown>[];
-    const streams = raw.map(nativeToStream);
+    let streams = raw.map(nativeToStream);
 
-    // Only cache non-paginated results, and only when the network hasn't
-    // switched mid-flight (mirrors the guard in getStream and getStreamsBySender).
-    if (!pagination && networkAtCallTime === this.network) {
+    // Issue #408: apply client-side filter (e.g. activeOnly) AFTER the RPC fetch.
+    // This ensures completed/cancelled streams from the same ledger are excluded
+    // when the caller requests only active streams.
+    if (hasFilter) {
+      streams = filterStreams(streams, filter!);
+    }
+
+    // Only cache non-paginated, unfiltered results, and only when the network
+    // hasn't switched mid-flight (mirrors the guard in getStream and getStreamsBySender).
+    if (!pagination && !hasFilter && networkAtCallTime === this.network) {
       this.recipientCache.set(cacheKey, streams);
     }
 

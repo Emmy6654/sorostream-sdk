@@ -379,7 +379,11 @@ export async function createPasskeyAdapter(config: PasskeyAdapterConfig): Promis
 
           // Build the Soroban authorization signing preimage
           // (ENVELOPE_TYPE_SOROBAN_AUTHORIZATION)
-          const networkId = hash(Buffer.from(passphrase));
+          // Issue #406: use TextEncoder instead of Buffer.from so this code is
+          // safe in Cloudflare Workers (no Node.js Buffer available).
+          // The cast to Buffer satisfies Stellar SDK TypeScript types; at
+          // runtime the SDK only needs a Uint8Array (Buffer is a subclass).
+          const networkId = hash(new TextEncoder().encode(passphrase) as unknown as Buffer);
           const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
             new xdr.HashIdPreimageSorobanAuthorization({
               networkId,

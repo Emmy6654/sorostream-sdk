@@ -33,6 +33,7 @@ import type {
   Stream,
   StreamEvent,
   StreamEventFilter,
+  StreamFilterCriteria,
   StreamSnapshot,
   StreamSubscription,
   SoroStreamPlugin,
@@ -48,7 +49,7 @@ import type {
   WriteOptions,
   OperationExplanation,
 } from './types.js';
-import { streamToJSON } from './utils.js';
+import { streamToJSON, filterStreams } from './utils.js';
 
 let nextId = 1;
 
@@ -596,8 +597,13 @@ export class MockSoroStreamClient {
   async getStreamsByRecipient(
     recipient: string,
     pagination?: PaginationParams,
+    filter?: StreamFilterCriteria,
   ): Promise<Stream[] | PaginatedStreams> {
-    const all = Array.from(this.streams.values()).filter((s) => s.recipient === recipient);
+    let all = Array.from(this.streams.values()).filter((s) => s.recipient === recipient);
+    // Issue #408: apply client-side filter when provided (e.g. activeOnly: true)
+    if (filter && Object.keys(filter).length > 0) {
+      all = filterStreams(all, filter);
+    }
     return this._paginate(all, pagination);
   }
 
@@ -921,11 +927,12 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
   override async getStreamsByRecipient(
     recipient: string,
     pagination?: PaginationParams,
+    filter?: StreamFilterCriteria,
   ): Promise<Stream[] | PaginatedStreams> {
     return this.recordAndExecute(
       'getStreamsByRecipient',
-      () => super.getStreamsByRecipient(recipient, pagination),
-      [recipient, pagination],
+      () => super.getStreamsByRecipient(recipient, pagination, filter),
+      [recipient, pagination, filter],
     );
   }
 }
