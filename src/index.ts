@@ -240,3 +240,44 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+
+// ── Issue #396: Non-7-decimal token support ────────────────────────────────
+export {
+  toStroopsForToken,
+  fromStroopsForToken,
+  getTokenDecimals,
+  convertToTokenUnits,
+  formatTokenAmount,
+} from './decimalAware.js';
+export type { TokenMetadataProvider } from './decimalAware.js';
+
+// ── Issue #395: Replay transport ───────────────────────────────────────────
+export { ReplayTransport, ReplayFixtureError, ReplayFixtureParseError } from './replayTransport.js';
+export type {
+  FixtureEntry,
+  FixtureFile,
+  RecordTransportOptions,
+  RecordingRpcTransport,
+  ReplayingRpcTransport,
+} from './replayTransport.js';
+
+// ── Issue #394: Address book ───────────────────────────────────────────────
+export {
+  InMemoryAddressBook,
+  PersistedAddressBook,
+  AddressBookValidationError,
+  AddressBookNotFoundError,
+} from './addressBook.js';
+export type {
+  AddressBook,
+  AddressBookEntry,
+  PersistedAddressBookOptions,
+} from './addressBook.js';
+
+// ── Issue #393: Multi-network client ──────────────────────────────────────
+export {
+  MultiNetworkClient,
+  MultiNetworkConfigError,
+  MultiNetworkNotFoundError,
+} from './multiNetwork.js';
+export type { NetworkConfig, NetworkedStream, MultiNetworkStreams } from './multiNetwork.js';
