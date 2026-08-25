@@ -4,6 +4,7 @@ export type {
   SimulateOnlyResult,
   SoroStreamConfigUpdate,
   ConfigUpdatedEvent,
+  CreateStreamsParams,
 } from './SoroStreamClient.js';
 export type {
   StorageAdapter,
