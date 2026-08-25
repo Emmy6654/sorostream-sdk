@@ -240,3 +240,16 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+
+// ── Issue #394: Address book ───────────────────────────────────────────────
+export {
+  InMemoryAddressBook,
+  PersistedAddressBook,
+  AddressBookValidationError,
+  AddressBookNotFoundError,
+} from './addressBook.js';
+export type {
+  AddressBook,
+  AddressBookEntry,
+  PersistedAddressBookOptions,
+} from './addressBook.js';
