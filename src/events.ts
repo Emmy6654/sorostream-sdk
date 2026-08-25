@@ -46,6 +46,13 @@ const STREAM_EVENT_NAMES = new Set([
   'StreamTransferred',
 ]);
 
+export function unrefTimer(
+  timer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>,
+): void {
+  const handle = timer as { unref?: () => void };
+  handle.unref?.();
+}
+
 function isStreamEventType(value: string): value is StreamEventType {
   return STREAM_EVENT_NAMES.has(value);
 }
@@ -247,6 +254,7 @@ export class EventPoller {
   private startPolling(): void {
     void this.poll();
     this.intervalId = setInterval(() => void this.poll(), 5000);
+    unrefTimer(this.intervalId);
   }
 
   private stopPolling(): void {

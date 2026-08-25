@@ -80,22 +80,142 @@ const FREIGHTER_NETWORK_MAP: Record<string, Network> = {
  * });
  * ```
  */
+type FreighterWatchPayload = {
+  network?: string;
+  address?: string;
+  error?: { message: string };
+};
+
+type FreighterModule = {
+  isConnected: () => Promise<{ isConnected: boolean }>;
+  getAddress: () => Promise<{ address: string; error?: { message: string } }>;
+  signTransaction: (
+    xdr: string,
+    opts: { networkPassphrase: string },
+  ) => Promise<{ signedTxXdr: string; error?: { message: string } }>;
+  requestAccess?: () => Promise<{ error?: { message: string } }>;
+  WatchWalletChanges: new () => {
+    watch: (cb: (payload: FreighterWatchPayload) => void) => void;
+    stop: () => void;
+  };
+};
+
 export async function createFreighterAdapter(): Promise<WalletAdapter> {
-  const freighter = await import('@stellar/freighter-api');
+  const freighter = (await import('@stellar/freighter-api')) as unknown as FreighterModule;
+
+  let lastNetwork: string | null = null;
+  /** Empty/missing address after a prior successful read means Freighter is locked. */
+  let lastAddress: string | null = null;
+  let locked = false;
+  const networkListeners = new Set<(network: Network) => void>();
+  const connectionListeners = new Set<(connected: boolean) => void>();
+  let watcher: { stop: () => void } | null = null;
+
+  function emitConnection(connected: boolean): void {
+    for (const cb of connectionListeners) cb(connected);
+  }
+
+  function setLocked(next: boolean): void {
+    if (locked === next) return;
+    locked = next;
+    emitConnection(!next);
+  }
+
+  function ensureWatcher(): void {
+    if (watcher) return;
+    const w = new freighter.WatchWalletChanges();
+    w.watch((payload) => {
+      if (payload.error) {
+        setLocked(true);
+        return;
+      }
+
+      // Issue #410: treat an empty address as a lock; a restored address is an unlock.
+      if (payload.address !== undefined) {
+        const nextLocked = payload.address.length === 0;
+        lastAddress = nextLocked ? null : payload.address;
+        setLocked(nextLocked);
+      }
+
+      if (!payload.network) return;
+      if (lastNetwork === null) {
+        lastNetwork = payload.network;
+        return;
+      }
+      if (payload.network === lastNetwork) return;
+      lastNetwork = payload.network;
+
+      const mapped = FREIGHTER_NETWORK_MAP[payload.network];
+      if (mapped) {
+        for (const cb of networkListeners) cb(mapped);
+      }
+    });
+    watcher = w;
+  }
+
+  function maybeStopWatcher(): void {
+    if (networkListeners.size > 0 || connectionListeners.size > 0) return;
+    watcher?.stop();
+    watcher = null;
+    lastNetwork = null;
+  }
+
+  async function requestAccessIfNeeded(): Promise<void> {
+    if (typeof freighter.requestAccess !== 'function') return;
+    const access = await freighter.requestAccess();
+    if (access?.error) {
+      throw new Error(access.error.message);
+    }
+  }
+
+  /**
+   * Re-establishes a Freighter session after lock/unlock (issue #410).
+   * `isConnected()` on Freighter only reports whether the extension is
+   * installed, so we also re-read the address and call `requestAccess`
+   * when the previous session was locked or the address lookup fails.
+   */
+  async function ensureSession(): Promise<void> {
+    ensureWatcher();
+    const installed = await freighter.isConnected();
+    if (!installed.isConnected || locked || !lastAddress) {
+      await requestAccessIfNeeded();
+    }
+
+    const result = await freighter.getAddress();
+    if (result.error || !result.address) {
+      await requestAccessIfNeeded();
+      const retry = await freighter.getAddress();
+      if (retry.error || !retry.address) {
+        setLocked(true);
+        throw new Error(
+          retry.error?.message ?? result.error?.message ?? 'Freighter wallet is not connected',
+        );
+      }
+      lastAddress = retry.address;
+      setLocked(false);
+      return;
+    }
+
+    lastAddress = result.address;
+    setLocked(false);
+  }
 
   return {
     async isConnected(): Promise<boolean> {
       const result = await freighter.isConnected();
-      return result.isConnected;
+      if (!result.isConnected) return false;
+      return !locked;
     },
 
     async getPublicKey(): Promise<string> {
+      await ensureSession();
       const result = await freighter.getAddress();
       if (result.error) throw new Error(result.error.message);
       return result.address;
     },
 
     async signTransaction(xdrStr: string, network: Network): Promise<string> {
+      await ensureSession();
       const result = await freighter.signTransaction(xdrStr, {
         networkPassphrase: NETWORK_PASSPHRASES[network],
       });
@@ -111,23 +231,24 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
      * poll only seeds the baseline and does not fire `callback`.
      */
     onNetworkChange(callback: (network: Network) => void): () => void {
-      const watcher = new freighter.WatchWalletChanges();
-      let lastNetwork: string | null = null;
+      ensureWatcher();
+      networkListeners.add(callback);
+      return () => {
+        networkListeners.delete(callback);
+        maybeStopWatcher();
+      };
+    },
 
-      watcher.watch(({ network, error }) => {
-        if (error || !network) return;
-        if (lastNetwork === null) {
-          lastNetwork = network;
-          return;
-        }
-        if (network === lastNetwork) return;
-        lastNetwork = network;
-
-        const mapped = FREIGHTER_NETWORK_MAP[network];
-        if (mapped) callback(mapped);
-      });
-
-      return () => watcher.stop();
+    /**
+     * Subscribes to Freighter lock/unlock (issue #410).
+     */
+    onConnectionChange(callback: (connected: boolean) => void): () => void {
+      ensureWatcher();
+      connectionListeners.add(callback);
+      return () => {
+        connectionListeners.delete(callback);
+        maybeStopWatcher();
+      };
     },
   };
 }

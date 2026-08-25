@@ -92,6 +92,8 @@ export class OfflineWriteQueue {
         // Still offline — keep polling
       }
     }, this.options.healthCheckIntervalMs);
+    const unref = (this.healthCheckTimer as { unref?: () => void }).unref;
+    unref?.call(this.healthCheckTimer);
   }
 
   /**

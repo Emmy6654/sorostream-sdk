@@ -44,10 +44,25 @@ const STROOP_FACTOR = 10_000_000n;
  * @param decimals - Number of decimal places the token uses (default 7 for SAC).
  */
 export function toStroops(amount: string, decimals: number = 7): bigint {
-  const [whole = '0', decimal = ''] = amount.split('.');
+  const trimmed = amount.trim();
+  const negative = trimmed.startsWith('-');
+  const unsigned = negative ? trimmed.slice(1) : trimmed;
+  const [whole = '0', decimal = ''] = unsigned.split('.');
   const factor = 10n ** BigInt(decimals);
-  const paddedDecimal = decimal.padEnd(decimals, '0').slice(0, decimals);
-  return BigInt(whole) * factor + BigInt(paddedDecimal);
+
+  let value: bigint;
+  if (decimal.length <= decimals) {
+    const paddedDecimal = decimal.padEnd(decimals, '0');
+    value = BigInt(whole || '0') * factor + BigInt(paddedDecimal || '0');
+  } else {
+    // Issue #409: round half-up instead of silently truncating extra fractional digits.
+    const keep = decimal.slice(0, decimals);
+    value = BigInt(whole || '0') * factor + BigInt(keep || '0');
+    if (decimal.charCodeAt(decimals) >= 53 /* '5' */) {
+      value += 1n;
+    }
+  }
+  return negative ? -value : value;
 }
 
 /**

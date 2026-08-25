@@ -150,6 +150,13 @@ export interface CreateStreamParams {
    */
   lockUntil?: number;
   /**
+   * Optional Unix timestamp (seconds) for when the stream should start.
+   * Must not be earlier than the current ledger close time; the contract
+   * rejects past start times. The SDK warns and throws before submission
+   * when a past `startTime` is provided (issue #411).
+   */
+  startTime?: number;
+  /**
    * Optional namespace for multi-tenant scoping (issue #274).
    * Stored in the stream's metadata field. Filtering by namespace is
    * off-chain only — the contract does not enforce isolation.
@@ -393,6 +400,13 @@ export interface WalletAdapter {
    * keypair adapters, multisig adapters, etc.) simply omit this method.
    */
   onNetworkChange?(callback: (network: Network) => void): () => void;
+  /**
+   * Optional: subscribe to wallet lock/unlock (connection) changes (issue #410).
+   * Called with `false` when the wallet is locked or disconnected, and `true`
+   * when it becomes available again (e.g. Freighter unlocked mid-session).
+   * Returns an unsubscribe function.
+   */
+  onConnectionChange?(callback: (connected: boolean) => void): () => void;
 }
 
 /** Result shape returned when a wallet adapter signs a transaction (issue #344). */

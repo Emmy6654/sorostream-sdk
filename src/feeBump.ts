@@ -35,6 +35,7 @@ export function scheduleFeeBumpMonitor(
       onExpiryApproaching(txHash);
     }
   }, thresholdMs);
+  (timer as { unref?: () => void }).unref?.();
 
   return () => clearTimeout(timer);
 }

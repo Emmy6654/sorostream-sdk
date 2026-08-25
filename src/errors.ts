@@ -158,6 +158,21 @@ export class FederationResolutionError extends SoroStreamError {
   }
 }
 
+/**
+ * Thrown by `createStream` when `startTime` / `start_time` is earlier than the
+ * current ledger timestamp (issue #411). The contract would reject the
+ * transaction; the SDK fails fast with a client-side message instead.
+ */
+export class StartTimeInPastError extends SoroStreamError {
+  constructor(startTime: number, ledgerTimestamp: number) {
+    super(
+      `start_time (${startTime}) is earlier than the current ledger timestamp (${ledgerTimestamp}). ` +
+        `The contract rejects streams that start in the past.`,
+    );
+    this.name = 'StartTimeInPastError';
+  }
+}
+
 export class SoroStreamValidationError extends SoroStreamError {
   /** Name of the field that failed validation. */
   readonly field: string;

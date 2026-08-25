@@ -1,5 +1,5 @@
 import { rpc } from '@stellar/stellar-sdk';
-import { EventPoller } from './events.js';
+import { EventPoller, unrefTimer } from './events.js';
 
 export type PoolEventType = 'pool:full' | 'pool:reconnect' | 'pool:drain';
 
@@ -57,6 +57,7 @@ export class ConnectionPool {
     });
 
     this.idleTimer = setInterval(() => this._sweepIdle(), this.idleTimeoutMs);
+    unrefTimer(this.idleTimer);
   }
 
   /**
