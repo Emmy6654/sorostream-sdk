@@ -65,6 +65,7 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
+  simulateStream,
 } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
@@ -230,6 +231,9 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
+  SimulateStreamParams,
+  SimulateStreamResult,
+  SimulateStreamSnapshot,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';

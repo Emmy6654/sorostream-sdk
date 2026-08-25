@@ -26,6 +26,9 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
+  SimulateStreamParams,
+  SimulateStreamResult,
+  SimulateStreamSnapshot,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -1568,4 +1571,62 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
     return Memo.hash(value);
   }
   return Memo.text(value);
+}
+
+// ── Issue #399: simulateStream ───────────────────────────────────────────────
+
+/**
+ * Projects streamed amounts over time using a local simulation — no on-chain
+ * transaction is submitted. Returns a {@link SimulateStreamResult} with the
+ * computed flow rate, timeline, and a set of evenly spaced payout snapshots.
+ *
+ * @param params - Stream parameters: amount, durationSeconds, optional startTime.
+ * @param snapshotCount - Number of intermediate snapshots to generate (default 10).
+ *   The result always includes the start and end points as well, so the actual
+ *   `snapshots` array has `snapshotCount + 2` entries at most.
+ * @returns A {@link SimulateStreamResult} with the projected timeline and snapshots.
+ *
+ * @example
+ * ```ts
+ * import { simulateStream, toStroops } from '@sorostream/sdk';
+ *
+ * const result = simulateStream({ amount: toStroops('100'), durationSeconds: 3600 });
+ * console.log(result.flowRate);          // stroops/second
+ * console.log(result.snapshots[5]);      // midpoint snapshot
+ * ```
+ */
+export function simulateStream(
+  params: SimulateStreamParams,
+  snapshotCount: number = 10,
+): SimulateStreamResult {
+  const { amount, durationSeconds } = params;
+  if (amount <= 0n) throw new SoroStreamError('simulateStream: amount must be > 0');
+  if (durationSeconds <= 0) throw new SoroStreamError('simulateStream: durationSeconds must be > 0');
+
+  const startTime = params.startTime ?? Math.floor(Date.now() / 1000);
+  const endTime = startTime + durationSeconds;
+  const flowRate = amount / BigInt(durationSeconds);
+  const totalAmount = flowRate * BigInt(durationSeconds);
+
+  // Build evenly-spaced sample timestamps (start, N intermediate, end).
+  const step = Math.max(1, Math.floor(durationSeconds / (snapshotCount + 1)));
+  const sampleTimes: number[] = [startTime];
+  for (let i = 1; i <= snapshotCount; i++) {
+    const t = startTime + i * step;
+    if (t < endTime) sampleTimes.push(t);
+  }
+  if (sampleTimes[sampleTimes.length - 1] !== endTime) {
+    sampleTimes.push(endTime);
+  }
+
+  const snapshots: SimulateStreamSnapshot[] = sampleTimes.map((t) => {
+    const elapsed = BigInt(Math.min(t - startTime, durationSeconds));
+    const streamed = flowRate * elapsed;
+    const remaining = totalAmount - streamed;
+    const percentComplete =
+      totalAmount > 0n ? Number((streamed * 10000n) / totalAmount) / 100 : 0;
+    return { timestamp: t, streamed, remaining, percentComplete };
+  });
+
+  return { flowRate, startTime, endTime, durationSeconds, totalAmount, snapshots };
 }
