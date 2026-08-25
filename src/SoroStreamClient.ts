@@ -4174,24 +4174,86 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: ExportStreamHistoryOptions,
   ): Promise<StreamActivityEntry[] | void> {
     const format = options?.format ?? 'json';
+    const compression = options?.compression;
     const { StreamIndexer } = await import('./indexer.js');
     const indexer = new StreamIndexer(this.server, this.contract.contractId());
 
     let cursor: string | undefined = undefined;
     const records: StreamActivityEntry[] = [];
 
+    // Build a compressor (gzip / deflate) or null for passthrough (issue #400).
+    // zlib is a Node.js built-in; we import dynamically so the SDK can still be
+    // bundled for browser environments where zlib is unavailable (it falls back
+    // gracefully to no compression in that case).
+    let compressor: { write(data: string): void; end(): Promise<void> } | null = null;
+
+    if (
+      format === 'ndjson' &&
+      options?.writable &&
+      compression &&
+      compression !== 'none'
+    ) {
+      try {
+        const zlib = await import('zlib');
+        const dest = options.writable;
+
+        const zlibStream =
+          compression === 'gzip'
+            ? zlib.createGzip()
+            : zlib.createDeflate();
+
+        // Pipe compressed bytes into the destination writable.
+        zlibStream.on('data', (chunk: Buffer) => {
+          if (typeof dest.write === 'function') {
+            dest.write(chunk);
+          } else if (typeof dest.getWriter === 'function') {
+            const writer = dest.getWriter();
+            writer.write(chunk);
+            if (typeof writer.releaseLock === 'function') writer.releaseLock();
+          }
+        });
+
+        compressor = {
+          write(data: string) {
+            zlibStream.write(data);
+          },
+          end(): Promise<void> {
+            return new Promise<void>((resolve, reject) => {
+              zlibStream.on('finish', () => {
+                if (typeof dest.end === 'function') dest.end();
+                resolve();
+              });
+              zlibStream.on('error', reject);
+              zlibStream.end();
+            });
+          },
+        };
+      } catch {
+        // zlib unavailable (browser env) — fall back to no compression.
+        compressor = null;
+      }
+    }
+
+    const serializeLine = (entry: StreamActivityEntry): string =>
+      JSON.stringify(entry, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)) + '\n';
+
     const writeRecord = (entry: StreamActivityEntry) => {
       if (format === 'ndjson' && options?.writable) {
-        const line =
-          JSON.stringify(entry, (k, v) => (typeof v === 'bigint' ? v.toString() : v)) + '\n';
-        if (typeof options.writable.write === 'function') {
-          options.writable.write(line);
-        } else if (typeof options.writable.getWriter === 'function') {
-          const writer = options.writable.getWriter();
-          const encoder = new TextEncoder();
-          writer.write(encoder.encode(line));
-          if (typeof writer.releaseLock === 'function') {
-            writer.releaseLock();
+        if (compressor) {
+          // Compression is active — feed the line to the zlib stream.
+          compressor.write(serializeLine(entry));
+        } else {
+          // No compression — write directly to the destination writable.
+          const line = serializeLine(entry);
+          if (typeof options.writable.write === 'function') {
+            options.writable.write(line);
+          } else if (typeof options.writable.getWriter === 'function') {
+            const writer = options.writable.getWriter();
+            const encoder = new TextEncoder();
+            writer.write(encoder.encode(line));
+            if (typeof writer.releaseLock === 'function') {
+              writer.releaseLock();
+            }
           }
         }
       } else {
@@ -4229,6 +4291,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       } else {
         hasMore = false;
       }
+    }
+
+    // Flush and close the compressor if one was created.
+    if (compressor) {
+      await compressor.end();
+      return;
     }
 
     if (format === 'json') {
