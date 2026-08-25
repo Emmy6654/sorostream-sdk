@@ -26,6 +26,8 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
+  StreamHealthResult,
+  BatchStreamHealthResult,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -1568,4 +1570,142 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
     return Memo.hash(value);
   }
   return Memo.text(value);
+}
+
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
+
+/**
+ * Returns a health score (0–100) and status string for a stream based on its
+ * remaining balance, elapsed time, and last withdrawal timestamp.
+ *
+ * @param stream - The stream to evaluate.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ * @returns A {@link StreamHealthResult} with numeric score and diagnostic messages.
+ */
+export function getStreamHealth(stream: Stream, now?: number): StreamHealthResult {
+  const nowSecs = now ?? Math.floor(Date.now() / 1000);
+  const diagnostics: string[] = [];
+
+  if (stream.status === 'Cancelled') {
+    return {
+      score: 0,
+      status: 'cancelled',
+      remainingBalance: 0n,
+      elapsedSeconds: 0,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: 0,
+      diagnostics: ['Stream has been cancelled'],
+    };
+  }
+
+  if (stream.status === 'Completed') {
+    return {
+      score: 100,
+      status: 'completed',
+      remainingBalance: 0n,
+      elapsedSeconds: stream.endTime - stream.startTime,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: Math.max(0, nowSecs - stream.lastWithdrawTime),
+      diagnostics: [],
+    };
+  }
+
+  const duration = stream.endTime - stream.startTime;
+  const elapsedSeconds = Math.max(0, Math.min(nowSecs - stream.startTime, duration));
+  const remainingSeconds = Math.max(0, stream.endTime - nowSecs);
+
+  const streamedSoFar = stream.flowRate * BigInt(elapsedSeconds);
+  const remainingBalance =
+    stream.deposit > streamedSoFar ? stream.deposit - streamedSoFar : 0n;
+
+  const secondsSinceLastWithdrawal =
+    stream.lastWithdrawTime > 0 ? Math.max(0, nowSecs - stream.lastWithdrawTime) : 0;
+
+  let score = 100;
+
+  const stallThreshold = Math.max(60, Math.floor(duration * 0.1));
+  const isStalled =
+    stream.lastWithdrawTime > 0 && secondsSinceLastWithdrawal > stallThreshold;
+  if (isStalled) {
+    const penalty = Math.min(40, Math.floor((secondsSinceLastWithdrawal / stallThreshold) * 20));
+    score -= penalty;
+    diagnostics.push(
+      `No withdrawal in ${secondsSinceLastWithdrawal}s (stall threshold: ${stallThreshold}s)`,
+    );
+  }
+
+  const remainingToStream = stream.flowRate * BigInt(remainingSeconds);
+  if (remainingBalance < remainingToStream) {
+    score -= 30;
+    diagnostics.push(
+      `Underfunded: remaining balance (${remainingBalance}) < remaining payout (${remainingToStream})`,
+    );
+  }
+
+  const elapsedFraction = duration > 0 ? elapsedSeconds / duration : 0;
+  if (elapsedFraction > 0.9 && remainingBalance > 0n && remainingSeconds > 0) {
+    score -= 10;
+    diagnostics.push(`Stream is > 90% complete with ${remainingBalance} stroops still locked`);
+  }
+
+  score = Math.max(0, score);
+
+  let status: StreamHealthResult['status'];
+  if (score >= 80) {
+    status = 'healthy';
+  } else if (score >= 50) {
+    status = 'warning';
+  } else {
+    status = 'critical';
+  }
+
+  return { score, status, remainingBalance, elapsedSeconds, remainingSeconds, secondsSinceLastWithdrawal, diagnostics };
+}
+
+// ── Issue #397: batchGetStreamHealth ────────────────────────────────────────
+
+/**
+ * Evaluates the health of multiple streams in a single call and returns
+ * per-stream results together with aggregated summary counts.
+ *
+ * This is a pure client-side utility — no network calls are made.
+ *
+ * @param streams - Array of streams to evaluate.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ * @returns A {@link BatchStreamHealthResult} with individual entries and a summary.
+ *
+ * @example
+ * ```ts
+ * import { batchGetStreamHealth } from '@sorostream/sdk';
+ *
+ * const { entries, summary } = batchGetStreamHealth(streams);
+ * console.log(`${summary.critical} stream(s) need attention`);
+ * for (const { streamId, health } of entries) {
+ *   if (health.status !== 'healthy') {
+ *     console.warn(streamId, health.diagnostics);
+ *   }
+ * }
+ * ```
+ */
+export function batchGetStreamHealth(
+  streams: Stream[],
+  now?: number,
+): BatchStreamHealthResult {
+  const nowSecs = now ?? Math.floor(Date.now() / 1000);
+
+  const entries = streams.map((stream) => ({
+    streamId: stream.id,
+    health: getStreamHealth(stream, nowSecs),
+  }));
+
+  const summary = {
+    total: entries.length,
+    healthy: entries.filter((e) => e.health.status === 'healthy').length,
+    warning: entries.filter((e) => e.health.status === 'warning').length,
+    critical: entries.filter((e) => e.health.status === 'critical').length,
+    completed: entries.filter((e) => e.health.status === 'completed').length,
+    cancelled: entries.filter((e) => e.health.status === 'cancelled').length,
+  };
+
+  return { entries, summary };
 }

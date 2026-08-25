@@ -1205,3 +1205,63 @@ export interface ConfigUpdatedEvent {
   oldValue: unknown;
   newValue: unknown;
 }
+
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
+
+/** Health status string returned by {@link getStreamHealth}. */
+export type StreamHealthStatus = 'healthy' | 'warning' | 'critical' | 'completed' | 'cancelled';
+
+/** Result returned by {@link getStreamHealth}. */
+export interface StreamHealthResult {
+  /**
+   * Numeric health score in the range 0–100.
+   * 100 = fully healthy; lower values indicate increasing risk.
+   */
+  score: number;
+  /** Human-readable health status. */
+  status: StreamHealthStatus;
+  /** Remaining balance in stroops (deposit minus streamed so far). */
+  remainingBalance: bigint;
+  /** Seconds elapsed since stream started. */
+  elapsedSeconds: number;
+  /** Seconds remaining until stream ends (0 if ended). */
+  remainingSeconds: number;
+  /** Seconds since the last withdrawal (0 if never withdrawn). */
+  secondsSinceLastWithdrawal: number;
+  /** Human-readable diagnostics messages (empty when status is healthy). */
+  diagnostics: string[];
+}
+
+// ── Issue #397: batchGetStreamHealth ────────────────────────────────────────
+
+/** A single entry in the result of {@link batchGetStreamHealth}. */
+export interface BatchStreamHealthEntry {
+  /** The stream ID. */
+  streamId: string;
+  /** The health result for this stream. */
+  health: StreamHealthResult;
+}
+
+/** Summary counts returned by {@link batchGetStreamHealth}. */
+export interface BatchStreamHealthSummary {
+  /** Total streams evaluated. */
+  total: number;
+  /** Number of streams with status "healthy". */
+  healthy: number;
+  /** Number of streams with status "warning". */
+  warning: number;
+  /** Number of streams with status "critical". */
+  critical: number;
+  /** Number of streams with status "completed". */
+  completed: number;
+  /** Number of streams with status "cancelled". */
+  cancelled: number;
+}
+
+/** Result of {@link batchGetStreamHealth}. */
+export interface BatchStreamHealthResult {
+  /** Per-stream health entries, preserving input order. */
+  entries: BatchStreamHealthEntry[];
+  /** Aggregated summary counts. */
+  summary: BatchStreamHealthSummary;
+}
