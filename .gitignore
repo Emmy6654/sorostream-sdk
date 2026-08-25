@@ -28,3 +28,8 @@ yarn-error.log*
 # environment files
 .env
 .env.*
+
+# vitest / jest snapshot files — generated automatically, not committed
+test/__snapshots__/
+**/__snapshots__/
+*.snap
