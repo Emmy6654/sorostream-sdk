@@ -27,6 +27,13 @@ export interface RpcVersionDetectedPayload {
   rpcUrl: string;
   /** True when the version was auto-detected; false when explicitly overridden. */
   autoDetected: boolean;
+  /**
+   * Set when the node self-reported an API version this SDK build does not
+   * recognise (e.g. `"v3"`). The transport falls back gracefully to the
+   * closest supported protocol instead of throwing, and this field lets
+   * integrations surface the mismatch themselves (issue #413).
+   */
+  unrecognizedVersion?: string;
 }
 
 /** Options for creating an RPC-compat transport. */
@@ -72,14 +79,69 @@ interface V2LatestLedgerResponse {
 // ── Version detection ─────────────────────────────────────────────────────────
 
 /**
+ * API major versions this SDK build knows how to speak (issue #413).
+ * Anything outside this set triggers a compatibility warning and a graceful
+ * fallback instead of an error.
+ */
+const SUPPORTED_RPC_MAJORS: readonly number[] = [1, 2];
+
+/**
+ * Extracts a numeric API major version from an untrusted value self-reported
+ * by a node. Accepts shapes like `3`, `"3"`, `"v3"`, or `"3.0.1"`.
+ * Returns `null` when nothing recognisable can be extracted (issue #413).
+ */
+export function parseApiMajorVersion(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === 'string') {
+    const match = /^v?(\d+)/i.exec(value.trim());
+    if (match) return parseInt(match[1]!, 10);
+  }
+  return null;
+}
+
+/** Fields a health payload may use to self-report the node's API version. */
+function extractReportedApiVersion(body: unknown): unknown {
+  if (typeof body !== 'object' || body === null) return undefined;
+  const record = body as Record<string, unknown>;
+  return record['version'] ?? record['api_version'] ?? record['apiVersion'];
+}
+
+/** Result of probing an RPC endpoint for its protocol version. */
+interface RpcVersionProbeResult {
+  version: 'v1' | 'v2';
+  /** Set when the node reported an API version outside SUPPORTED_RPC_MAJORS. */
+  unrecognizedVersion?: string;
+}
+
+/**
+ * Surfaces a clear compatibility warning when a node reports an API version
+ * the SDK does not recognise, so integrations learn about the mismatch
+ * immediately instead of hitting cryptic call failures later (issue #413).
+ */
+function warnUnrecognizedRpcVersion(rpcUrl: string, raw: unknown): void {
+  console.warn(
+    `[SoroStream] RPC node at ${rpcUrl} reports API version ${String(raw)}, which this SDK ` +
+      `does not recognise (supported: v${Math.min(...SUPPORTED_RPC_MAJORS)}-v${Math.max(...SUPPORTED_RPC_MAJORS)}). ` +
+      'Falling back to the closest supported protocol; upgrade @sorostream/sdk if calls fail.',
+  );
+}
+
+/**
  * Probes an RPC URL to determine whether it speaks v1 or v2.
  *
  * Strategy:
  *   1. Try a lightweight v2-style GET to `/v2/health` — if it returns 200
  *      with a JSON body containing `status`, it is v2.
- *   2. Fall back to v1 on any error or non-200 status.
+ *   2. If the body self-reports an API version this SDK does not recognise
+ *      (e.g. a future `v3`), log a clear compatibility warning and fall back
+ *      to the newest supported protocol instead of throwing (issue #413).
+ *   3. Fall back to v1 on any error, non-200 status, or non-JSON body.
+ *
+ * This function never rejects — probe failures resolve to `"v1"`.
  */
-export async function detectRpcVersion(rpcUrl: string, timeoutMs = 5_000): Promise<'v1' | 'v2'> {
+async function probeRpcVersion(rpcUrl: string, timeoutMs = 5_000): Promise<RpcVersionProbeResult> {
   const url = rpcUrl.replace(/\/$/, '') + '/v2/health';
   try {
     const controller = new AbortController();
@@ -91,9 +153,25 @@ export async function detectRpcVersion(rpcUrl: string, timeoutMs = 5_000): Promi
         signal: controller.signal,
       });
       if (response.ok) {
-        const body = (await response.json()) as V2HealthResponse;
+        let body: V2HealthResponse;
+        try {
+          body = (await response.json()) as V2HealthResponse;
+        } catch {
+          // Non-JSON body from an unknown server flavour — treat as v1
+          // rather than letting the parse error escape (issue #413).
+          return { version: 'v1' };
+        }
+        // Issue #413: surface — but do not throw on — unrecognised versions.
+        const reported = extractReportedApiVersion(body);
+        const major = parseApiMajorVersion(reported);
+        if (major !== null && !SUPPORTED_RPC_MAJORS.includes(major)) {
+          warnUnrecognizedRpcVersion(rpcUrl, reported);
+          // A node serving `/v2/health` at all most likely keeps v2
+          // compatibility, so prefer it over legacy v1.
+          return { version: 'v2', unrecognizedVersion: String(reported) };
+        }
         if (typeof body?.status === 'string') {
-          return 'v2';
+          return { version: 'v2' };
         }
       }
     } finally {
@@ -102,7 +180,19 @@ export async function detectRpcVersion(rpcUrl: string, timeoutMs = 5_000): Promi
   } catch {
     // Probe failed — treat as v1
   }
-  return 'v1';
+  return { version: 'v1' };
+}
+
+/**
+ * Detects whether an RPC endpoint speaks v1 or v2.
+ *
+ * Never throws: network failures, non-200 responses, non-JSON bodies, and
+ * unrecognised API versions all resolve gracefully (with a compatibility
+ * warning for unrecognised versions) instead of propagating errors
+ * (issue #413).
+ */
+export async function detectRpcVersion(rpcUrl: string, timeoutMs = 5_000): Promise<'v1' | 'v2'> {
+  return (await probeRpcVersion(rpcUrl, timeoutMs)).version;
 }
 
 // ── v2 transport adapter ──────────────────────────────────────────────────────
@@ -233,15 +323,36 @@ export function createRpcCompatTransport(
   rpcUrl: string,
   options: RpcCompatTransportOptions = {},
 ): RpcTransportAdapter {
-  const { rpcVersion = 'auto', probeTimeoutMs = 5_000, onVersionDetected } = options;
+  const { probeTimeoutMs = 5_000, onVersionDetected } = options;
+  let rpcVersion: RpcVersion = options.rpcVersion ?? 'auto';
+
+  // Issue #413: wrap the consumer callback so a throwing listener can never
+  // turn into an unhandled rejection inside the SDK's own initialisation.
+  const notifyVersionDetected = (payload: RpcVersionDetectedPayload): void => {
+    try {
+      onVersionDetected?.(payload);
+    } catch (error) {
+      console.warn('[SoroStream] onVersionDetected callback threw:', error);
+    }
+  };
 
   // If a concrete version is requested, skip detection.
   if (rpcVersion !== 'auto') {
+    // Issue #413: an explicit-but-unrecognised version (possible from plain
+    // JS callers) must not fail silently later — warn and use the safest
+    // known protocol.
+    if (rpcVersion !== 'v1' && rpcVersion !== 'v2') {
+      console.warn(
+        `[SoroStream] Unknown rpcVersion "${String(rpcVersion)}"; falling back to "v1".`,
+      );
+      rpcVersion = 'v1';
+    }
+
     const resolvedTransport =
       rpcVersion === 'v2' ? new RpcV2TransportAdapter(rpcUrl) : createDefaultRpcTransport(rpcUrl);
 
     // Fire the callback synchronously if no detection is needed.
-    onVersionDetected?.({
+    notifyVersionDetected({
       version: rpcVersion,
       rpcUrl,
       autoDetected: false,
@@ -258,26 +369,47 @@ export function createRpcCompatTransport(
     if (resolvedAdapter) return Promise.resolve(resolvedAdapter);
     if (detectionPromise) return detectionPromise;
 
-    detectionPromise = detectRpcVersion(rpcUrl, probeTimeoutMs).then((version) => {
-      const adapter =
-        version === 'v2' ? new RpcV2TransportAdapter(rpcUrl) : createDefaultRpcTransport(rpcUrl);
-      resolvedAdapter = adapter;
+    detectionPromise = probeRpcVersion(rpcUrl, probeTimeoutMs)
+      .then((probe) => {
+        const adapter =
+          probe.version === 'v2'
+            ? new RpcV2TransportAdapter(rpcUrl)
+            : createDefaultRpcTransport(rpcUrl);
+        resolvedAdapter = adapter;
 
-      onVersionDetected?.({
-        version,
-        rpcUrl,
-        autoDetected: true,
+        notifyVersionDetected({
+          version: probe.version,
+          rpcUrl,
+          autoDetected: true,
+          ...(probe.unrecognizedVersion !== undefined
+            ? { unrecognizedVersion: probe.unrecognizedVersion }
+            : {}),
+        });
+
+        return adapter;
+      })
+      .catch((error) => {
+        // Issue #413: never leave callers with a permanently-rejected
+        // detection promise — fall back to the default v1 transport and
+        // surface a clear warning instead of an unhandled error.
+        console.warn(
+          `[SoroStream] RPC version probe failed for ${rpcUrl}; falling back to "v1".`,
+          error,
+        );
+        const adapter = createDefaultRpcTransport(rpcUrl);
+        resolvedAdapter = adapter;
+        return adapter;
       });
-
-      return adapter;
-    });
 
     return detectionPromise;
   }
 
   // Kick off detection immediately on initialization rather than waiting for
   // the first RPC call, so `rpcVersionDetected` reflects "on init" as required.
-  void getAdapter();
+  // The `.catch()` guard keeps this eager kick-off from ever producing an
+  // unhandled rejection; real call errors still surface through the proxy
+  // methods below (issue #413).
+  void getAdapter().catch(() => {});
 
   // Return a proxy adapter that resolves the real adapter on first call.
   const proxy: RpcTransportAdapter = {
