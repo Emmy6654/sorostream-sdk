@@ -240,3 +240,13 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+
+// ── Issue #395: Replay transport ───────────────────────────────────────────
+export { ReplayTransport, ReplayFixtureError, ReplayFixtureParseError } from './replayTransport.js';
+export type {
+  FixtureEntry,
+  FixtureFile,
+  RecordTransportOptions,
+  RecordingRpcTransport,
+  ReplayingRpcTransport,
+} from './replayTransport.js';
