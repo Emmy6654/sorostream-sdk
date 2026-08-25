@@ -240,3 +240,11 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+
+// ── Issue #393: Multi-network client ──────────────────────────────────────
+export {
+  MultiNetworkClient,
+  MultiNetworkConfigError,
+  MultiNetworkNotFoundError,
+} from './multiNetwork.js';
+export type { NetworkConfig, NetworkedStream, MultiNetworkStreams } from './multiNetwork.js';
