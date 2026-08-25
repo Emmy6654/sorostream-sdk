@@ -231,6 +231,7 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
+  OnStreamUpdateOptions,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';

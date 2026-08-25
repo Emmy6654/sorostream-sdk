@@ -167,6 +167,7 @@ import type {
   ConfigUpdatedEvent,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
+  OnStreamUpdateOptions,
 } from './types.js';
 import { withRetry, type RetryOptions } from './retry.js';
 import type { EventPollerOptions, StreamRetryPolicy } from './events.js';
@@ -2983,6 +2984,90 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    */
   onStreamResumed(callback: (event: StreamEvent<TEventData>) => void): StreamSubscription {
     return this.on('StreamResumed', callback);
+  }
+
+  /**
+   * Subscribes to live state changes for a specific stream by polling.
+   *
+   * The callback is invoked each time the stream's state changes between
+   * poll cycles — including status transitions (Active → Cancelled),
+   * balance changes, and any other field mutations.
+   *
+   * @param streamId - The stream to watch.
+   * @param callback - Called with `{ stream, previous, streamId }` on each state change.
+   * @param options - Optional polling configuration.
+   * @param options.pollIntervalMs - How often to poll (default 5000 ms).
+   * @param options.immediate - When true, call the callback immediately with the current state.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop polling.
+   *
+   * @example
+   * ```ts
+   * const sub = client.onStreamUpdate("42", ({ stream, previous }) => {
+   *   if (previous && stream.status !== previous.status) {
+   *     console.log(`Stream status changed: ${previous.status} → ${stream.status}`);
+   *   }
+   * });
+   * // Later:
+   * sub.unsubscribe();
+   * ```
+   */
+  onStreamUpdate(
+    streamId: string,
+    callback: (payload: { stream: Stream; previous: Stream | undefined; streamId: string }) => void,
+    options?: OnStreamUpdateOptions,
+  ): StreamSubscription {
+    const pollIntervalMs = options?.pollIntervalMs ?? 5_000;
+    let previous: Stream | undefined = undefined;
+    let stopped = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const stream = await this.getStream(streamId);
+        const hasChanged =
+          previous === undefined ||
+          stream.status !== previous.status ||
+          stream.deposit !== previous.deposit ||
+          stream.lastWithdrawTime !== previous.lastWithdrawTime ||
+          stream.endTime !== previous.endTime ||
+          stream.flowRate !== previous.flowRate ||
+          stream.pausedAt !== previous.pausedAt;
+
+        if (hasChanged) {
+          callback({ stream, previous, streamId });
+          previous = stream;
+        }
+      } catch {
+        // RPC errors are silently swallowed so the poller stays alive.
+        // Callers that need error visibility should use getStream directly.
+      }
+      if (!stopped) {
+        timerId = setTimeout(() => void poll(), pollIntervalMs);
+        if (timerId && typeof (timerId as unknown as { unref?: () => void }).unref === 'function') {
+          (timerId as unknown as { unref: () => void }).unref();
+        }
+      }
+    };
+
+    if (options?.immediate) {
+      void poll();
+    } else {
+      timerId = setTimeout(() => void poll(), pollIntervalMs);
+      if (timerId && typeof (timerId as unknown as { unref?: () => void }).unref === 'function') {
+        (timerId as unknown as { unref: () => void }).unref();
+      }
+    }
+
+    return {
+      unsubscribe: () => {
+        stopped = true;
+        if (timerId !== null) {
+          clearTimeout(timerId);
+          timerId = null;
+        }
+      },
+    };
   }
 
   // ── Read methods (with retry) ────────────────────────────────────────────────
