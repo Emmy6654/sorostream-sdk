@@ -26,6 +26,7 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
+  StreamHealthResult,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -1568,4 +1569,129 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
     return Memo.hash(value);
   }
   return Memo.text(value);
+}
+
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
+
+/**
+ * Returns a health score (0–100) and status string for a stream based on its
+ * remaining balance, elapsed time, and last withdrawal timestamp.
+ *
+ * Scoring rules:
+ * - **100** — stream is healthy: on track, no stall, no underfunding.
+ * - **60–99** — warning: stalled (no recent withdrawal) or > 90 % elapsed with
+ *   balance remaining.
+ * - **0–59** — critical: severely stalled, near-drained, or underfunded.
+ * - **"completed"** — stream has ended and `status === 'Completed'`.
+ * - **"cancelled"** — stream has `status === 'Cancelled'`.
+ *
+ * @param stream - The stream to evaluate.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ * @returns A {@link StreamHealthResult} with numeric score and diagnostic messages.
+ *
+ * @example
+ * ```ts
+ * import { getStreamHealth } from '@sorostream/sdk';
+ *
+ * const health = getStreamHealth(stream);
+ * if (health.status === 'critical') {
+ *   console.warn(`Stream is at risk: ${health.diagnostics.join(', ')}`);
+ * }
+ * ```
+ */
+export function getStreamHealth(stream: Stream, now?: number): StreamHealthResult {
+  const nowSecs = now ?? Math.floor(Date.now() / 1000);
+  const diagnostics: string[] = [];
+
+  // ── Terminal states ──────────────────────────────────────────────────────
+  if (stream.status === 'Cancelled') {
+    return {
+      score: 0,
+      status: 'cancelled',
+      remainingBalance: 0n,
+      elapsedSeconds: 0,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: 0,
+      diagnostics: ['Stream has been cancelled'],
+    };
+  }
+
+  if (stream.status === 'Completed') {
+    return {
+      score: 100,
+      status: 'completed',
+      remainingBalance: 0n,
+      elapsedSeconds: stream.endTime - stream.startTime,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: Math.max(0, nowSecs - stream.lastWithdrawTime),
+      diagnostics: [],
+    };
+  }
+
+  // ── Active / Paused ──────────────────────────────────────────────────────
+  const duration = stream.endTime - stream.startTime;
+  const elapsedSeconds = Math.max(0, Math.min(nowSecs - stream.startTime, duration));
+  const remainingSeconds = Math.max(0, stream.endTime - nowSecs);
+
+  // Remaining balance = deposit − (flowRate × elapsed since start, capped at deposit)
+  const streamedSoFar = stream.flowRate * BigInt(elapsedSeconds);
+  const remainingBalance =
+    stream.deposit > streamedSoFar ? stream.deposit - streamedSoFar : 0n;
+
+  const secondsSinceLastWithdrawal =
+    stream.lastWithdrawTime > 0 ? Math.max(0, nowSecs - stream.lastWithdrawTime) : 0;
+
+  // ── Scoring ──────────────────────────────────────────────────────────────
+  let score = 100;
+
+  // Check for stall: recipient hasn't withdrawn in > 10 % of stream duration
+  const stallThreshold = Math.max(60, Math.floor(duration * 0.1));
+  const isStalled =
+    stream.lastWithdrawTime > 0 && secondsSinceLastWithdrawal > stallThreshold;
+  if (isStalled) {
+    const penalty = Math.min(40, Math.floor((secondsSinceLastWithdrawal / stallThreshold) * 20));
+    score -= penalty;
+    diagnostics.push(
+      `No withdrawal in ${secondsSinceLastWithdrawal}s (stall threshold: ${stallThreshold}s)`,
+    );
+  }
+
+  // Check underfunding: remaining balance can't cover what's left to stream
+  const remainingToStream = stream.flowRate * BigInt(remainingSeconds);
+  const isUnderfunded = remainingBalance < remainingToStream;
+  if (isUnderfunded) {
+    score -= 30;
+    diagnostics.push(
+      `Underfunded: remaining balance (${remainingBalance}) < remaining payout (${remainingToStream})`,
+    );
+  }
+
+  // Check near-expiry with balance: > 90 % elapsed but balance still locked
+  const elapsedFraction = duration > 0 ? elapsedSeconds / duration : 0;
+  const nearExpiry = elapsedFraction > 0.9 && remainingBalance > 0n && remainingSeconds > 0;
+  if (nearExpiry) {
+    score -= 10;
+    diagnostics.push(`Stream is > 90% complete with ${remainingBalance} stroops still locked`);
+  }
+
+  score = Math.max(0, score);
+
+  let status: StreamHealthResult['status'];
+  if (score >= 80) {
+    status = 'healthy';
+  } else if (score >= 50) {
+    status = 'warning';
+  } else {
+    status = 'critical';
+  }
+
+  return {
+    score,
+    status,
+    remainingBalance,
+    elapsedSeconds,
+    remainingSeconds,
+    secondsSinceLastWithdrawal,
+    diagnostics,
+  };
 }
