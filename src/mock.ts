@@ -31,6 +31,7 @@ import type {
   SplitStreamParams,
   SplitStreamResult,
   Stream,
+  StreamBalance,
   StreamEvent,
   StreamEventFilter,
   StreamFilterCriteria,
@@ -598,6 +599,26 @@ export class MockSoroStreamClient {
     return claimableAt(stream, nowSec());
   }
 
+  /**
+   * Returns current accrued claimable balances for multiple stream IDs.
+   *
+   * Mirrors {@link SoroStreamClient.getMultipleStreamBalances}: duplicate IDs
+   * are de-duplicated while preserving first-seen order, and unknown streams
+   * resolve to `0n`. No RPC calls are made — values are computed from the
+   * in-memory stream state.
+   *
+   * @param streamIds - The stream IDs to look up.
+   * @returns One `StreamBalance` entry per unique input ID, in first-seen order.
+   */
+  async getMultipleStreamBalances(streamIds: string[]): Promise<StreamBalance[]> {
+    const uniqueIds = [...new Set(streamIds)];
+    const now = nowSec();
+    return uniqueIds.map((id) => {
+      const stream = this.streams.get(id);
+      return { streamId: id, balance: stream ? claimableAt(stream, now) : 0n };
+    });
+  }
+
   async getStreamsBySender(
     sender: string,
     pagination?: PaginationParams,
@@ -857,6 +878,7 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
       'topUp',
       'getStream',
       'getClaimable',
+      'getMultipleStreamBalances',
       'getStreamsBySender',
       'getStreamsByRecipient',
       'watchClaimable',
@@ -923,6 +945,14 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
 
   override async getClaimable(streamId: string): Promise<bigint> {
     return this.recordAndExecute('getClaimable', () => super.getClaimable(streamId), [streamId]);
+  }
+
+  override async getMultipleStreamBalances(streamIds: string[]): Promise<StreamBalance[]> {
+    return this.recordAndExecute(
+      'getMultipleStreamBalances',
+      () => super.getMultipleStreamBalances(streamIds),
+      [streamIds],
+    );
   }
 
   override async getStreamsBySender(

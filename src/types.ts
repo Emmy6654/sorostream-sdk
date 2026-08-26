@@ -810,6 +810,21 @@ export interface RecipientAggregate {
   claimedSoFar: bigint;
 }
 
+/**
+ * A single stream's current accrued claimable balance returned by
+ * `SoroStreamClient.getMultipleStreamBalances`.
+ *
+ * `balance` is the amount claimable right now in stroops (`0n` when the
+ * stream does not exist). The entry type is JSON-serialisable so dashboard
+ * layers can render many balances directly.
+ */
+export interface StreamBalance {
+  /** The stream ID the balance belongs to. */
+  streamId: string;
+  /** Current accrued claimable amount in stroops. */
+  balance: bigint;
+}
+
 // ── Issue #405: Recipient trust score integration ────────────────────────────
 
 /**
