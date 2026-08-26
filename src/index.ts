@@ -240,3 +240,15 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+export {
+  createFreighterAdapter,
+  connectWallet,
+  createMultisigAdapter,
+  createClaimDelegateAdapter,
+  KmsWalletAdapter,
+  createKmsWalletAdapter,
+  createKmsAdapter,
+  createWalletConnectV2Adapter,
+  createXDEFIAdapter,
+} from './wallet.js';
+export type { ClaimDelegateConfig, WalletConnectV2AdapterConfig } from './wallet.js';
