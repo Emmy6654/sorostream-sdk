@@ -41,6 +41,7 @@ import { createRpcCompatTransport } from './rpc-compat.js';
 import type { RpcVersionDetectedPayload } from './rpc-compat.js';
 import { waitForLedger } from './readConsistency.js';
 import { PriorityRequestQueue } from './request-queue.js';
+import { LocalStorageStreamCache } from './streamStateCache.js';
 
 export type { SoroStreamConfigUpdate, ConfigUpdatedEvent } from './types.js';
 import { StreamMonitor } from './stream-monitor.js';
@@ -301,6 +302,16 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /**
+   * When true, persist the last-known state of each fetched stream to
+   * storage (via `adapters.storage`, `localStorage` by default) so it
+   * survives page reloads. Read it back synchronously with
+   * `getCachedStream()` — useful for rendering an immediate value right
+   * after construction, before the first `getStream()` RPC response
+   * arrives.
+   * Issue #470.
+   */
+  cacheStreamState?: boolean;
   /** Auto fee bump configuration (issue #337). */
   feeBumpMonitoring?: FeeBumpMonitoringOptions;
   /** Skip peer dependency check at construction (issue #213). */
@@ -542,6 +553,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
   private readonly storageAdapter: StorageAdapter | null;
   private readonly fetchAdapter: FetchAdapter;
+  // Issue #470: opt-in localStorage-backed cache for last-known stream state
+  private readonly persistentStreamCache: LocalStorageStreamCache | null;
   // Issue #260: offline write queue (undefined when not enabled)
   private offlineQueue?: OfflineWriteQueue;
   // Issue #265: priority request queue (undefined when not configured)
@@ -677,6 +690,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.telemetryEnabled = options.telemetry !== false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
+    // Issue #470: opt-in localStorage-backed cache for last-known stream state
+    this.persistentStreamCache =
+      options.cacheStreamState && this.storageAdapter
+        ? new LocalStorageStreamCache(this.storageAdapter)
+        : null;
     // Issue #271: RYOW timeout (0 = disabled for zero-overhead backward compat)
     this.ryowTimeoutMs = options.ryowTimeoutMs ?? 10_000;
     // Issue #203: token metadata cache (10-minute default TTL)
@@ -1326,6 +1344,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // switches. Remove entries for every known network.
     for (const key of ['mainnet', 'testnet', 'futurenet'] as Network[]) {
       this.streamCache.delete(`${key}:${streamId}`);
+      this.persistentStreamCache?.delete(key, streamId);
       const pass = NETWORK_PASSPHRASES[key];
       if (pass) this.streamCache.delete(`${pass}:${streamId}`);
     }
@@ -2989,6 +3008,27 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   // ── Queries ───────────────────────────────────────────────────────────────
 
   /**
+   * Synchronously returns the last-known state for a stream without making
+   * an RPC call — first from the short-lived in-memory read cache, falling
+   * back to the persistent storage-backed cache (when
+   * `{ cacheStreamState: true }` was passed to the constructor), which
+   * survives page reloads.
+   *
+   * Useful for rendering an immediate value right after client construction,
+   * before the first `getStream()` call resolves.
+   *
+   * Issue #470.
+   * @param streamId - The stream ID to look up.
+   * @returns The last-known `Stream`, or `undefined` if none is cached.
+   */
+  getCachedStream(streamId: string): Stream | undefined {
+    const cacheKey = `${this.network}:${streamId}`;
+    return (
+      this.streamCache.get(cacheKey) ?? this.persistentStreamCache?.get(this.network, streamId)
+    );
+  }
+
+  /**
    * Returns the full stream data for a given stream ID.
    * Returns a cached value when one is present (populated by optimistic updates).
    * Automatically retries on transient RPC errors.
@@ -3049,6 +3089,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       // addressable under the network in which it was originally fetched.
       if (networkAtCallTime === this.network) {
         this.streamCache.set(cacheKey, stream);
+        // Issue #470: also persist to the opt-in localStorage-backed cache
+        this.persistentStreamCache?.set(networkAtCallTime, stream);
       }
       return stream;
     } finally {
