@@ -319,6 +319,21 @@ export interface RevokeDelegateParams {
   delegate: string;
 }
 
+/**
+ * Summary object passed to the {@link WatchClaimableOptions.onStreamCompleted} callback
+ * when a watched stream reaches its end time.
+ *
+ * Issue #385.
+ */
+export interface StreamCompletedSummary {
+  /** The stream ID that completed. */
+  streamId: string;
+  /** Total tokens streamed from startTime to endTime (deposit in stroops). */
+  totalStreamed: bigint;
+  /** Unix timestamp (seconds) when the stream ended. */
+  endTime: number;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -364,6 +379,23 @@ export interface WatchClaimableOptions {
    * global (issue #199).
    */
   webSocketFactory?: WebSocketFactory;
+  /**
+   * Called once when the watched stream reaches its `endTime`.
+   * Receives the stream ID and a {@link StreamCompletedSummary} with the
+   * total tokens streamed and the stream's end timestamp.
+   *
+   * Issue #385.
+   *
+   * @example
+   * ```ts
+   * watchClaimable(stream, reconcile, onTick, {
+   *   onStreamCompleted: (streamId, summary) => {
+   *     console.log(`Stream ${streamId} finished. Total streamed: ${summary.totalStreamed}`);
+   *   },
+   * });
+   * ```
+   */
+  onStreamCompleted?: (streamId: string, summary: StreamCompletedSummary) => void;
 }
 
 /** Options for {@link watchTotalClaimable}. */
@@ -1204,4 +1236,63 @@ export interface ConfigUpdatedEvent {
   field: string;
   oldValue: unknown;
   newValue: unknown;
+}
+
+// ── Issue #386: aggregateStreams utility ──────────────────────────────────────
+
+/**
+ * Cross-stream analytics aggregate produced by {@link aggregateStreams}.
+ *
+ * Issue #386.
+ */
+export interface StreamsAggregate {
+  /** Total number of streams in the input. */
+  totalStreams: number;
+  /**
+   * Total Value Locked — sum of all active stream deposits still held by the
+   * contract in stroops.
+   */
+  totalValueLocked: bigint;
+  /**
+   * Average flow rate across all active streams in stroops/second.
+   * `0n` when there are no active streams.
+   */
+  averageRate: bigint;
+  /** Per-status counts for the entire set. */
+  statusBreakdown: StatusBreakdown;
+}
+
+// ── Issue #387: withFeeBump helper ────────────────────────────────────────────
+
+/**
+ * Options accepted by {@link withFeeBump}.
+ *
+ * Issue #387.
+ */
+export interface WithFeeBumpOptions {
+  /**
+   * The base fee for the fee-bump envelope in stroops (default: 200).
+   * Must be at least twice the inner transaction's base fee.
+   */
+  baseFee?: number;
+  /** The Stellar network passphrase. Defaults to the Testnet passphrase. */
+  networkPassphrase?: string;
+}
+
+// ── Issue #388: buildMetadataUri helper ───────────────────────────────────────
+
+/**
+ * Structured fields accepted by {@link buildMetadataUri}.
+ *
+ * Issue #388.
+ */
+export interface MetadataUriFields {
+  /** Human-readable stream label (e.g. "Payroll – Alice"). */
+  label?: string;
+  /** Application-level category tag (e.g. "payroll", "grant"). */
+  category?: string;
+  /** Optional namespace for multi-tenant scoping. */
+  namespace?: string;
+  /** Arbitrary additional key-value pairs. Values are coerced to strings. */
+  [key: string]: string | undefined;
 }

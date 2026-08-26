@@ -65,6 +65,10 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
+  aggregateStreams,
+  withFeeBump,
+  buildMetadataUri,
+  parseMetadataUri,
 } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
@@ -230,6 +234,10 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
+  StreamCompletedSummary,
+  StreamsAggregate,
+  WithFeeBumpOptions,
+  MetadataUriFields,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';
