@@ -7,6 +7,12 @@ The format is based on Keep a Changelog and uses the contributor guidance in CON
 ## [Unreleased]
 
 ### Added
+
+- Add batch `client.getStreams(ids)` / `client.getStreamsBatch(ids)` reads that fetch many streams in a single `get_streams` RPC call, with ID de-duplication, request-order results, configurable chunking (`chunkSize`, `batchReadSize`), cache reuse, missing-ID reporting, optional `strict` mode, and a transparent fallback to parallel single reads on contracts without the batch entry point (#427)
+- Add shared in-flight request deduplication across every read path, so concurrent calls for the same data join one RPC request; includes `getRequestStats()`, `resetRequestStats()`, `clearInFlightRequests()`, a `requestDeduplicated` event, the `dedupeRequests` client option, and `getStream(id, { refresh: true })` (#426)
+- Add RxJS-compatible `client.observeStream(id)` and `client.observeClaimable(id)` observables with a dependency-free `SoroStreamObservable` implementing the `Symbol.observable` interop protocol, reference-counted sharing with latest-value replay, and completion on terminal stream states (#423)
+- Add the `@sorostream/vue` package with `useStream`, `useStreamList`, and `useWithdraw` Vue 3 composables, including live updates via `observeStream()`, batched list reads via `getStreams()`, and automatic cleanup on scope disposal (#422)
+
 - Add changelog entry format guide for contributors (#153)
 - **#224** Add `benchmarks/` directory with a vitest bench suite measuring P50/P95/P99 latency for `getStream`, `getClaimable`, `createStream`, `withdraw`, `batchWithdraw`, and `getStreamsBySender` over 100 iterations per operation. Includes a JSON report generator (`benchmarks/report.ts`) with 20 % regression detection against a stored baseline, and a weekly scheduled CI workflow (`.github/workflows/benchmarks.yml`).
 - **#231** Add `nonce` field to `CreateStreamParams` for caller-supplied idempotency keys. The SDK now calls `get_version` on the contract during `createStream` and emits a `console.warn` if the nonce is provided but the contract does not support it. Pass `strict: true` in `WriteOptions` to throw a `NonceNotSupportedError` instead. The `supportsNonce()` method is exposed for pre-flight capability checks.
@@ -16,6 +22,7 @@ The format is based on Keep a Changelog and uses the contributor guidance in CON
 - **#212** Add a framework-agnostic `IEventBus` interface (`emit`/`on` returning an `Unsubscribe` function) and a default `InMemoryEventBus` implementation. Pass `eventBus` in the client config to receive `stream.created`, `stream.withdrawn`, `stream.cancelled`, and `rpc.error` lifecycle events through your own event system (Redux, Zustand, a custom `EventEmitter`, etc.) instead of polling.
 
 ### Fixed
+
 - Fix `SoroStreamClient` keeping the Node.js event loop alive after being dereferenced without calling `destroy()`: all internally-owned `setInterval`/`setTimeout` handles (event polling, connection-pool idle sweep, fee-bump monitors, offline-queue health checks, `watchClaimable`/`watchTotalClaimable` polling) are now `unref()`'d, and a `FinalizationRegistry` stops them if the instance is garbage-collected without an explicit `destroy()` call (#412)
 - Fix `createStream` silently accepting a `startTime` earlier than the current ledger timestamp: it now throws a new `StartTimeInPastError` with a `console.warn` explaining the mismatch, instead of submitting a transaction the contract will reject (#411)
 - Fix the wallet adapter not detecting a Freighter lock/unlock mid-session: wallet adapters can now expose an optional `onConnectionChange(callback)` method, which `createFreighterAdapter` implements via `WatchWalletChanges` address tracking, and `getPublicKey`/`signTransaction` now re-run the Freighter connection handshake automatically after a lock/unlock cycle instead of failing with a stale wallet-not-connected error (#410)
@@ -27,5 +34,6 @@ The format is based on Keep a Changelog and uses the contributor guidance in CON
 - Deduplicate `types.ts` (fully duplicated top-level declarations) and `utils.ts` (tripled top-level declarations) left over from prior merges. These caused `tsc --noEmit` to fail and made 20 of 24 test files fail to even load under esbuild (`"X" has already been declared`).
 
 ### Changed
+
 - `NonceNotSupportedError` is now exported from `@sorostream/sdk` for use in typed `catch` blocks.
 - `BatchWithdrawPartialResult` is now exported from `@sorostream/sdk`.

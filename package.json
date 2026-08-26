@@ -5,6 +5,7 @@
   "workspaces": [
     ".",
     "packages/react",
+    "packages/vue",
     "packages/cli",
     "packages/react-native",
     "packages/eslint-plugin"
@@ -51,7 +52,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:changelog": "node scripts/check-changelog-format.js",
-    "build:all": "npm run build && npm run build -w packages/react && npm run build -w packages/cli && npm run build -w packages/react-native && npm run build -w packages/eslint-plugin",
+    "build:all": "npm run build && npm run build -w packages/react && npm run build -w packages/vue && npm run build -w packages/cli && npm run build -w packages/react-native && npm run build -w packages/eslint-plugin",
     "docs": "typedoc",
     "validate-exports": "node scripts/validate-exports.js",
     "test:cjs": "node scripts/cjs-smoke-test.js",
@@ -79,11 +80,13 @@
     "fast-check": "^3.22.0",
     "graphql": "^16.14.2",
     "prettier": "^3.3.0",
+    "rxjs": "^7.8.1",
     "ts-json-schema-generator": "^2.9.0",
     "tsup": "^8.0.0",
     "typedoc": "^0.28.0",
     "typescript": "^5.9.3",
-    "vitest": "^2.0.0"
+    "vitest": "^2.0.0",
+    "vue": "^3.5.0"
   },
   "files": [
     "dist",
