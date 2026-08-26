@@ -1,4 +1,9 @@
-import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from './errors.js';
+import {
+  SoroStreamError,
+  SoroStreamValidationError,
+  FederationResolutionError,
+  InvalidStreamIdError,
+} from './errors.js';
 import { getDefaultWebSocketFactory } from './adapters.js';
 import type { FetchAdapter, WebSocketFactory } from './adapters.js';
 import { Memo } from '@stellar/stellar-sdk';
@@ -1544,6 +1549,29 @@ export function decodeStreamId(encoded: string): bigint {
     throw new RangeError(`decodeStreamId: decoded value exceeds u64 range`);
   }
   return result;
+}
+
+/**
+ * Validates and parses a caller-supplied stream ID string before it is
+ * converted to a `BigInt` and sent in a contract call (issue #458).
+ *
+ * Rejects anything that is not a plain non-negative decimal integer within
+ * u64 range, so malformed input (empty string, whitespace, signs, non-digit
+ * characters, oversized values) fails at the SDK boundary with a clear
+ * error instead of a raw `BigInt` `SyntaxError` or an opaque contract
+ * rejection.
+ *
+ * @throws {InvalidStreamIdError} If `streamId` is not a valid u64 decimal string.
+ */
+export function parseStreamId(streamId: string): bigint {
+  if (typeof streamId !== 'string' || !/^(0|[1-9]\d*)$/.test(streamId)) {
+    throw new InvalidStreamIdError(streamId);
+  }
+  const value = BigInt(streamId);
+  if (value > U64_MAX) {
+    throw new InvalidStreamIdError(streamId);
+  }
+  return value;
 }
 
 // ── Memo parsing ─────────────────────────────────────────────────────────

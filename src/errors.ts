@@ -329,3 +329,33 @@ export class RecipientValidationError extends SoroStreamError {
     this.warnings = warnings;
   }
 }
+
+/**
+ * Thrown when a caller-supplied stream ID is not a valid non-negative u64
+ * decimal string (issue #458). Caught before the value is converted to a
+ * `BigInt` and interpolated into a contract call, so a malformed ID fails
+ * with a clear message instead of a raw `SyntaxError` or an opaque
+ * contract-level rejection.
+ */
+export class InvalidStreamIdError extends SoroStreamError {
+  constructor(streamId: string) {
+    super(`Invalid stream ID: ${streamId}`);
+    this.name = 'InvalidStreamIdError';
+  }
+}
+
+/**
+ * Thrown when the signed XDR envelope returned by a wallet adapter does not
+ * match the transaction that was submitted for signing (issue #459). Caught
+ * before the signed transaction is broadcast, so an unexpectedly mutated
+ * operation, amount, address, source account, sequence number, or fee never
+ * reaches the network.
+ */
+export class TransactionMutatedError extends SoroStreamError {
+  constructor(reason: string) {
+    super(
+      `Signed transaction envelope does not match the transaction submitted for signing: ${reason}`,
+    );
+    this.name = 'TransactionMutatedError';
+  }
+}

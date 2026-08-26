@@ -65,6 +65,7 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
+  parseStreamId,
 } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
@@ -110,7 +111,10 @@ export {
   SoroStreamMemoError,
   SelfStreamError,
   SoroStreamTransportError,
+  InvalidStreamIdError,
+  TransactionMutatedError,
 } from './errors.js';
+export { assertEnvelopeUnmutated } from './xdrValidation.js';
 export { checkPeerDependencies } from './peerDependencies.js';
 export {
   isSoroStreamError,

@@ -40,6 +40,7 @@ import type { RpcTransportAdapter } from './transport.js';
 import { createRpcCompatTransport } from './rpc-compat.js';
 import type { RpcVersionDetectedPayload } from './rpc-compat.js';
 import { waitForLedger } from './readConsistency.js';
+import { assertEnvelopeUnmutated } from './xdrValidation.js';
 import { PriorityRequestQueue } from './request-queue.js';
 
 export type { SoroStreamConfigUpdate, ConfigUpdatedEvent } from './types.js';
@@ -1519,6 +1520,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
     const signedXdr = await adapter.signTransaction(preparedTx.toXDR(), this.network);
 
+    // Issue #459: verify the signed envelope still describes the transaction
+    // that was submitted for signing before broadcasting it.
+    assertEnvelopeUnmutated(preparedTx, signedXdr, NETWORK_PASSPHRASES[this.network]);
+
     const result = await withRetry(
       () =>
         this.withBreaker(() =>
@@ -1628,6 +1633,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const preparedTx = await withRetry(() => this.server.prepareTransaction(tx), this.submitRetry);
 
     const signedXdr = await adapter.signTransaction(preparedTx.toXDR(), this.network);
+
+    // Issue #459: verify the signed envelope still describes the transaction
+    // that was submitted for signing before broadcasting it.
+    assertEnvelopeUnmutated(preparedTx, signedXdr, NETWORK_PASSPHRASES[this.network]);
 
     const result = await withRetry(
       () =>
@@ -2083,6 +2092,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @param options - Optional write options (e.g. `simulateOnly`).
    * @returns `{ streamIds, txHash }`, or a `SimulateOnlyResult` when `options.simulateOnly` is set.
    * @throws {Error} If `paramsArray` is empty or any entry has `amount <= 0` or `durationSeconds <= 0`.
+   * @throws {StartTimeInPastError} If any entry's `startTime` is earlier than the current ledger timestamp.
    * @throws {TransactionFailedError} If the batch transaction is rejected.
    */
   async createStreams(
@@ -2090,9 +2100,21 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     options?: WriteOptions,
   ): Promise<{ streamIds: string[]; txHash: string } | SimulateOnlyResult> {
     if (paramsArray.length === 0) throw new Error('At least one stream is required');
+
+    // Issue #457: validate start_time against the current ledger before
+    // submitting, mirroring the single-stream check in validateStreamParams.
+    // Without this, a past start_time passes client-side and is only caught
+    // by the contract, which rejects it with an opaque error.
+    const ledgerNow = await this.getLedgerTimestamp();
     for (const params of paramsArray) {
       if (params.amount <= 0n) throw new Error('Amount must be > 0');
       if (params.durationSeconds <= 0) throw new Error('Duration must be > 0');
+
+      const startTimeParam =
+        params.startTime ?? (params as CreateStreamParams & { start_time?: number }).start_time;
+      if (startTimeParam !== undefined && startTimeParam < ledgerNow) {
+        throw new StartTimeInPastError(startTimeParam, ledgerNow);
+      }
     }
 
     const sender = await this.requireWalletAdapter().getPublicKey();
