@@ -110,6 +110,7 @@ export {
   SoroStreamMemoError,
   SelfStreamError,
   SoroStreamTransportError,
+  WalletConnectSessionExpiredError,
 } from './errors.js';
 export { checkPeerDependencies } from './peerDependencies.js';
 export {

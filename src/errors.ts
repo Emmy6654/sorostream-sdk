@@ -329,3 +329,22 @@ export class RecipientValidationError extends SoroStreamError {
     this.warnings = warnings;
   }
 }
+
+/**
+ * Thrown by the WalletConnect adapter when the underlying WalletConnect
+ * session has expired (or been deleted) between signing operations.
+ *
+ * The adapter clears the stale session before throwing, so the next
+ * signing attempt triggers a fresh `signClient.connect()` — surfacing the
+ * wallet's reconnect prompt to the user instead of silently failing.
+ *
+ * Issue #453.
+ */
+export class WalletConnectSessionExpiredError extends SoroStreamError {
+  constructor(message?: string) {
+    super(
+      message ?? 'WalletConnect session has expired. Please reconnect your wallet to continue.',
+    );
+    this.name = 'WalletConnectSessionExpiredError';
+  }
+}
