@@ -26,6 +26,7 @@ import {
   resolveFederationAddress,
   validateStringLength,
   detectNetworkFromRpcUrl,
+  assertSecureRpcUrl,
   filterStreams,
 } from './utils.js';
 import { ConnectionPool } from './connectionPool.js';
@@ -92,6 +93,8 @@ import { createContractEncoder } from './contractEncoders.js';
 import type { ContractCallEncoder } from './contractEncoders.js';
 import { CircuitBreaker } from './circuitBreaker.js';
 import type { CircuitBreakerOptions } from './circuitBreaker.js';
+import { WriteRateLimiter } from './writeRateLimiter.js';
+import type { WriteRateLimitOptions } from './writeRateLimiter.js';
 import {
   TransactionFailedError,
   StreamNotFoundError,
@@ -213,6 +216,13 @@ export interface SoroStreamClientOptions {
   transport?: RpcTransportAdapter;
   /** Optional circuit-breaker configuration for RPC calls. */
   circuitBreaker?: CircuitBreakerOptions;
+  /**
+   * Opt-in client-side rate limit on write operations (`createStream`,
+   * `withdraw`, `cancelStream`, etc.), throttling how many can be submitted
+   * per second from this client instance to guard against accidental RPC
+   * flooding (issue #464). Disabled by default.
+   */
+  writeRateLimit?: WriteRateLimitOptions;
   /** Maximum time in ms to wait for a transaction to confirm (default: 120000). */
   txTimeoutMs?: number;
   /** Retry policy for read methods (getStream, getClaimable, etc.). */
@@ -546,6 +556,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   private offlineQueue?: OfflineWriteQueue;
   // Issue #265: priority request queue (undefined when not configured)
   private requestQueue?: PriorityRequestQueue;
+  // Issue #464: client-side write rate limiter (undefined when not configured)
+  private readonly writeRateLimiter?: WriteRateLimiter;
   /**
    * Cached result of the contract's nonce-parameter capability check.
    * `null` means the check has not been performed yet.
@@ -590,6 +602,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // `network` is not explicitly provided. An explicit `network` always
     // wins; a mismatch against the detected value is logged as a warning
     // so misconfigured testnet/mainnet setups are caught early.
+    // Issue #463: fail fast on a non-TLS RPC URL rather than silently
+    // routing transaction data over an unencrypted connection.
+    if (options.rpcUrl) {
+      assertSecureRpcUrl(options.rpcUrl);
+    }
     const detectedNetwork = options.rpcUrl ? detectNetworkFromRpcUrl(options.rpcUrl) : undefined;
     if (options.network !== undefined) {
       this.network = options.network;
@@ -653,6 +670,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     });
     this.txTimeoutMs = options.txTimeoutMs ?? 120_000;
     this.breaker = options.circuitBreaker ? new CircuitBreaker(options.circuitBreaker) : null;
+    // Issue #464: opt-in client-side throttle on write-operation submission rate.
+    this.writeRateLimiter = options.writeRateLimit
+      ? new WriteRateLimiter(options.writeRateLimit)
+      : undefined;
     this.readRetry = options.readRetry ?? {};
     this.submitRetry = options.submitRetry ?? {};
     this.encoder = createContractEncoder(this.contract, options.contractVersion ?? 'v1');
@@ -1099,6 +1120,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * @param options - Optional overrides (e.g. a custom RPC URL for the new network).
    */
   setNetwork(network: Network, options?: { rpcUrl?: string }): void {
+    if (options?.rpcUrl) {
+      assertSecureRpcUrl(options.rpcUrl);
+    }
     if (this.network === network && !options?.rpcUrl) {
       // Nothing to do — avoid destroying subscribers unnecessarily.
       return;
@@ -1174,6 +1198,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * ```
    */
   updateConfig(partialConfig: SoroStreamConfigUpdate): void {
+    // Issue #463: validate before applying any other field so an insecure
+    // rpcUrl never leaves the config partially updated.
+    if (partialConfig.rpcUrl !== undefined) {
+      assertSecureRpcUrl(partialConfig.rpcUrl);
+    }
+
     const updates: ConfigUpdatedEvent[] = [];
 
     // 1. Update txTimeoutMs (safe to apply immediately — no in-flight impact)
@@ -1475,6 +1505,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   ): Promise<{ txHash: string; ledger: number }> {
     const opStart = Date.now();
     try {
+      await this.writeRateLimiter?.acquire(operationName ?? 'write');
       return await this.enqueueOp('write', () =>
         this.buildAndSubmitInner(operation, opStart, signal, feeBumpOpts, operationName, memo),
       );
@@ -1606,7 +1637,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return override ?? this.defaultFeeBump ?? undefined;
   }
 
-  private async buildAndSubmitBatch(operations: xdr.Operation[]): Promise<string> {
+  private async buildAndSubmitBatch(
+    operations: xdr.Operation[],
+    operationName = 'batch',
+  ): Promise<string> {
+    await this.writeRateLimiter?.acquire(operationName);
     return this.enqueueOp('write', () => this.buildAndSubmitBatchInner(operations));
   }
 
@@ -2104,7 +2139,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       return { simulated: true, result };
     }
 
-    const txHash = await this.buildAndSubmitBatch(operations);
+    const txHash = await this.buildAndSubmitBatch(operations, 'createStreams');
     const after = await this.getStreamsBySender(sender);
     const afterStreams = Array.isArray(after) ? after : after.streams;
     const streamIds = afterStreams.slice(-paramsArray.length).map((s) => s.id);
