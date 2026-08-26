@@ -1,7 +1,8 @@
 import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from './errors.js';
 import { getDefaultWebSocketFactory } from './adapters.js';
 import type { FetchAdapter, WebSocketFactory } from './adapters.js';
-import { Memo } from '@stellar/stellar-sdk';
+import { Memo, TransactionBuilder, Transaction, Networks } from '@stellar/stellar-sdk';
+import type { FeeBumpTransaction } from '@stellar/stellar-sdk';
 import type {
   PriceFeedAdapter,
   Stream,
@@ -26,6 +27,10 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
+  StreamCompletedSummary,
+  StreamsAggregate,
+  WithFeeBumpOptions,
+  MetadataUriFields,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -566,6 +571,22 @@ export function watchClaimable(
   let lastEmitted: bigint | null = null;
   let stopped = false;
   let lastNetworkVersion = options?.getNetworkVersion?.();
+  // Issue #385: fire onStreamCompleted exactly once when stream reaches endTime.
+  let completedFired = false;
+
+  function maybeFireCompleted(): void {
+    if (completedFired || stopped || !options?.onStreamCompleted) return;
+    const nowSecs = Date.now() / 1000;
+    if (nowSecs >= stream.endTime) {
+      completedFired = true;
+      const summary: StreamCompletedSummary = {
+        streamId: stream.id,
+        totalStreamed: stream.deposit,
+        endTime: stream.endTime,
+      };
+      options.onStreamCompleted(stream.id, summary);
+    }
+  }
 
   function emit() {
     if (stopped) return;
@@ -586,6 +607,8 @@ export function watchClaimable(
     if (interpolated === lastEmitted) return;
     lastEmitted = interpolated;
     onTick(interpolated);
+    // Issue #385: check completion on every tick.
+    maybeFireCompleted();
   }
 
   // Seed the dedupe cache BEFORE the initial onTick so that a re-entrant
@@ -627,6 +650,8 @@ export function watchClaimable(
       baseValue = actual;
       baseTime = Date.now();
       emit();
+      // Issue #385: also check completion after each reconcile.
+      maybeFireCompleted();
     } catch {
       // swallow — keep interpolating from last known value
     }
@@ -942,6 +967,69 @@ export function totalValueStreamed(streams: Stream[]): StreamTotals {
     totalClaimable,
     totalClaimed,
     totalRemaining,
+  };
+}
+
+// ── Issue #386: aggregateStreams ──────────────────────────────────────────────
+
+/**
+ * Computes cross-stream analytics — total value locked, average flow rate, and
+ * a per-status breakdown — across any set of streams.
+ *
+ * Unlike {@link totalValueStreamed} (which sums all deposits), `totalValueLocked`
+ * reflects only the remaining deposits held by active streams, making it a
+ * meaningful on-chain "TVL" metric for dashboards.
+ *
+ * @param streams - Stream list (may be empty; all statuses are accepted).
+ * @returns An {@link StreamsAggregate} object with TVL, averageRate, and statusBreakdown.
+ *
+ * @example
+ * ```ts
+ * const agg = aggregateStreams(await client.getStreamsBySender(sender));
+ * console.log(formatUSDC(agg.totalValueLocked)); // e.g. "9500.0000000"
+ * console.log(agg.statusBreakdown); // { active: 3, cancelled: 1, completed: 2 }
+ * ```
+ *
+ * Issue #386.
+ */
+export function aggregateStreams(streams: Stream[]): StreamsAggregate {
+  let totalValueLocked = 0n;
+  let rateSum = 0n;
+  let activeCount = 0;
+  let cancelled = 0;
+  let completed = 0;
+
+  const nowSecs = Math.floor(Date.now() / 1000);
+
+  for (const s of streams) {
+    if (s.status === 'Active') {
+      activeCount++;
+      // TVL: deposit minus what has already been released by the stream.
+      // Released = flowRate × elapsed, where elapsed = min(now, endTime) - startTime.
+      const effectiveNow = Math.min(nowSecs, s.endTime);
+      const elapsedSecs = BigInt(Math.max(0, effectiveNow - s.startTime));
+      const released = s.flowRate * elapsedSecs;
+      const remaining = s.deposit > released ? s.deposit - released : 0n;
+      totalValueLocked += remaining;
+      rateSum += s.flowRate;
+    } else if (s.status === 'Cancelled') {
+      cancelled++;
+    } else if (s.status === 'Completed') {
+      completed++;
+    }
+  }
+
+  const averageRate = activeCount > 0 ? rateSum / BigInt(activeCount) : 0n;
+
+  return {
+    totalStreams: streams.length,
+    totalValueLocked,
+    averageRate,
+    statusBreakdown: {
+      active: activeCount,
+      cancelled,
+      completed,
+    },
   };
 }
 
@@ -1568,4 +1656,115 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
     return Memo.hash(value);
   }
   return Memo.text(value);
+}
+
+// ── Issue #387: withFeeBump helper ────────────────────────────────────────────
+
+/**
+ * Wraps an inner transaction in a Stellar fee-bump envelope so a server-side
+ * signer can sponsor the network fee on behalf of end users.
+ *
+ * The resulting {@link FeeBumpTransaction} must still be signed by `feeSource`
+ * (e.g. via your server keypair or {@link WalletAdapter}) before submission.
+ *
+ * @param innerTx   - The signed inner transaction (XDR string or Transaction object).
+ * @param feeSource - The Stellar address of the fee-paying account.
+ * @param options   - Optional fee and network configuration.
+ * @returns A {@link FeeBumpTransaction} ready to be signed and submitted.
+ *
+ * @example
+ * ```ts
+ * const inner = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET) as Transaction;
+ * const bump = withFeeBump(inner, sponsorAddress, { baseFee: 10_000 });
+ * bump.sign(sponsorKeypair);
+ * await server.submitTransaction(bump);
+ * ```
+ *
+ * Issue #387.
+ */
+export function withFeeBump(
+  innerTx: Transaction | string,
+  feeSource: string,
+  options?: WithFeeBumpOptions,
+): FeeBumpTransaction {
+  const networkPassphrase = options?.networkPassphrase ?? Networks.TESTNET;
+  const baseFee = options?.baseFee ?? 200;
+
+  // Accept XDR string or Transaction object.
+  const inner: Transaction =
+    typeof innerTx === 'string'
+      ? (TransactionBuilder.fromXDR(innerTx, networkPassphrase) as Transaction)
+      : innerTx;
+
+  return TransactionBuilder.buildFeeBumpTransaction(feeSource, String(baseFee), inner, networkPassphrase);
+}
+
+// ── Issue #388: buildMetadataUri helper ───────────────────────────────────────
+
+/**
+ * Serialises a structured metadata object to a URI-safe string conforming to
+ * the SoroStream metadata spec.  The resulting string is safe to store in the
+ * stream's `metadata` field and can be decoded with {@link parseMetadataUri}.
+ *
+ * Encoding rules:
+ * - Fields are serialised as `key=value` pairs, percent-encoded via
+ *   `encodeURIComponent`, and joined with `&`.
+ * - Empty/undefined values are omitted.
+ * - Keys are sorted alphabetically for deterministic output.
+ * - The total byte length of the result must not exceed the 128-byte
+ *   `metadataUri` field limit enforced by {@link validateStringLength}.
+ *
+ * @param fields - Structured metadata fields.
+ * @returns A URI-safe string (e.g. `"category=payroll&label=Alice%20Salary"`).
+ * @throws {SoroStreamValidationError} If the serialised URI exceeds 128 bytes.
+ *
+ * @example
+ * ```ts
+ * const uri = buildMetadataUri({ label: "Alice Salary", category: "payroll" });
+ * // → "category=payroll&label=Alice%20Salary"
+ * await client.createStream({ ..., metadata: uri });
+ * ```
+ *
+ * Issue #388.
+ */
+export function buildMetadataUri(fields: MetadataUriFields): string {
+  const pairs: string[] = [];
+
+  for (const key of Object.keys(fields).sort()) {
+    const value = fields[key];
+    if (value === undefined || value === '') continue;
+    pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  }
+
+  const uri = pairs.join('&');
+  validateStringLength('metadataUri', uri);
+  return uri;
+}
+
+/**
+ * Parses a metadata URI string produced by {@link buildMetadataUri} back into
+ * a structured {@link MetadataUriFields} object.
+ *
+ * @param uri - A URI-safe string previously produced by `buildMetadataUri`.
+ * @returns The decoded key-value pairs.
+ *
+ * @example
+ * ```ts
+ * const fields = parseMetadataUri("category=payroll&label=Alice%20Salary");
+ * // → { category: "payroll", label: "Alice Salary" }
+ * ```
+ *
+ * Issue #388.
+ */
+export function parseMetadataUri(uri: string): MetadataUriFields {
+  if (!uri) return {};
+  const fields: MetadataUriFields = {};
+  for (const pair of uri.split('&')) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = decodeURIComponent(pair.slice(0, eqIdx));
+    const value = decodeURIComponent(pair.slice(eqIdx + 1));
+    if (key) fields[key] = value;
+  }
+  return fields;
 }
