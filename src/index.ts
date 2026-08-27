@@ -65,7 +65,10 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
+  toRatePerSecond,
+  fromRatePerSecond,
 } from './utils.js';
+export type { RateUnit } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
 export type { SerializedStream } from './serialization.js';
@@ -230,6 +233,11 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
+  GrantDelegateParams,
+  RevokeDelegateByStreamParams,
+  DiagnosticsResult,
+  AuditLogger,
+  AuditLogEntry,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';
