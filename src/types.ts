@@ -439,6 +439,13 @@ export interface WalletAdapter {
    * Returns an unsubscribe function.
    */
   onConnectionChange?(callback: (connected: boolean) => void): () => void;
+  /**
+   * Optional: releases any retained key material (issue #460). Adapters that
+   * hold raw secret key buffers (e.g. `createKeypairAdapter`) zero them out
+   * here; adapters with nothing sensitive to hold in memory simply omit this
+   * method. Once called, the adapter should no longer be used.
+   */
+  destroy?(): void;
 }
 
 /** Result shape returned when a wallet adapter signs a transaction (issue #344). */
@@ -882,6 +889,22 @@ export type RecipientTrustScoreProvider = (
   recipient: string,
 ) => RecipientTrustScore | Promise<RecipientTrustScore>;
 
+// ── Issue #364: onStreamUpdate subscription ─────────────────────────────────
+
+/** Options for the {@link SoroStreamClient.onStreamUpdate} subscription. */
+export interface OnStreamUpdateOptions {
+  /**
+   * How often to poll the RPC for state changes, in ms.
+   * Defaults to 5000 (5 seconds).
+   */
+  pollIntervalMs?: number;
+  /**
+   * When true, fire the callback immediately with the current stream state
+   * before waiting for the first poll interval. Defaults to false.
+   */
+  immediate?: boolean;
+}
+
 // ── Stream filtering (issue #204) ───────────────────────────────────────────
 
 /** Criteria for filtering streams. */
@@ -1238,61 +1261,28 @@ export interface ConfigUpdatedEvent {
   newValue: unknown;
 }
 
-// ── Issue #386: aggregateStreams utility ──────────────────────────────────────
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
 
-/**
- * Cross-stream analytics aggregate produced by {@link aggregateStreams}.
- *
- * Issue #386.
- */
-export interface StreamsAggregate {
-  /** Total number of streams in the input. */
-  totalStreams: number;
+/** Health status string returned by {@link getStreamHealth}. */
+export type StreamHealthStatus = 'healthy' | 'warning' | 'critical' | 'completed' | 'cancelled';
+
+/** Result returned by {@link getStreamHealth}. */
+export interface StreamHealthResult {
   /**
-   * Total Value Locked — sum of all active stream deposits still held by the
-   * contract in stroops.
+   * Numeric health score in the range 0–100.
+   * 100 = fully healthy; lower values indicate increasing risk.
    */
-  totalValueLocked: bigint;
-  /**
-   * Average flow rate across all active streams in stroops/second.
-   * `0n` when there are no active streams.
-   */
-  averageRate: bigint;
-  /** Per-status counts for the entire set. */
-  statusBreakdown: StatusBreakdown;
-}
-
-// ── Issue #387: withFeeBump helper ────────────────────────────────────────────
-
-/**
- * Options accepted by {@link withFeeBump}.
- *
- * Issue #387.
- */
-export interface WithFeeBumpOptions {
-  /**
-   * The base fee for the fee-bump envelope in stroops (default: 200).
-   * Must be at least twice the inner transaction's base fee.
-   */
-  baseFee?: number;
-  /** The Stellar network passphrase. Defaults to the Testnet passphrase. */
-  networkPassphrase?: string;
-}
-
-// ── Issue #388: buildMetadataUri helper ───────────────────────────────────────
-
-/**
- * Structured fields accepted by {@link buildMetadataUri}.
- *
- * Issue #388.
- */
-export interface MetadataUriFields {
-  /** Human-readable stream label (e.g. "Payroll – Alice"). */
-  label?: string;
-  /** Application-level category tag (e.g. "payroll", "grant"). */
-  category?: string;
-  /** Optional namespace for multi-tenant scoping. */
-  namespace?: string;
-  /** Arbitrary additional key-value pairs. Values are coerced to strings. */
-  [key: string]: string | undefined;
+  score: number;
+  /** Human-readable health status. */
+  status: StreamHealthStatus;
+  /** Remaining balance in stroops (deposit minus streamed so far). */
+  remainingBalance: bigint;
+  /** Seconds elapsed since stream started. */
+  elapsedSeconds: number;
+  /** Seconds remaining until stream ends (0 if ended). */
+  remainingSeconds: number;
+  /** Seconds since the last withdrawal (0 if never withdrawn). */
+  secondsSinceLastWithdrawal: number;
+  /** Human-readable diagnostics messages (empty when status is healthy). */
+  diagnostics: string[];
 }

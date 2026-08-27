@@ -4,6 +4,7 @@ export type {
   SimulateOnlyResult,
   SoroStreamConfigUpdate,
   ConfigUpdatedEvent,
+  CreateStreamsParams,
 } from './SoroStreamClient.js';
 export type {
   StorageAdapter,
@@ -20,6 +21,9 @@ export type {
 } from './transport.js';
 
 export { MockSoroStreamClient, SoroStreamSandbox } from './mock.js';
+
+export { StreamSimulator } from './simulator.js';
+export type { StreamExpiryCallback } from './simulator.js';
 
 export { WebhookForwarder } from './webhook.js';
 export {
@@ -62,14 +66,13 @@ export {
   filterStreams,
   sortStreams,
   detectNetworkFromRpcUrl,
+  assertSecureRpcUrl,
   parseMemo,
   encodeStreamId,
   decodeStreamId,
-  aggregateStreams,
-  withFeeBump,
-  buildMetadataUri,
-  parseMetadataUri,
+  getStreamHealth,
 } from './utils.js';
+export type { StreamMetadataFields } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
 export type { SerializedStream } from './serialization.js';
@@ -80,9 +83,11 @@ export type {
   TransactionHistoryOptions,
 } from './horizon.js';
 export { CircuitBreaker } from './circuitBreaker.js';
-export { withRetry, RetryBackoff } from './retry.js';
+export { withRetry, RetryBackoff, isTransientRpcError } from './retry.js';
 export type { RetryOptions } from './retry.js';
 export type { CircuitState, CircuitBreakerOptions } from './circuitBreaker.js';
+export { WriteRateLimiter } from './writeRateLimiter.js';
+export type { WriteRateLimitOptions } from './writeRateLimiter.js';
 export { ConnectionPool } from './connectionPool.js';
 export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from './connectionPool.js';
 export { InMemoryEventBus } from './eventBus.js';
@@ -114,7 +119,9 @@ export {
   SoroStreamMemoError,
   SelfStreamError,
   SoroStreamTransportError,
+  InsecureRpcUrlError,
 } from './errors.js';
+export { assertEnvelopeUnmutated } from './xdrValidation.js';
 export { checkPeerDependencies } from './peerDependencies.js';
 export {
   isSoroStreamError,
@@ -234,10 +241,8 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
-  StreamCompletedSummary,
-  StreamsAggregate,
-  WithFeeBumpOptions,
-  MetadataUriFields,
+  StreamHealthStatus,
+  StreamHealthResult,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';
@@ -248,3 +253,4 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+export type { PaginatedEvents, StreamEvent as IndexerStreamEvent, StreamEventType as IndexerStreamEventType } from './indexer.js';
