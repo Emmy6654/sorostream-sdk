@@ -66,6 +66,7 @@ describe('Issue #410: Freighter adapter reconnects after lock/unlock', () => {
       isConnected: vi.fn().mockResolvedValue({ isConnected: true }),
       getAddress: vi.fn().mockImplementation(async () => ({ address: currentAddress })),
       signTransaction: vi.fn().mockResolvedValue({ signedTxXdr: 'signed_1' }),
+      requestAccess: vi.fn().mockResolvedValue({}),
       WatchWalletChanges: vi.fn().mockImplementation(() => ({
         watch: (cb: (payload: WatchPayload) => void) => {
           watchCallback = cb;
