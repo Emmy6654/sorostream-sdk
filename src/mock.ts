@@ -49,8 +49,11 @@ import type {
   WithdrawParams,
   WriteOptions,
   OperationExplanation,
+  GetStreamsOptions,
+  BatchStreamsResult,
 } from './types.js';
 import { streamToJSON, filterStreams } from './utils.js';
+import { SoroStreamObservable, shareLatest } from './observable.js';
 
 let nextId = 1;
 
@@ -623,6 +626,73 @@ export class MockSoroStreamClient {
     return { ...stream };
   }
 
+  /**
+   * Batch equivalent of {@link MockSoroStreamClient.getStream} (issue #427).
+   *
+   * Mirrors the real client: duplicate IDs are collapsed, the result follows the
+   * requested order, and unknown IDs are omitted (or throw with `strict: true`).
+   */
+  async getStreams(ids: string[], options?: GetStreamsOptions): Promise<Stream[]> {
+    const { streams } = await this.getStreamsBatch(ids, options);
+    return streams;
+  }
+
+  /** Batch read with metadata, mirroring `SoroStreamClient.getStreamsBatch` (issue #427). */
+  async getStreamsBatch(ids: string[], options?: GetStreamsOptions): Promise<BatchStreamsResult> {
+    const requested: string[] = [];
+    for (const id of ids) {
+      const value = String(id);
+      if (!requested.includes(value)) requested.push(value);
+    }
+
+    const streams: Stream[] = [];
+    const missing: string[] = [];
+    for (const id of requested) {
+      const stream = this.streams.get(id);
+      if (stream) streams.push({ ...stream });
+      else missing.push(id);
+    }
+
+    if (missing.length > 0 && options?.strict) {
+      throw new Error(`Stream not found: ${missing[0]}`);
+    }
+
+    return { streams, missing, cached: [], rpcCalls: requested.length > 0 ? 1 : 0 };
+  }
+
+  /**
+   * RxJS-compatible observable of a stream's state (issue #423).
+   *
+   * Emits immediately on subscribe and then on every mock mutation that touches
+   * the stream, so consumer tests can exercise reactive code paths without a
+   * polling delay.
+   */
+  observeStream(streamId: string): SoroStreamObservable<Stream> {
+    return shareLatest<Stream>((sink) => {
+      let closed = false;
+
+      const push = (): void => {
+        const stream = this.streams.get(streamId);
+        if (!stream) {
+          closed = true;
+          sink.error(new Error(`Stream not found: ${streamId}`));
+          return;
+        }
+        sink.next({ ...stream });
+        if (stream.status === 'Completed' || stream.status === 'Cancelled') {
+          closed = true;
+          sink.complete();
+        }
+      };
+
+      push();
+      if (closed) return;
+
+      const sub = this.subscribeEvents({ streamId }, () => push());
+      return () => sub.unsubscribe();
+    });
+  }
+
   async getClaimable(streamId: string): Promise<bigint> {
     const stream = this.streams.get(streamId);
     if (!stream) return 0n;
@@ -983,6 +1053,13 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
 
   override async getStream(streamId: string): Promise<Stream> {
     return this.recordAndExecute('getStream', () => super.getStream(streamId), [streamId]);
+  }
+
+  override async getStreams(ids: string[], options?: GetStreamsOptions): Promise<Stream[]> {
+    return this.recordAndExecute('getStreams', () => super.getStreams(ids, options), [
+      ids,
+      options,
+    ]);
   }
 
   override async getClaimable(streamId: string): Promise<bigint> {

@@ -92,6 +92,18 @@ export { ConnectionPool } from './connectionPool.js';
 export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from './connectionPool.js';
 export { InMemoryEventBus } from './eventBus.js';
 export type { IEventBus, Unsubscribe } from './eventBus.js';
+export { RequestDeduplicator, dedupKey } from './requestDeduplicator.js';
+export type { RequestDedupStats, RequestDeduplicatorOptions } from './requestDeduplicator.js';
+export { SoroStreamObservable, shareLatest, observableSymbol } from './observable.js';
+export type {
+  Observer,
+  Subscription as ObservableSubscription,
+  Unsubscribable,
+  SubscriberSink,
+  SubscribeFn,
+  Teardown,
+  ShareLatestOptions,
+} from './observable.js';
 export type { StreamRetryPolicy, EventPollerOptions } from './events.js';
 export type { BatchingOptions, BatchMetrics, CompressionOptions } from './types.js';
 export { createContractEncoder } from './contractEncoders.js';

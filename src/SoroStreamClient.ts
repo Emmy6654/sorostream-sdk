@@ -13,7 +13,7 @@ import {
   Memo,
 } from '@stellar/stellar-sdk';
 import { BatchBuilder } from './batchBuilder.js';
-import { EventPoller } from './events.js';
+import { EventPoller, unrefTimer } from './events.js';
 import { InMemoryEventBus, type IEventBus } from './eventBus.js';
 import {
   OfflineWriteQueue,
@@ -101,6 +101,7 @@ import type { WriteRateLimitOptions } from './writeRateLimiter.js';
 import {
   TransactionFailedError,
   StreamNotFoundError,
+  SoroStreamError,
   InsufficientAmountError,
   InvalidAddressError,
   AccountNotFoundError,
@@ -375,6 +376,22 @@ export interface SoroStreamClientOptions {
   rpcVersion?: 'v1' | 'v2' | 'auto';
   /** Set to `false` to disable telemetry emission (issue #270). Default: true. */
   telemetry?: boolean;
+  /**
+   * Set to `false` to disable in-flight request deduplication (issue #426).
+   *
+   * With deduplication enabled (the default), concurrent read calls that
+   * address the same data — e.g. five dashboard widgets calling
+   * `getStream("42")` in the same tick — share a single RPC request instead of
+   * issuing one each. Disable only when you need every call to hit the network
+   * independently (for example when measuring raw RPC throughput).
+   */
+  dedupeRequests?: boolean;
+  /**
+   * Default maximum number of stream IDs per RPC call in
+   * {@link SoroStreamClient.getStreams} (issue #427). Defaults to `50` and can
+   * be overridden per call.
+   */
+  batchReadSize?: number;
 }
 
 function nativeToStream(raw: Record<string, unknown>): Stream {
@@ -607,10 +624,21 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
   /** TTL cache: streamId → resolved claimable amount */
   private readonly claimableCache = new Cache<string, bigint>(STREAM_CACHE_TTL_MS);
-  /** In-flight deduplication: streamId → shared promise for the active RPC call */
-  private readonly claimableInflight = new Map<string, Promise<bigint>>();
-  /** In-flight deduplication for getStream: ${network}:${streamId} → shared promise */
-  private readonly streamInflight = new Map<string, Promise<Stream>>();
+  /**
+   * Single in-flight deduplication layer shared by every read path
+   * (`getStream`, `getStreams`, `getClaimable`, `getStreamsBySender`,
+   * `getStreamsByRecipient`, `getTokenMetadata`). Issue #426.
+   */
+  private readonly requestDedup: RequestDeduplicator;
+  /** Default number of stream IDs per batch RPC call (issue #427). */
+  private readonly batchReadSize: number;
+  /**
+   * Shared, reference-counted observables per `${network}:${streamId}:${opts}`
+   * so many subscribers never spawn many poll loops (issue #423).
+   */
+  private readonly streamObservables = new Map<string, SoroStreamObservable<Stream>>();
+  /** Shared, reference-counted claimable observables (issue #423). */
+  private readonly claimableObservables = new Map<string, SoroStreamObservable<bigint>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
   private readonly eventBus: IEventBus;
 
@@ -619,8 +647,6 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
 
   /** TTL cache: token address → resolved SAC metadata. Issue #203. */
   private readonly tokenMetadataCache: Cache<string, TokenMetadata>;
-  /** In-flight deduplication: token address → shared promise for the active RPC calls. */
-  private readonly tokenMetadataInflight = new Map<string, Promise<TokenMetadata>>();
 
   // Issue #272: detected RPC version (set after first probe or explicit override)
   private detectedRpcVersion: 'v1' | 'v2' | null = null;
@@ -710,6 +736,16 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     // Default TTL of 5 seconds: short enough to stay reasonably fresh,
     // long enough to absorb bursts of concurrent reads for the same stream.
     this.claimableCache = new Cache<string, bigint>(5_000);
+    // Issue #426: one deduplication layer for every read path. Enabled by
+    // default — pass `{ dedupeRequests: false }` to opt out.
+    this.requestDedup = new RequestDeduplicator({
+      enabled: options.dedupeRequests !== false,
+      onDeduplicated: (key) => {
+        this.eventBus.emit('requestDeduplicated', { key, network: this.network });
+      },
+    });
+    // Issue #427: default batch size for getStreams().
+    this.batchReadSize = Math.max(1, options.batchReadSize ?? 50);
     this.validateCliff =
       options.validateCliff ??
       ((s) => {
@@ -800,6 +836,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     clientFinalizers?.unregister(this);
     this.eventPoller = null;
     this.pool = null;
+    // Issue #423: drop shared observables so their poll loops are not kept
+    // reachable after teardown. `runClientCleanup` stops the timers themselves.
+    this.streamObservables.clear();
+    this.claimableObservables.clear();
     runClientCleanup(this.ownedTimers);
   }
 
@@ -1228,10 +1268,17 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.senderCache.clear();
     this.recipientCache.clear();
     this.federationCache.clear();
-    // Issue #221: Clear in-flight deduplication maps on network switch
-    this.streamInflight.clear();
-    this.claimableInflight.clear();
+    // Issue #221 & #426: drop in-flight request tracking on a network switch so
+    // a pending read against the previous network is never handed to a caller
+    // that has already been moved to the new one.
+    this.requestDedup.clear();
     this.claimableCache.clear();
+    // Issue #423: shared observables are network-scoped (their cache key
+    // includes the network), so the map entries for the old network are
+    // dropped here. Active subscribers keep their own poll loop until they
+    // unsubscribe.
+    this.streamObservables.clear();
+    this.claimableObservables.clear();
     // Issue #271: clear pending RYOW ledger records — they are network-specific.
     this._lastWriteLedger.clear();
 
@@ -1321,6 +1368,11 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       this.senderCache.clear();
       this.recipientCache.clear();
       this.claimableCache.clear();
+      // Issue #426: in-flight reads target the previous contract — detach them
+      // so new callers start a request against the new contract instead.
+      this.requestDedup.clear();
+      this.streamObservables.clear();
+      this.claimableObservables.clear();
     }
 
     // 3. Update rpcUrl (requires waiting for in-flight requests)
@@ -1895,36 +1947,33 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const cached = this.tokenMetadataCache.get(tokenAddress);
     if (cached) return cached;
 
-    const inflight = this.tokenMetadataInflight.get(tokenAddress);
-    if (inflight) return inflight;
-
-    const promise = (async (): Promise<TokenMetadata> => {
-      const tokenContract = new Contract(tokenAddress);
-      const [nameRes, symbolRes, decimalsRes] = await Promise.all([
-        this.simulateOp(tokenContract.call('name')),
-        this.simulateOp(tokenContract.call('symbol')),
-        this.simulateOp(tokenContract.call('decimals')),
-      ]);
-      const name = String(
-        scValToNative((nameRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!),
-      );
-      const symbol = String(
-        scValToNative((symbolRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!),
-      );
-      const decimals = Number(
-        scValToNative((decimalsRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!),
-      );
-      const metadata: TokenMetadata = { name, symbol, decimals };
-      this.tokenMetadataCache.set(tokenAddress, metadata);
-      return metadata;
-    })();
-
-    this.tokenMetadataInflight.set(tokenAddress, promise);
-    try {
-      return await promise;
-    } finally {
-      this.tokenMetadataInflight.delete(tokenAddress);
-    }
+    // Issue #426: shared deduplication layer — concurrent callers for the same
+    // token wait on one set of RPC calls.
+    return this.requestDedup.dedupe(
+      dedupKey('getTokenMetadata', this.network, tokenAddress),
+      async (): Promise<TokenMetadata> => {
+        const tokenContract = new Contract(tokenAddress);
+        const [nameRes, symbolRes, decimalsRes] = await Promise.all([
+          this.simulateOp(tokenContract.call('name')),
+          this.simulateOp(tokenContract.call('symbol')),
+          this.simulateOp(tokenContract.call('decimals')),
+        ]);
+        const name = String(
+          scValToNative((nameRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!),
+        );
+        const symbol = String(
+          scValToNative((symbolRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!),
+        );
+        const decimals = Number(
+          scValToNative(
+            (decimalsRes as rpc.Api.SimulateTransactionSuccessResponse).result!.retval!,
+          ),
+        );
+        const metadata: TokenMetadata = { name, symbol, decimals };
+        this.tokenMetadataCache.set(tokenAddress, metadata);
+        return metadata;
+      },
+    );
   }
 
   /** Clears token metadata cache entries. Without an argument, clears all. */
@@ -3362,11 +3411,18 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * Returns the full stream data for a given stream ID.
    * Returns a cached value when one is present (populated by optimistic updates).
    * Automatically retries on transient RPC errors.
+   *
+   * Concurrent callers for the same stream ID share a single in-flight RPC
+   * request (issue #426): if five components ask for stream `42` in the same
+   * tick, exactly one simulation is sent and all five receive the same object.
+   *
    * @param streamId - The stream ID to look up.
+   * @param options - Set `{ refresh: true }` to bypass the TTL cache and force
+   *   a network read (the in-flight deduplication still applies).
    * @returns The `Stream` record.
    * @throws {StreamNotFoundError} If no stream exists with the given ID.
    */
-  async getStream(streamId: string): Promise<Stream> {
+  async getStream(streamId: string, options?: { refresh?: boolean }): Promise<Stream> {
     // Capture the current network so a concurrent `setNetwork` call can't
     // poison the cache with data fetched under a different network.
     const networkAtCallTime = this.network;
@@ -3378,36 +3434,44 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     await this._waitForStreamLedger(streamId);
 
     // 1. Fast path: serve from TTL cache.
-    const cached = this.streamCache.get(cacheKey);
-    if (cached) return cached;
+    if (!options?.refresh) {
+      const cached = this.streamCache.get(cacheKey);
+      if (cached) return cached;
+    }
 
-    // 2. Deduplication: if an RPC call for this stream is already in-flight,
-    //    join it rather than launching a second one.
-    const existing = this.streamInflight.get(cacheKey);
-    if (existing) return existing;
+    // 2. Deduplication (issue #426): the first caller starts the RPC call, every
+    //    caller that arrives while it is in flight joins the same promise.
+    return this.requestDedup.dedupe(
+      dedupKey('getStream', networkAtCallTime, streamId),
+      async () => {
+        const result = await withRetry(
+          () =>
+            this.simulateOp(
+              this.contract.call('get_stream', nativeToScVal(BigInt(streamId), { type: 'u64' })),
+            ),
+          this.readRetry,
+        );
 
-    // 3. No cached value and no in-flight request — start one.
-    const request = withRetry(
-      () =>
-        this.simulateOp(
-          this.contract.call('get_stream', nativeToScVal(BigInt(streamId), { type: 'u64' })),
-        ),
-      this.readRetry,
-    );
-
-    // Store the in-flight promise so concurrent callers can join it.
-    this.streamInflight.set(
-      cacheKey,
-      request.then((result) => {
         if (rpc.Api.isSimulationError(result)) {
           throw new StreamNotFoundError(streamId);
         }
 
         const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
         if (!returnVal) throw new Error('No return value from contract');
-        return scValToStream(returnVal);
-      }),
+        const stream = scValToStream(returnVal);
+
+        // Only cache the result if the network hasn't changed during the RPC.
+        // This guard maintains the cache contract keyed by the *current*
+        // network: an in-flight read on the old network must never write into
+        // the new network's slot, and any entry already present must remain
+        // addressable under the network in which it was originally fetched.
+        if (networkAtCallTime === this.network) {
+          this.streamCache.set(cacheKey, stream);
+        }
+        return stream;
+      },
     );
+  }
 
     try {
       const stream = await this.streamInflight.get(cacheKey)!;
@@ -3422,14 +3486,145 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         // Issue #470: also persist to the opt-in localStorage-backed cache
         this.persistentStreamCache?.set(networkAtCallTime, stream);
       }
-      return stream;
-    } finally {
-      // Clear the in-flight entry after settlement so the next call after
-      // resolution makes a fresh request. This maintains the deduplication
-      // guarantee: each unique stream fetch (after cache expiry) triggers
-      // exactly one RPC call.
-      this.streamInflight.delete(cacheKey);
+      if (!requested.includes(id)) requested.push(id);
     }
+
+    if (requested.length === 0) {
+      return { streams: [], missing: [], cached: [], rpcCalls: 0 };
+    }
+
+    const networkAtCallTime = this.network;
+    const useCache = options?.useCache !== false;
+    const chunkSize = Math.max(1, options?.chunkSize ?? this.batchReadSize);
+
+    // Issue #271: honour read-your-own-writes for every requested stream.
+    await Promise.all(requested.map((id) => this._waitForStreamLedger(id)));
+
+    const resolved = new Map<string, Stream>();
+    const cached: string[] = [];
+    const toFetch: string[] = [];
+
+    for (const id of requested) {
+      const hit = useCache ? this.streamCache.get(`${networkAtCallTime}:${id}`) : undefined;
+      if (hit) {
+        resolved.set(id, hit);
+        cached.push(id);
+      } else {
+        toFetch.push(id);
+      }
+    }
+
+    let rpcCalls = 0;
+
+    if (toFetch.length > 0) {
+      const chunks: string[][] = [];
+      for (let i = 0; i < toFetch.length; i += chunkSize) {
+        chunks.push(toFetch.slice(i, i + chunkSize));
+      }
+
+      const fetched = await Promise.all(
+        chunks.map((chunk) =>
+          this.requestDedup.dedupe(
+            dedupKey('getStreams', networkAtCallTime, chunk.join(',')),
+            async () => {
+              rpcCalls++;
+              return this._fetchStreamChunk(chunk, networkAtCallTime, options);
+            },
+          ),
+        ),
+      );
+
+      for (const chunkStreams of fetched) {
+        for (const stream of chunkStreams) {
+          resolved.set(stream.id, stream);
+        }
+      }
+    }
+
+    const missing = requested.filter((id) => !resolved.has(id));
+    if (missing.length > 0 && options?.strict) {
+      throw new StreamNotFoundError(missing[0]!);
+    }
+
+    return {
+      streams: requested.map((id) => resolved.get(id)).filter((s): s is Stream => s !== undefined),
+      missing,
+      cached,
+      rpcCalls,
+    };
+  }
+
+  /**
+   * Fetches one chunk of stream IDs with a single `get_streams` simulation,
+   * falling back to parallel single reads on contracts without that entry
+   * point. Issue #427.
+   */
+  private async _fetchStreamChunk(
+    chunk: string[],
+    networkAtCallTime: Network,
+    options?: GetStreamsOptions,
+  ): Promise<Stream[]> {
+    const idsScVal = xdr.ScVal.scvVec(
+      chunk.map((id) => nativeToScVal(BigInt(id), { type: 'u64' })),
+    );
+
+    const result = await withRetry(
+      () => this.simulateOp(this.contract.call('get_streams', idsScVal)),
+      this.readRetry,
+    );
+
+    if (rpc.Api.isSimulationError(result)) {
+      // The contract may be an older deployment without `get_streams`. Falling
+      // back keeps the batch API usable everywhere instead of hard-failing.
+      if (options?.fallbackToIndividual === false) return [];
+      return this._fetchStreamsIndividually(chunk, options);
+    }
+
+    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+    if (!returnVal) {
+      if (options?.fallbackToIndividual === false) return [];
+      return this._fetchStreamsIndividually(chunk, options);
+    }
+
+    const raw = scValToNative(returnVal) as Array<Record<string, unknown> | null | undefined>;
+    if (!Array.isArray(raw)) {
+      if (options?.fallbackToIndividual === false) return [];
+      return this._fetchStreamsIndividually(chunk, options);
+    }
+
+    const streams = raw
+      .filter((entry): entry is Record<string, unknown> => entry != null)
+      .map(nativeToStream);
+
+    // Warm the per-stream cache so a later getStream() for any of these IDs is
+    // served locally — only when the network hasn't switched mid-flight.
+    if (networkAtCallTime === this.network) {
+      for (const stream of streams) {
+        this.streamCache.set(`${networkAtCallTime}:${stream.id}`, stream);
+      }
+    }
+
+    return streams;
+  }
+
+  /**
+   * Fallback path for {@link SoroStreamClient.getStreams}: reads each ID
+   * individually (in parallel, still deduplicated) and drops the ones that do
+   * not exist. Issue #427.
+   */
+  private async _fetchStreamsIndividually(
+    chunk: string[],
+    options?: GetStreamsOptions,
+  ): Promise<Stream[]> {
+    const settled = await Promise.all(
+      chunk.map((id) =>
+        this.getStream(id, { refresh: options?.useCache === false }).catch((error: unknown) => {
+          if (error instanceof StreamNotFoundError) return null;
+          throw error;
+        }),
+      ),
+    );
+    return settled.filter((s): s is Stream => s !== null);
   }
 
   /**
@@ -3452,47 +3647,38 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     const cached = this.claimableCache.get(streamId);
     if (cached !== undefined) return cached;
 
-    // 2. Deduplication: if an RPC call for this stream is already in-flight,
-    //    join it rather than launching a second one.
-    const existing = this.claimableInflight.get(streamId);
-    if (existing) return existing;
+    // 2. Deduplication (issue #426): concurrent callers join the in-flight call
+    //    instead of each starting their own.
+    return this.requestDedup.dedupe(
+      dedupKey('getClaimable', this.network, streamId),
+      async (): Promise<bigint> => {
+        const result = await withRetry(
+          () =>
+            this.simulateOp(
+              this.contract.call('get_claimable', nativeToScVal(BigInt(streamId), { type: 'u64' })),
+            ),
+          this.readRetry,
+        );
 
-    // 3. No cached value and no in-flight request — start one.
-    const request = withRetry(
-      () =>
-        this.simulateOp(
-          this.contract.call('get_claimable', nativeToScVal(BigInt(streamId), { type: 'u64' })),
-        ),
-      this.readRetry,
-    )
-      .then((result): bigint => {
-        if (rpc.Api.isSimulationError(result)) return 0n;
-        const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-        if (!returnVal) return 0n;
-        const raw = BigInt(scValToNative(returnVal) as number);
-        if (raw < 0n) {
-          console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
-          return 0n;
+        let value = 0n;
+        if (!rpc.Api.isSimulationError(result)) {
+          const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+          if (returnVal) {
+            const raw = BigInt(scValToNative(returnVal) as number);
+            if (raw < 0n) {
+              console.warn(`getClaimable returned negative value ${raw} — clamping to 0`);
+            } else {
+              value = raw;
+            }
+          }
         }
-        return raw;
-      })
-      .then((value): bigint => {
+
         // On success: populate the TTL cache so the next burst of callers
         // doesn't need to wait for a new RPC round-trip.
         this.claimableCache.set(streamId, value);
         return value;
-      })
-      .finally(() => {
-        // Always remove the in-flight entry so future callers after TTL
-        // expiry can start a fresh request.
-        this.claimableInflight.delete(streamId);
-      });
-
-    // Register before yielding so any other synchronous callers that arrive
-    // before the first await see the shared promise.
-    this.claimableInflight.set(streamId, request);
-
-    return request;
+      },
+    );
   }
 
   /**
@@ -3641,6 +3827,8 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * switches. The cache is invalidated by {@link setNetwork}. (Issue #230.)
    * Automatically retries on transient RPC errors.
    *
+   * Concurrent identical queries share a single in-flight RPC call (issue #426).
+   *
    * @param sender - The sender address to query.
    * @param pagination - Optional limit/cursor for paginated results.
    * @returns A `Stream[]` when `pagination` is omitted, otherwise a `PaginatedStreams` page.
@@ -3657,49 +3845,54 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       if (cached) return cached;
     }
 
-    const args: xdr.ScVal[] = [nativeToScVal(sender, { type: 'address' })];
+    return this.requestDedup.dedupe(
+      dedupKey('getStreamsBySender', networkAtCallTime, sender, pagination),
+      async (): Promise<Stream[] | PaginatedStreams> => {
+        const args: xdr.ScVal[] = [nativeToScVal(sender, { type: 'address' })];
 
-    if (pagination) {
-      args.push(nativeToScVal(pagination.limit ?? 20, { type: 'u32' }));
-      args.push(
-        pagination.cursor != null
-          ? nativeToScVal(BigInt(pagination.cursor), { type: 'u64' })
-          : xdr.ScVal.scvVoid(),
-      );
-    }
+        if (pagination) {
+          args.push(nativeToScVal(pagination.limit ?? 20, { type: 'u32' }));
+          args.push(
+            pagination.cursor != null
+              ? nativeToScVal(BigInt(pagination.cursor), { type: 'u64' })
+              : xdr.ScVal.scvVoid(),
+          );
+        }
 
-    const result = await withRetry(
-      () => this.simulateOp(this.contract.call('get_streams_by_sender', ...args)),
-      this.readRetry,
+        const result = await withRetry(
+          () => this.simulateOp(this.contract.call('get_streams_by_sender', ...args)),
+          this.readRetry,
+        );
+
+        if (rpc.Api.isSimulationError(result)) {
+          return pagination ? { streams: [], cursor: null, hasMore: false } : [];
+        }
+
+        const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+        if (!returnVal) {
+          return pagination ? { streams: [], cursor: null, hasMore: false } : [];
+        }
+
+        const raw = scValToNative(returnVal) as Record<string, unknown>[];
+        const streams = raw.map(nativeToStream);
+
+        // Only cache non-paginated results, and only when the network hasn't
+        // switched mid-flight (mirrors the guard in getStream).
+        if (!pagination && networkAtCallTime === this.network) {
+          this.senderCache.set(cacheKey, streams);
+        }
+
+        if (!pagination) return streams;
+
+        const limit = pagination.limit ?? 20;
+        const last = streams[streams.length - 1];
+        return {
+          streams,
+          cursor: last ? last.id : null,
+          hasMore: streams.length >= limit,
+        };
+      },
     );
-
-    if (rpc.Api.isSimulationError(result)) {
-      return pagination ? { streams: [], cursor: null, hasMore: false } : [];
-    }
-
-    const returnVal = (result as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
-    if (!returnVal) {
-      return pagination ? { streams: [], cursor: null, hasMore: false } : [];
-    }
-
-    const raw = scValToNative(returnVal) as Record<string, unknown>[];
-    const streams = raw.map(nativeToStream);
-
-    // Only cache non-paginated results, and only when the network hasn't
-    // switched mid-flight (mirrors the guard in getStream).
-    if (!pagination && networkAtCallTime === this.network) {
-      this.senderCache.set(cacheKey, streams);
-    }
-
-    if (!pagination) return streams;
-
-    const limit = pagination.limit ?? 20;
-    const last = streams[streams.length - 1];
-    return {
-      streams,
-      cursor: last ? last.id : null,
-      hasMore: streams.length >= limit,
-    };
   }
 
   /**
@@ -3713,6 +3906,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
    * (or `filter.status` is `'Active'`), the returned list is filtered client-side
    * after the RPC fetch. Completed streams that happen to exist in the same ledger as
    * the query are excluded, fixing the false-positive inclusion of completed streams.
+   *
+   * Concurrent identical queries share a single in-flight RPC call (issue #426);
+   * the client-side filter is still applied per caller.
    *
    * @param recipient - The recipient address to query.
    * @param pagination - Optional limit/cursor for paginated results.
@@ -3746,9 +3942,14 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       );
     }
 
-    const result = await withRetry(
-      () => this.simulateOp(this.contract.call('get_streams_by_recipient', ...args)),
-      this.readRetry,
+    // Issue #426: concurrent identical queries share one in-flight RPC call.
+    const result = await this.requestDedup.dedupe(
+      dedupKey('getStreamsByRecipient:rpc', networkAtCallTime, recipient, pagination),
+      () =>
+        withRetry(
+          () => this.simulateOp(this.contract.call('get_streams_by_recipient', ...args)),
+          this.readRetry,
+        ),
     );
 
     if (rpc.Api.isSimulationError(result)) {
@@ -3834,6 +4035,254 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     }
 
     return streams;
+  }
+
+  // ── Issue #426: request deduplication introspection ───────────────────────
+
+  /**
+   * Returns counters describing how effective in-flight request deduplication
+   * has been on this client (issue #426).
+   *
+   * `deduplicated` is the number of read calls that were served by joining an
+   * already in-flight request — i.e. the number of RPC calls saved.
+   *
+   * @example
+   * ```ts
+   * await Promise.all([client.getStream("1"), client.getStream("1")]);
+   * client.getRequestStats(); // { requests: 2, started: 1, deduplicated: 1, ... }
+   * ```
+   */
+  getRequestStats(): RequestDedupStats {
+    return this.requestDedup.stats();
+  }
+
+  /** Resets the counters returned by {@link SoroStreamClient.getRequestStats}. */
+  resetRequestStats(): void {
+    this.requestDedup.resetStats();
+  }
+
+  /**
+   * Detaches all tracked in-flight reads so the next caller starts a fresh
+   * request (issue #426). Existing callers still receive their result; the
+   * pending request simply stops being reusable.
+   */
+  clearInFlightRequests(): void {
+    this.requestDedup.clear();
+  }
+
+  // ── Issue #423: reactive (RxJS-compatible) observables ────────────────────
+
+  /**
+   * Returns an RxJS-compatible observable of a stream's state (issue #423).
+   *
+   * The observable emits the current {@link Stream} immediately on subscribe and
+   * then again whenever the on-chain state changes. It implements the
+   * Observable interop protocol (`Symbol.observable`), so RxJS consumes it
+   * directly through `from()` and it composes with the full operator set —
+   * without RxJS being a dependency of this SDK.
+   *
+   * All subscribers of the same stream (and same options) share **one** poll
+   * loop and the latest value is replayed to late subscribers, so mounting ten
+   * components costs one polling loop, not ten. The loop is torn down as soon
+   * as the last subscriber unsubscribes, and also by
+   * {@link SoroStreamClient.destroy}.
+   *
+   * @param streamId - The stream to observe.
+   * @param options - Polling interval and emission behaviour.
+   * @returns A shared, reference-counted observable of stream states.
+   *
+   * @example
+   * ```ts
+   * // Plain usage — no RxJS required
+   * const sub = client.observeStream("42").subscribe((stream) => {
+   *   console.log(stream.status);
+   * });
+   * sub.unsubscribe();
+   * ```
+   *
+   * @example
+   * ```ts
+   * // Compose with RxJS
+   * import { from } from "rxjs";
+   * import { map, distinctUntilChanged } from "rxjs/operators";
+   *
+   * from(client.observeStream("42"))
+   *   .pipe(map((s) => s.status), distinctUntilChanged())
+   *   .subscribe(console.log);
+   * ```
+   */
+  observeStream(streamId: string, options?: ObserveStreamOptions): SoroStreamObservable<Stream> {
+    const intervalMs = Math.max(250, options?.intervalMs ?? 5_000);
+    const emitOnlyChanges = options?.emitOnlyChanges !== false;
+    const completeWhenSettled = options?.completeWhenSettled !== false;
+    const refreshOnEvents = options?.refreshOnEvents === true;
+
+    const key = dedupKey(
+      'observeStream',
+      this.network,
+      streamId,
+      intervalMs,
+      emitOnlyChanges,
+      completeWhenSettled,
+      refreshOnEvents,
+    );
+    const existing = this.streamObservables.get(key);
+    if (existing) return existing;
+
+    const observable = shareLatest<Stream>(
+      (sink) => {
+        let timer: ReturnType<typeof setInterval> | null = null;
+        let eventSub: StreamSubscription | null = null;
+        let stopped = false;
+        let inFlight = false;
+        let lastSerialized: string | null = null;
+
+        const stop = (): void => {
+          if (stopped) return;
+          stopped = true;
+          if (timer !== null) {
+            clearInterval(timer);
+            timer = null;
+          }
+          eventSub?.unsubscribe();
+          eventSub = null;
+          this.ownedTimers.extraStops.delete(stop);
+        };
+
+        const tick = async (refresh: boolean): Promise<void> => {
+          // Skip overlapping ticks: a slow RPC must not queue up requests.
+          if (stopped || inFlight) return;
+          inFlight = true;
+          try {
+            const stream = await this.getStream(streamId, { refresh });
+            if (stopped) return;
+            const serialized = JSON.stringify(streamToJSON(stream));
+            if (!emitOnlyChanges || serialized !== lastSerialized) {
+              lastSerialized = serialized;
+              sink.next(stream);
+            }
+            if (
+              completeWhenSettled &&
+              (stream.status === 'Completed' || stream.status === 'Cancelled')
+            ) {
+              stop();
+              sink.complete();
+            }
+          } catch (error) {
+            stop();
+            sink.error(error);
+          } finally {
+            inFlight = false;
+          }
+        };
+
+        // Emit the current state as soon as possible (cache-first), then keep
+        // it fresh with forced reads so the TTL cache can't mask a change.
+        void tick(false);
+        timer = setInterval(() => void tick(true), intervalMs);
+        unrefTimer(timer);
+        // Issue #412: destroy()/GC must be able to stop this loop.
+        this.ownedTimers.extraStops.add(stop);
+
+        if (refreshOnEvents) {
+          eventSub = this.subscribeEvents({ streamId }, () => void tick(true));
+        }
+
+        return stop;
+      },
+      {
+        onDisconnect: () => {
+          this.streamObservables.delete(key);
+        },
+      },
+    );
+
+    this.streamObservables.set(key, observable);
+    return observable;
+  }
+
+  /**
+   * Returns an RxJS-compatible observable of a stream's claimable balance in
+   * stroops (issue #423).
+   *
+   * Like {@link SoroStreamClient.observeStream}, subscribers share one poll
+   * loop and the most recent value is replayed to late subscribers.
+   *
+   * @param streamId - The stream to observe.
+   * @param options - Polling interval and emission behaviour.
+   * @returns A shared, reference-counted observable of claimable amounts.
+   *
+   * @example
+   * ```ts
+   * client.observeClaimable("42").subscribe((stroops) => {
+   *   console.log(formatUSDC(stroops));
+   * });
+   * ```
+   */
+  observeClaimable(
+    streamId: string,
+    options?: { intervalMs?: number; emitOnlyChanges?: boolean },
+  ): SoroStreamObservable<bigint> {
+    const intervalMs = Math.max(250, options?.intervalMs ?? 5_000);
+    const emitOnlyChanges = options?.emitOnlyChanges !== false;
+    const key = dedupKey('observeClaimable', this.network, streamId, intervalMs, emitOnlyChanges);
+    const existing = this.claimableObservables.get(key);
+    if (existing) return existing;
+
+    const observable = shareLatest<bigint>(
+      (sink) => {
+        let timer: ReturnType<typeof setInterval> | null = null;
+        let stopped = false;
+        let inFlight = false;
+        let last: bigint | null = null;
+
+        const stop = (): void => {
+          if (stopped) return;
+          stopped = true;
+          if (timer !== null) {
+            clearInterval(timer);
+            timer = null;
+          }
+          this.ownedTimers.extraStops.delete(stop);
+        };
+
+        const tick = async (refresh: boolean): Promise<void> => {
+          if (stopped || inFlight) return;
+          inFlight = true;
+          try {
+            // Force a network read on subsequent ticks so the 5 s claimable
+            // cache cannot stall the observable.
+            if (refresh) this.claimableCache.delete(streamId);
+            const claimable = await this.getClaimable(streamId);
+            if (stopped) return;
+            if (!emitOnlyChanges || last !== claimable) {
+              last = claimable;
+              sink.next(claimable);
+            }
+          } catch (error) {
+            stop();
+            sink.error(error);
+          } finally {
+            inFlight = false;
+          }
+        };
+
+        void tick(false);
+        timer = setInterval(() => void tick(true), intervalMs);
+        unrefTimer(timer);
+        this.ownedTimers.extraStops.add(stop);
+
+        return stop;
+      },
+      {
+        onDisconnect: () => {
+          this.claimableObservables.delete(key);
+        },
+      },
+    );
+
+    this.claimableObservables.set(key, observable);
+    return observable;
   }
 
   // ── Issue #73: Stream snapshot export / import ───────────────────────────
