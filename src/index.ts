@@ -66,7 +66,10 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
+  toRatePerSecond,
+  fromRatePerSecond,
 } from './utils.js';
+export type { RateUnit } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
 export type { SerializedStream } from './serialization.js';
@@ -77,7 +80,7 @@ export type {
   TransactionHistoryOptions,
 } from './horizon.js';
 export { CircuitBreaker } from './circuitBreaker.js';
-export { withRetry, RetryBackoff } from './retry.js';
+export { withRetry, RetryBackoff, isTransientRpcError } from './retry.js';
 export type { RetryOptions } from './retry.js';
 export type { CircuitState, CircuitBreakerOptions } from './circuitBreaker.js';
 export { ConnectionPool } from './connectionPool.js';
@@ -242,3 +245,4 @@ export { createFeeRetryMiddleware, FeeRetryError } from './feeRetryMiddleware.js
 export type { FeeRetryMiddlewareOptions } from './feeRetryMiddleware.js';
 export { createFederationPlugin } from './federationPlugin.js';
 export type { FederationPluginOptions } from './federationPlugin.js';
+export type { PaginatedEvents, StreamEvent as IndexerStreamEvent, StreamEventType as IndexerStreamEventType } from './indexer.js';

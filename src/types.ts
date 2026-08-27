@@ -1221,3 +1221,81 @@ export interface ConfigUpdatedEvent {
   oldValue: unknown;
   newValue: unknown;
 }
+
+// ── Issue #329: Stream-scoped delegation API ─────────────────────────────────
+
+/** Parameters for granting a delegate on a specific stream. */
+export interface GrantDelegateParams {
+  /** The stream ID to grant delegation on. */
+  streamId: string;
+  /** The address to authorize as a delegate for this stream. */
+  delegate: string;
+}
+
+/** Parameters for revoking a delegate from a specific stream. */
+export interface RevokeDelegateByStreamParams {
+  /** The stream ID to revoke delegation from. */
+  streamId: string;
+  /** The address to revoke delegation from. */
+  delegate: string;
+}
+
+// ── Issue #391: Client diagnostics ───────────────────────────────────────────
+
+/**
+ * Snapshot of the client's current runtime state, useful for support and
+ * debugging. Returned by {@link SoroStreamClient.diagnostics}.
+ */
+export interface DiagnosticsResult {
+  /** SDK version string (e.g. `"0.1.0"`). */
+  sdkVersion: string;
+  /** Currently active Stellar network. */
+  network: Network;
+  /** Display name of the connected wallet adapter, or `null` when no adapter is set. */
+  walletAdapter: string | null;
+  /**
+   * The event poller's nominal interval in milliseconds.
+   * Defaults to 5000 when no poller has been started yet.
+   */
+  pollingIntervalMs: number;
+  /**
+   * Unix timestamp (ms) of the most recent successful RPC call, or `null`
+   * when no RPC call has succeeded since the client was created.
+   */
+  lastRpcTimestampMs: number | null;
+}
+
+// ── Issue #389: Audit log logger interface ───────────────────────────────────
+
+/**
+ * Minimal logger interface accepted by the `auditLogger` client option.
+ * Any object with an `info` method (e.g. `console`, `pino`, `winston`)
+ * satisfies this interface.
+ */
+export interface AuditLogger {
+  /**
+   * Called for every SDK write operation.
+   * @param entry - Structured audit log entry.
+   */
+  info(entry: AuditLogEntry): void;
+}
+
+/** A single SDK write operation recorded for compliance / debugging. */
+export interface AuditLogEntry {
+  /** ISO 8601 timestamp of when the operation completed. */
+  timestamp: string;
+  /** Active Stellar network at the time of the call. */
+  network: Network;
+  /** SDK method name (e.g. `"createStream"`, `"withdraw"`). */
+  operation: string;
+  /** Sanitised operation parameters (secrets redacted). */
+  params?: unknown;
+  /** `"success"` when the operation confirmed; `"error"` on failure. */
+  result: 'success' | 'error';
+  /** Error message when `result` is `"error"`. */
+  error?: string;
+  /** Wall-clock duration in milliseconds. */
+  durationMs: number;
+  /** Transaction hash when available (only on success). */
+  txHash?: string;
+}

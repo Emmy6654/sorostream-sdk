@@ -245,6 +245,60 @@ export function calculateFlowRate(totalAmount: bigint, durationSeconds: number):
   return totalAmount / BigInt(durationSeconds);
 }
 
+/** Time unit for {@link toRatePerSecond} and {@link fromRatePerSecond}. */
+export type RateUnit = 'second' | 'minute' | 'hour' | 'day' | 'week';
+
+const RATE_UNIT_SECONDS: Record<RateUnit, bigint> = {
+  second: 1n,
+  minute: 60n,
+  hour: 3_600n,
+  day: 86_400n,
+  week: 604_800n,
+};
+
+/**
+ * Converts a human-readable token amount per `unit` into a stroop-per-second
+ * on-chain flow rate.
+ *
+ * @param amount - Total stroops flowing per `unit` (e.g. `toStroops("10")` for 10 USDC/day).
+ * @param unit - The time unit the `amount` refers to (default `"second"`).
+ * @returns The equivalent flow rate in stroops per second (integer division).
+ * @throws {SoroStreamError} When `amount` is not positive.
+ *
+ * @example
+ * ```ts
+ * // 10 USDC per day expressed as stroops/second
+ * const rate = toRatePerSecond(toStroops("10"), "day");
+ * ```
+ */
+export function toRatePerSecond(amount: bigint, unit: RateUnit = 'second'): bigint {
+  if (amount <= 0n) throw new SoroStreamError('amount must be > 0');
+  const unitSeconds = RATE_UNIT_SECONDS[unit];
+  return amount / unitSeconds;
+}
+
+/**
+ * Converts a stroop-per-second on-chain flow rate back into a human-readable
+ * stroops-per-`unit` value.
+ *
+ * @param stroopsPerSecond - The raw on-chain flow rate in stroops/second.
+ * @param unit - The time unit to normalise into (default `"second"`).
+ * @returns The equivalent amount of stroops that flow within one `unit`.
+ * @throws {SoroStreamError} When `stroopsPerSecond` is negative.
+ *
+ * @example
+ * ```ts
+ * // How many stroops flow per day?
+ * const dailyStroops = fromRatePerSecond(stream.flowRate, "day");
+ * console.log(formatUSDC(dailyStroops)); // "10.0000000"
+ * ```
+ */
+export function fromRatePerSecond(stroopsPerSecond: bigint, unit: RateUnit = 'second'): bigint {
+  if (stroopsPerSecond < 0n) throw new SoroStreamError('stroopsPerSecond must be >= 0');
+  const unitSeconds = RATE_UNIT_SECONDS[unit];
+  return stroopsPerSecond * unitSeconds;
+}
+
 /**
  * Returns true when the stream's end time has passed.
  *
