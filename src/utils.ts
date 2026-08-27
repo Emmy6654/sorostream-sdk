@@ -1,4 +1,9 @@
-import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from './errors.js';
+import {
+  SoroStreamError,
+  SoroStreamValidationError,
+  FederationResolutionError,
+  InsecureRpcUrlError,
+} from './errors.js';
 import { getDefaultWebSocketFactory } from './adapters.js';
 import type { FetchAdapter, WebSocketFactory } from './adapters.js';
 import { Memo } from '@stellar/stellar-sdk';
@@ -196,6 +201,31 @@ export function detectNetworkFromRpcUrl(rpcUrl: string): Network | undefined {
   if (lower.includes('testnet')) return 'testnet';
   if (lower.includes('mainnet') || lower.includes('horizon.stellar.org')) return 'mainnet';
   return undefined;
+}
+
+/** Loopback hosts exempt from the HTTPS-only RPC URL requirement (local dev). */
+const LOOPBACK_RPC_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Rejects non-TLS (`http://`) RPC endpoint URLs so transaction data — including
+ * signed envelopes — is never routed over an unencrypted connection (issue #463).
+ *
+ * Loopback hosts (`localhost`, `127.0.0.1`, `::1`) are exempt so local Soroban
+ * quickstart / standalone-network workflows keep working. URLs that fail to
+ * parse are left for the RPC transport to reject with its own error.
+ *
+ * @throws {InsecureRpcUrlError} When `rpcUrl` is an `http://` URL for a non-loopback host.
+ */
+export function assertSecureRpcUrl(rpcUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(rpcUrl);
+  } catch {
+    return;
+  }
+  if (parsed.protocol === 'http:' && !LOOPBACK_RPC_HOSTS.has(parsed.hostname)) {
+    throw new InsecureRpcUrlError(rpcUrl);
+  }
 }
 
 /**

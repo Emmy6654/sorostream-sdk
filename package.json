@@ -57,6 +57,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:changelog": "node scripts/check-changelog-format.js",
+    "check:audit": "npm audit --audit-level=high --omit=dev",
     "build:all": "npm run build && npm run build -w packages/react && npm run build -w packages/cli && npm run build -w packages/react-native && npm run build -w packages/eslint-plugin",
     "docs": "typedoc",
     "validate-exports": "node scripts/validate-exports.js",

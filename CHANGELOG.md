@@ -14,6 +14,8 @@ The format is based on Keep a Changelog and uses the contributor guidance in CON
 - **#207** Publish external `.map` files alongside every `dist/` output (`npm run build` now passes `--sourcemap`) so error trackers (Sentry, LogRocket, etc.) can resolve minified stack traces back to the original TypeScript source. Added `npm run build:dev` for inline source maps during local development, and `npm run analyze:sourcemaps` (using `source-map-explorer`) to verify map validity in CI.
 - **#211** Add `encodeStreamId(id: bigint): string` and `decodeStreamId(encoded: string): bigint` for round-trip-safe, URL-safe base58 encoding of u64 stream IDs, with tests covering the full range including `2^64 - 1`. Existing `bigintReplacer`/`bigintReviver` JSON helpers already restore `bigint` losslessly for values above `Number.MAX_SAFE_INTEGER`.
 - **#212** Add a framework-agnostic `IEventBus` interface (`emit`/`on` returning an `Unsubscribe` function) and a default `InMemoryEventBus` implementation. Pass `eventBus` in the client config to receive `stream.created`, `stream.withdrawn`, `stream.cancelled`, and `rpc.error` lifecycle events through your own event system (Redux, Zustand, a custom `EventEmitter`, etc.) instead of polling.
+- **#464** Add opt-in client-side rate limiting for write operations. Configure `writeRateLimit: { maxPerSecond, burst?, shared? }` on `SoroStreamClientOptions` to throttle how many write calls (`createStream`, `withdraw`, `cancelStream`, `createStreams`, etc.) can be submitted per second from a single `SoroStreamClient` instance, guarding against accidental RPC flooding from runaway loops or retry storms. Excess calls are queued and delayed rather than rejected. Disabled by default.
+- **#461** Add a `Security` GitHub Actions workflow (`.github/workflows/security.yml`) that runs `npm audit --audit-level=high --omit=dev` on every PR and push to `main`, blocking merges that introduce a high or critical severity vulnerability into a production dependency.
 
 ### Fixed
 - Fix `SoroStreamClient` keeping the Node.js event loop alive after being dereferenced without calling `destroy()`: all internally-owned `setInterval`/`setTimeout` handles (event polling, connection-pool idle sweep, fee-bump monitors, offline-queue health checks, `watchClaimable`/`watchTotalClaimable` polling) are now `unref()`'d, and a `FinalizationRegistry` stops them if the instance is garbage-collected without an explicit `destroy()` call (#412)
@@ -29,3 +31,6 @@ The format is based on Keep a Changelog and uses the contributor guidance in CON
 ### Changed
 - `NonceNotSupportedError` is now exported from `@sorostream/sdk` for use in typed `catch` blocks.
 - `BatchWithdrawPartialResult` is now exported from `@sorostream/sdk`.
+
+### Security
+- **#463** `SoroStreamClient` now rejects non-TLS (`http://`) RPC endpoint URLs at construction, `setNetwork`, and `updateConfig` time, throwing a new `InsecureRpcUrlError` instead of silently routing transaction data over an unencrypted connection. Loopback hosts (`localhost`, `127.0.0.1`, `::1`) remain allowed for local Soroban quickstart development.

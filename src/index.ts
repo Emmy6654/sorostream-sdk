@@ -66,6 +66,7 @@ export {
   filterStreams,
   sortStreams,
   detectNetworkFromRpcUrl,
+  assertSecureRpcUrl,
   parseMemo,
   encodeStreamId,
   decodeStreamId,
@@ -85,6 +86,8 @@ export { CircuitBreaker } from './circuitBreaker.js';
 export { withRetry, RetryBackoff, isTransientRpcError } from './retry.js';
 export type { RetryOptions } from './retry.js';
 export type { CircuitState, CircuitBreakerOptions } from './circuitBreaker.js';
+export { WriteRateLimiter } from './writeRateLimiter.js';
+export type { WriteRateLimitOptions } from './writeRateLimiter.js';
 export { ConnectionPool } from './connectionPool.js';
 export type { ConnectionPoolOptions, PoolEvent, PoolEventType } from './connectionPool.js';
 export { InMemoryEventBus } from './eventBus.js';
@@ -116,6 +119,7 @@ export {
   SoroStreamMemoError,
   SelfStreamError,
   SoroStreamTransportError,
+  InsecureRpcUrlError,
 } from './errors.js';
 export { checkPeerDependencies } from './peerDependencies.js';
 export {
