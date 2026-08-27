@@ -15,6 +15,7 @@ import {
 import { BatchBuilder } from './batchBuilder.js';
 import { EventPoller, unrefTimer } from './events.js';
 import { InMemoryEventBus, type IEventBus } from './eventBus.js';
+import { CrossTabSync, CrossTabEventBus } from './crossTabSync.js';
 import {
   OfflineWriteQueue,
   DEFAULT_QUEUE_OPTIONS,
@@ -340,6 +341,16 @@ export interface SoroStreamClientOptions {
   skipPeerCheck?: boolean;
   /** Custom event bus for SDK lifecycle events (issue #212). */
   eventBus?: IEventBus;
+  /**
+   * When `true`, opens a `BroadcastChannel` named after the network + contract
+   * and synchronises event-bus events across tabs of the same origin: every
+   * event emitted by this client is forwarded to other tabs, and events from
+   * other tabs are re-emitted locally. The message listener is registered
+   * exactly once and removed (channel closed) when the client is destroyed, so
+   * re-initialisation cycles never accumulate stale listeners. No-op when
+   * `BroadcastChannel` is unavailable (e.g. React Native).
+   */
+  crossTabSync?: boolean;
   /** Callback invoked when the wallet adapter reports a network change (issue #215). */
   onNetworkChange?: (network: Network) => void;
   /** Skip contract version compatibility check at construction (issue #209). */
@@ -474,6 +485,7 @@ interface ClientOwnedTimers {
   extraStops: Set<() => void>;
   unsubWalletNetwork: (() => void) | null;
   unsubWalletConnection: (() => void) | null;
+  crossTabSync: CrossTabSync | null;
 }
 
 function runClientCleanup(res: ClientOwnedTimers): void {
@@ -493,6 +505,8 @@ function runClientCleanup(res: ClientOwnedTimers): void {
   res.unsubWalletNetwork = null;
   res.unsubWalletConnection?.();
   res.unsubWalletConnection = null;
+  res.crossTabSync?.destroy();
+  res.crossTabSync = null;
 }
 
 const clientFinalizers: FinalizationRegistry<ClientOwnedTimers> | null =
@@ -549,6 +563,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     extraStops: new Set(),
     unsubWalletNetwork: null,
     unsubWalletConnection: null,
+    crossTabSync: null,
   };
   // Issue #338: Plugin registry
   private readonly _pluginRegistry: PluginRegistry;
@@ -640,7 +655,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   /** Shared, reference-counted claimable observables (issue #423). */
   private readonly claimableObservables = new Map<string, SoroStreamObservable<bigint>>();
   /** Event bus used to emit SDK lifecycle events. Issue #212. */
-  private readonly eventBus: IEventBus;
+  private eventBus: IEventBus;
+  /** Issue: cross-tab event relay (BroadcastChannel). Null when disabled. */
+  private crossTabRelay: CrossTabSync | null = null;
+  private crossTabEventBus: CrossTabEventBus | null = null;
 
   /** Namespace registry: streamId → namespace (off-chain index, issue #274). */
   private readonly namespaceRegistry = new Map<string, string>();
@@ -689,7 +707,27 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     if (!options.skipPeerCheck) {
       checkPeerDependencies();
     }
-    this.eventBus = options.eventBus ?? new InMemoryEventBus();
+    // Issue: cross-tab sync — open a BroadcastChannel for this network +
+    // contract scope and relay event-bus events to/from other tabs. The
+    // channel is torn down by destroy() / runClientCleanup() so destroying
+    // the client releases the listener and never leaks across re-init cycles.
+    const innerEventBus = options.eventBus ?? new InMemoryEventBus();
+    this.eventBus = innerEventBus;
+    if (options.crossTabSync) {
+      const relay = new CrossTabSync({
+        channelName: `sorostream:${this.network}:${options.contractId}`,
+        enabled: true,
+        // Re-emit on the inner bus so a remote event is never broadcast back
+        // out (would ping-pong between tabs forever).
+        onMessage: (event, data) => innerEventBus.emit(event, data),
+      });
+      this.crossTabRelay = relay;
+      this.ownedTimers.crossTabSync = relay;
+      if (relay.active) {
+        this.crossTabEventBus = new CrossTabEventBus(innerEventBus, relay);
+        this.eventBus = this.crossTabEventBus;
+      }
+    }
 
     // Issue #260: Initialize offline write queue if enabled
     if (options.offlineQueue) {
@@ -841,6 +879,34 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.streamObservables.clear();
     this.claimableObservables.clear();
     runClientCleanup(this.ownedTimers);
+    // Sever the relay from the event bus so post-destroy emits are no-ops.
+    this.crossTabRelay = null;
+    if (this.crossTabEventBus) this.crossTabEventBus.relay = null;
+  }
+
+  /**
+   * Re-opens the cross-tab channel for the current network scope, replacing
+   * the relay created for the previous network. No-op when cross-tab sync is
+   * disabled. The old channel is closed first so listeners never accumulate.
+   */
+  private rebuildCrossTabSync(): void {
+    if (!this.crossTabRelay) return;
+    const innerBus = this.crossTabEventBus ? this.crossTabEventBus.inner : this.eventBus;
+    this.crossTabRelay.destroy();
+    this.crossTabRelay = null;
+    const relay = new CrossTabSync({
+      channelName: `sorostream:${this.network}:${this.contract.contractId()}`,
+      enabled: true,
+      onMessage: (event, data) => innerBus.emit(event, data),
+    });
+    this.crossTabRelay = relay;
+    this.ownedTimers.crossTabSync = relay;
+    if (this.crossTabEventBus) {
+      this.crossTabEventBus.relay = relay.active ? relay : null;
+    } else if (relay.active) {
+      this.crossTabEventBus = new CrossTabEventBus(innerBus, relay);
+      this.eventBus = this.crossTabEventBus;
+    }
   }
 
   /**
@@ -1312,6 +1378,9 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       network: this.network,
       previousNetwork,
     });
+
+    // Re-scope the cross-tab channel to the new network (closes the old one).
+    this.rebuildCrossTabSync();
   }
 
   /**
