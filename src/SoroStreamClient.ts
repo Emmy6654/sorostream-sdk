@@ -1,3 +1,4 @@
+/// <reference lib="es2021.weakref" />
 import {
   Contract,
   Networks,
@@ -133,6 +134,7 @@ import type {
   SplitStreamParams,
   SplitStreamResult,
   Stream,
+  StreamBalance,
   StreamEvent,
   StreamEventFilter,
   StreamEventType,
@@ -1798,12 +1800,24 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.buildAndSubmitBatch(operations);
   }
 
-  private async simulateOp(operation: xdr.Operation): Promise<rpc.Api.SimulateTransactionResponse> {
+  /**
+   * Simulates one or more contract operations in a single RPC call.
+   *
+   * All operations are packed into one transaction and sent through a single
+   * `simulateTransaction` round-trip (issue #445). The underlying RPC server
+   * may restrict transactions to a single `invokeHostFunction` operation;
+   * callers that need per-operation return values should parse the response
+   * themselves and fall back to individual calls when the server rejects the
+   * batch shape.
+   */
+  private async simulateOps(
+    operations: xdr.Operation[],
+  ): Promise<rpc.Api.SimulateTransactionResponse> {
     return this.enqueueOp('read', async () => {
       const adapter = this.requireWalletAdapter();
       const publicKey = await adapter.getPublicKey();
       const account = await this.withBreaker(() => this.server.getAccount(publicKey));
-      const tx = new TransactionBuilder(account, {
+      let builder = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: NETWORK_PASSPHRASES[this.network],
       })
@@ -1815,6 +1829,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
       this.lastRpcTimestampMs = Date.now();
       return result;
     });
+  }
+
+  private simulateOp(operation: xdr.Operation): Promise<rpc.Api.SimulateTransactionResponse> {
+    return this.simulateOps([operation]);
   }
 
   /**
@@ -3475,6 +3493,145 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.claimableInflight.set(streamId, request);
 
     return request;
+  }
+
+  /**
+   * Returns the current accrued claimable balances for a list of stream IDs
+   * using a single batched RPC call (issue #445).
+   *
+   * Intended for dashboards that need live balances for many streams at once
+   * without issuing one `simulateTransaction` per stream. The remaining (not
+   * cached, not in-flight) IDs are packed into one transaction — one
+   * `get_claimable` operation per ID — and simulated in a single round-trip.
+   *
+   * Results are served from the same TTL cache and in-flight request pool as
+   * {@link getClaimable}, so a stream fetched here warms the cache for
+   * subsequent single-ID reads and vice versa. Duplicate IDs in the input are
+   * de-duplicated while preserving first-seen order.
+   *
+   * If the RPC server rejects or cannot answer the batched simulation (e.g.
+   * it only accepts a single `invokeHostFunction` operation per transaction,
+   * or the response shape does not contain one return value per ID), the
+   * method gracefully falls back to resolving each ID individually via
+   * {@link getClaimable}, which maps missing streams to `0n` and retries
+   * transient failures on its own. Missing streams therefore always resolve
+   * to `0n` regardless of the code path taken.
+   *
+   * @param streamIds - The stream IDs to look up.
+   * @returns One `StreamBalance` entry per unique input ID, in first-seen
+   *   order, with `balance` in stroops (`0n` when the stream does not exist).
+   * @example
+   * ```ts
+   * const balances = await client.getMultipleStreamBalances(["1", "2", "3"]);
+   * for (const { streamId, balance } of balances) {
+   *   console.log(streamId, balance);
+   * }
+   * ```
+   */
+  async getMultipleStreamBalances(streamIds: string[]): Promise<StreamBalance[]> {
+    if (streamIds.length === 0) return [];
+
+    // De-duplicate while preserving first-seen order.
+    const uniqueIds = [...new Set(streamIds)];
+
+    const balances = new Map<string, bigint>();
+    const missing: string[] = [];
+
+    // Fast path: serve from the TTL cache and join in-flight requests, the
+    // same sources getClaimable uses, so repeated dashboard polls stay cheap.
+    for (const id of uniqueIds) {
+      const cached = this.claimableCache.get(id);
+      if (cached !== undefined) {
+        balances.set(id, cached);
+        continue;
+      }
+      const inFlight = this.claimableInflight.get(id);
+      if (inFlight) {
+        try {
+          balances.set(id, await inFlight);
+          continue;
+        } catch {
+          // Fall through: the in-flight request failed, fetch it with the
+          // batch below (or individually) instead of surfacing the error.
+        }
+      }
+      missing.push(id);
+    }
+
+    if (missing.length > 0) {
+      const batched = await this.simulateClaimableBatch(missing).catch(() => null);
+      if (batched) {
+        for (const [id, value] of batched) {
+          balances.set(id, value);
+        }
+      } else {
+        // The server rejected or could not answer the batched simulation —
+        // resolve each ID individually so the caller still gets correct data.
+        await Promise.all(
+          missing.map(async (id) => {
+            const value = await this.getClaimable(id);
+            balances.set(id, value);
+          }),
+        );
+      }
+    }
+
+    return uniqueIds.map((id) => ({ streamId: id, balance: balances.get(id) ?? 0n }));
+  }
+
+  /**
+   * Fetches claimable balances for many stream IDs in a single batched
+   * `simulateTransaction` call (one `get_claimable` operation per ID).
+   *
+   * Returns `null` when the simulation errored or the response does not
+   * contain exactly one return value per requested ID (e.g. the RPC server
+   * only supports a single `invokeHostFunction` operation per transaction).
+   * Successful values are written into the claimable TTL cache so subsequent
+   * `getClaimable` / `getMultipleStreamBalances` calls are served without
+   * another round-trip.
+   */
+  private async simulateClaimableBatch(ids: string[]): Promise<Map<string, bigint> | null> {
+    const operations = ids.map((id) =>
+      this.contract.call('get_claimable', nativeToScVal(BigInt(id), { type: 'u64' })),
+    );
+
+    const result = await withRetry(() => this.simulateOps(operations), this.readRetry);
+
+    if (rpc.Api.isSimulationError(result)) return null;
+
+    const retvals: xdr.ScVal[] = [];
+    // Mock/raw RPC responses expose one entry per operation under `results`;
+    // the stellar-sdk parsed shape only exposes the first operation as `result`.
+    const raw = (result as unknown as { results?: Array<{ xdr?: string }> }).results;
+    if (raw && raw.length > 0) {
+      for (const row of raw) {
+        if (!row.xdr) return null;
+        retvals.push(xdr.ScVal.fromXDR(row.xdr, 'base64'));
+      }
+    } else if (result.result?.retval) {
+      retvals.push(result.result.retval);
+    } else {
+      return null;
+    }
+
+    if (retvals.length !== ids.length) return null;
+
+    const out = new Map<string, bigint>();
+    ids.forEach((id, index) => {
+      let value = 0n;
+      try {
+        value = BigInt(scValToNative(retvals[index]!) as number);
+      } catch {
+        value = 0n;
+      }
+      if (value < 0n) value = 0n;
+      out.set(id, value);
+      // Warm the shared TTL cache so single-ID getClaimable reads that
+      // follow this batch don't need a new round-trip.
+      this.claimableCache.set(id, value);
+    });
+
+    return out;
   }
 
   /**

@@ -154,6 +154,7 @@ export type {
 } from './contractEvents.js';
 export type {
   Stream,
+  StreamBalance,
   StreamStatus,
   CreateStreamParams,
   CloneStreamOverrides,
