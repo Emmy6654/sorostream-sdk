@@ -850,6 +850,22 @@ export type RecipientTrustScoreProvider = (
   recipient: string,
 ) => RecipientTrustScore | Promise<RecipientTrustScore>;
 
+// ── Issue #364: onStreamUpdate subscription ─────────────────────────────────
+
+/** Options for the {@link SoroStreamClient.onStreamUpdate} subscription. */
+export interface OnStreamUpdateOptions {
+  /**
+   * How often to poll the RPC for state changes, in ms.
+   * Defaults to 5000 (5 seconds).
+   */
+  pollIntervalMs?: number;
+  /**
+   * When true, fire the callback immediately with the current stream state
+   * before waiting for the first poll interval. Defaults to false.
+   */
+  immediate?: boolean;
+}
+
 // ── Stream filtering (issue #204) ───────────────────────────────────────────
 
 /** Criteria for filtering streams. */
