@@ -31,6 +31,7 @@ import type {
   SplitStreamParams,
   SplitStreamResult,
   Stream,
+  StreamBalance,
   StreamEvent,
   StreamEventFilter,
   StreamFilterCriteria,
@@ -374,6 +375,36 @@ export class MockSoroStreamClient {
     return { txHash: `mock-tx-revoke-delegate-${delegate}` };
   }
 
+  // ── Issue #329: Stream-scoped delegation ─────────────────────────────────
+
+  private streamDelegates = new Map<string, Set<string>>();
+
+  async grantDelegate(
+    streamId: string,
+    delegate: string,
+  ): Promise<{ txHash: string }> {
+    if (!this.streams.has(streamId)) throw new Error(`Stream not found: ${streamId}`);
+    if (!this.streamDelegates.has(streamId)) {
+      this.streamDelegates.set(streamId, new Set());
+    }
+    this.streamDelegates.get(streamId)!.add(delegate);
+    return { txHash: `mock-tx-grant-stream-delegate-${streamId}-${delegate}` };
+  }
+
+  async revokeDelegateFromStream(
+    streamId: string,
+    delegate: string,
+  ): Promise<{ txHash: string }> {
+    if (!this.streams.has(streamId)) throw new Error(`Stream not found: ${streamId}`);
+    this.streamDelegates.get(streamId)?.delete(delegate);
+    return { txHash: `mock-tx-revoke-stream-delegate-${streamId}-${delegate}` };
+  }
+
+  async getStreamDelegates(streamId: string): Promise<string[]> {
+    const set = this.streamDelegates.get(streamId);
+    return set ? Array.from(set) : [];
+  }
+
   async setOperator(params: SetOperatorParams): Promise<{ txHash: string }> {
     const stream = this.streams.get(params.streamId);
     if (!stream) throw new Error(`Stream not found: ${params.streamId}`);
@@ -668,6 +699,26 @@ export class MockSoroStreamClient {
     return claimableAt(stream, nowSec());
   }
 
+  /**
+   * Returns current accrued claimable balances for multiple stream IDs.
+   *
+   * Mirrors {@link SoroStreamClient.getMultipleStreamBalances}: duplicate IDs
+   * are de-duplicated while preserving first-seen order, and unknown streams
+   * resolve to `0n`. No RPC calls are made — values are computed from the
+   * in-memory stream state.
+   *
+   * @param streamIds - The stream IDs to look up.
+   * @returns One `StreamBalance` entry per unique input ID, in first-seen order.
+   */
+  async getMultipleStreamBalances(streamIds: string[]): Promise<StreamBalance[]> {
+    const uniqueIds = [...new Set(streamIds)];
+    const now = nowSec();
+    return uniqueIds.map((id) => {
+      const stream = this.streams.get(id);
+      return { streamId: id, balance: stream ? claimableAt(stream, now) : 0n };
+    });
+  }
+
   async getStreamsBySender(
     sender: string,
     pagination?: PaginationParams,
@@ -816,6 +867,18 @@ export class MockSoroStreamClient {
   getConnectionStats(): { maxConnections: number; active: number; idle: number; reused: number } {
     return { maxConnections: 5, active: 0, idle: 0, reused: 0 };
   }
+
+  // ── Issue #391: Diagnostics ───────────────────────────────────────────────
+
+  diagnostics(): import('./types.js').DiagnosticsResult {
+    return {
+      sdkVersion: '0.1.0',
+      network: 'testnet',
+      walletAdapter: 'mock',
+      pollingIntervalMs: 5_000,
+      lastRpcTimestampMs: null,
+    };
+  }
 }
 
 // ── Issue #348: SDK Sandbox Mode ─────────────────────────────────────────────
@@ -927,7 +990,7 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
       'topUp',
       'getStream',
       'getClaimable',
-      'getStreams',
+      'getMultipleStreamBalances',
       'getStreamsBySender',
       'getStreamsByRecipient',
       'watchClaimable',
@@ -1001,6 +1064,14 @@ export class SoroStreamSandbox extends MockSoroStreamClient {
 
   override async getClaimable(streamId: string): Promise<bigint> {
     return this.recordAndExecute('getClaimable', () => super.getClaimable(streamId), [streamId]);
+  }
+
+  override async getMultipleStreamBalances(streamIds: string[]): Promise<StreamBalance[]> {
+    return this.recordAndExecute(
+      'getMultipleStreamBalances',
+      () => super.getMultipleStreamBalances(streamIds),
+      [streamIds],
+    );
   }
 
   override async getStreamsBySender(
