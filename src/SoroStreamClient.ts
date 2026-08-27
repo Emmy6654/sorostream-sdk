@@ -2898,6 +2898,103 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.estimateOperationFee(operation);
   }
 
+  /**
+   * Estimates the network fee for an {@link updateFlowRate} call without submitting it.
+   * @param params - Flow rate update parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   * @throws {Error} If `newFlowRate` is 0 or negative.
+   */
+  async estimateUpdateFlowRateFee(params: UpdateFlowRateParams): Promise<FeeEstimate> {
+    if (params.newFlowRate <= 0n) throw new Error('newFlowRate must be > 0');
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.updateFlowRate(params.streamId, sender, params.newFlowRate);
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for a {@link setOperator} call without submitting it.
+   * @param params - Operator configuration parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  async estimateSetOperatorFee(params: SetOperatorParams): Promise<FeeEstimate> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.setOperator(
+      params.streamId,
+      sender,
+      params.operator,
+      params.approved,
+    );
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for an {@link operatorCancelStream} call without submitting it.
+   * @param params - Operator cancel parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  async estimateOperatorCancelStreamFee(params: { streamId: string }): Promise<FeeEstimate> {
+    const operator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.operatorCancelStream(params.streamId, operator);
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for an {@link operatorTopUp} call without submitting it.
+   * @param params - Operator top-up parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   * @throws {Error} If `amount` is 0 or negative.
+   */
+  async estimateOperatorTopUpFee(params: OperatorTopUpParams): Promise<FeeEstimate> {
+    if (params.amount <= 0n) throw new Error('Amount must be > 0');
+    const operator = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.operatorTopUp(params.streamId, operator, params.amount);
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for a {@link splitStream} call without submitting it.
+   * @param params - Split stream parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  async estimateSplitStreamFee(params: SplitStreamParams): Promise<FeeEstimate> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.splitStream(sender, params);
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for a {@link transferStream} call without submitting it.
+   * @param params - Transfer parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  async estimateTransferStreamFee(params: TransferStreamParams): Promise<FeeEstimate> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.transferStream(params.streamId, sender, params.newRecipient);
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for a {@link pause} call without submitting it.
+   * @param params - Pause parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  async estimatePauseFee(params: PauseStreamParams): Promise<FeeEstimate> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.pauseStream(params.streamId, sender);
+    return this.estimateOperationFee(operation);
+  }
+
+  /**
+   * Estimates the network fee for a {@link resume} call without submitting it.
+   * @param params - Resume parameters.
+   * @returns `{ totalFee, minResourceFee }` in stroops.
+   */
+  async estimateResumeFee(params: ResumeStreamParams): Promise<FeeEstimate> {
+    const sender = await this.requireWalletAdapter().getPublicKey();
+    const operation = this.encoder.resumeStream(params.streamId, sender);
+    return this.estimateOperationFee(operation);
+  }
+
   // ── Event subscription ───────────────────────────────────────────────────────
 
   private getEventPoller(): EventPoller {
