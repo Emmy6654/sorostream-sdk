@@ -26,6 +26,9 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
+  SimulateStreamParams,
+  SimulateStreamResult,
+  SimulateStreamSnapshot,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -1662,146 +1665,60 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
   return Memo.text(value);
 }
 
-// ── Issue #436: Stream delta calculation ──────────────────────────────────────
+// ── Issue #399: simulateStream ───────────────────────────────────────────────
 
 /**
- * Calculates the number of stroops streamed since the last poll by comparing
- * the current claimable amount against a previously recorded value.
+ * Projects streamed amounts over time using a local simulation — no on-chain
+ * transaction is submitted. Returns a {@link SimulateStreamResult} with the
+ * computed flow rate, timeline, and a set of evenly spaced payout snapshots.
  *
- * Useful for real-time UIs that want to show "X USDC was streamed in the last
- * tick" alongside a running total.
- *
- * @param stream - The stream object (used for live `claimableNow` estimate).
- * @param previousClaimable - Claimable amount recorded at the previous poll, in stroops.
- * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
- * @returns The delta in stroops (≥ 0). Returns 0 when the stream is not active
- *   or the current claimable is not greater than the previous value.
+ * @param params - Stream parameters: amount, durationSeconds, optional startTime.
+ * @param snapshotCount - Number of intermediate snapshots to generate (default 10).
+ *   The result always includes the start and end points as well, so the actual
+ *   `snapshots` array has `snapshotCount + 2` entries at most.
+ * @returns A {@link SimulateStreamResult} with the projected timeline and snapshots.
  *
  * @example
  * ```ts
- * let lastClaimable = await client.getClaimable(streamId);
- * setInterval(async () => {
- *   const stream = await client.getStream(streamId);
- *   const delta = calculateStreamDelta(stream, lastClaimable);
- *   console.log(`Streamed this tick: ${formatUSDC(delta)}`);
- *   lastClaimable = claimableNow(stream);
- * }, 5000);
+ * import { simulateStream, toStroops } from '@sorostream/sdk';
+ *
+ * const result = simulateStream({ amount: toStroops('100'), durationSeconds: 3600 });
+ * console.log(result.flowRate);          // stroops/second
+ * console.log(result.snapshots[5]);      // midpoint snapshot
  * ```
  */
-export function calculateStreamDelta(
-  stream: Stream,
-  previousClaimable: bigint,
-  now?: number,
-): bigint {
-  if (stream.status !== 'Active') return 0n;
-  const nowSecs = now ?? Date.now() / 1000;
-  const effectiveNow = Math.min(nowSecs, stream.endTime);
-  const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
-  const currentClaimable = stream.flowRate * BigInt(Math.floor(elapsed));
-  const delta = currentClaimable - previousClaimable;
-  return delta > 0n ? delta : 0n;
-}
+export function simulateStream(
+  params: SimulateStreamParams,
+  snapshotCount: number = 10,
+): SimulateStreamResult {
+  const { amount, durationSeconds } = params;
+  if (amount <= 0n) throw new SoroStreamError('simulateStream: amount must be > 0');
+  if (durationSeconds <= 0) throw new SoroStreamError('simulateStream: durationSeconds must be > 0');
 
-// ── Issue #388: Stream metadata URI builder ───────────────────────────────────
+  const startTime = params.startTime ?? Math.floor(Date.now() / 1000);
+  const endTime = startTime + durationSeconds;
+  const flowRate = amount / BigInt(durationSeconds);
+  const totalAmount = flowRate * BigInt(durationSeconds);
 
-/** Structured metadata fields for a SoroStream stream. */
-export interface StreamMetadataFields {
-  /** Human-readable stream label (e.g. "Q3 contractor payout"). */
-  label?: string;
-  /** External URL pointing to an invoice, contract, or off-chain doc. */
-  url?: string;
-  /** Arbitrary string tag (e.g. "payroll", "grant", "subscription"). */
-  tag?: string;
-  /** Namespace for multi-tenant scoping. */
-  namespace?: string;
-  /** Additional caller-defined key-value pairs. */
-  [key: string]: string | undefined;
-}
-
-/**
- * Serialises a metadata fields object to a URI-safe string that can be stored
- * in a stream's `metadata` field on-chain.
- *
- * Format: `sorostream:v1?key=value&key2=value2` (URL-encoded query string).
- * Unknown/extra keys are preserved and round-trip through {@link parseMetadataUri}.
- *
- * Issue #388.
- *
- * @param fields - Structured metadata key-value pairs. Undefined values are omitted.
- * @returns A URI-safe string, or an empty string when `fields` is empty.
- *
- * @example
- * ```ts
- * const uri = buildMetadataUri({ label: "Q3 payout", tag: "payroll" });
- * // "sorostream:v1?label=Q3%20payout&tag=payroll"
- * ```
- */
-export function buildMetadataUri(fields: StreamMetadataFields): string {
-  const entries = Object.entries(fields).filter(
-    ([, v]) => v !== undefined && v !== '',
-  ) as [string, string][];
-  if (entries.length === 0) return '';
-  const qs = entries.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-  return `sorostream:v1?${qs}`;
-}
-
-/**
- * Parses a URI produced by {@link buildMetadataUri} back into a structured
- * {@link StreamMetadataFields} object.
- *
- * Returns an empty object for unrecognised / non-SoroStream URI formats so
- * callers can safely call `parseMetadataUri(stream.metadata ?? '')` without
- * branching on the format.
- *
- * Issue #388.
- *
- * @param uri - A URI string previously created by `buildMetadataUri`.
- * @returns Decoded metadata fields, or `{}` if the URI is empty or unparseable.
- *
- * @example
- * ```ts
- * const fields = parseMetadataUri("sorostream:v1?label=Q3%20payout&tag=payroll");
- * // { label: "Q3 payout", tag: "payroll" }
- * ```
- */
-export function parseMetadataUri(uri: string): StreamMetadataFields {
-  if (!uri || !uri.startsWith('sorostream:')) return {};
-  const qsIndex = uri.indexOf('?');
-  if (qsIndex === -1) return {};
-  const qs = uri.slice(qsIndex + 1);
-  const result: StreamMetadataFields = {};
-  for (const pair of qs.split('&')) {
-    const eqIdx = pair.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = decodeURIComponent(pair.slice(0, eqIdx));
-    const value = decodeURIComponent(pair.slice(eqIdx + 1));
-    if (key) result[key] = value;
+  // Build evenly-spaced sample timestamps (start, N intermediate, end).
+  const step = Math.max(1, Math.floor(durationSeconds / (snapshotCount + 1)));
+  const sampleTimes: number[] = [startTime];
+  for (let i = 1; i <= snapshotCount; i++) {
+    const t = startTime + i * step;
+    if (t < endTime) sampleTimes.push(t);
   }
-  return result;
-}
+  if (sampleTimes[sampleTimes.length - 1] !== endTime) {
+    sampleTimes.push(endTime);
+  }
 
-// ── Issue #382: Stream cost projection utility ────────────────────────────────
+  const snapshots: SimulateStreamSnapshot[] = sampleTimes.map((t) => {
+    const elapsed = BigInt(Math.min(t - startTime, durationSeconds));
+    const streamed = flowRate * elapsed;
+    const remaining = totalAmount - streamed;
+    const percentComplete =
+      totalAmount > 0n ? Number((streamed * 10000n) / totalAmount) / 100 : 0;
+    return { timestamp: t, streamed, remaining, percentComplete };
+  });
 
-/**
- * Projects the total token cost for a stream given a per-second flow rate and
- * a duration, so callers can display the projected spend before creating a stream.
- *
- * Issue #382.
- *
- * @param ratePerSecond - Flow rate in stroops per second.
- * @param durationSeconds - Duration of the stream in seconds.
- * @returns Total projected cost in stroops (`ratePerSecond × durationSeconds`).
- * @throws {SoroStreamError} When either argument is not positive.
- *
- * @example
- * ```ts
- * const rate = calculateFlowRate(toStroops("100"), 30 * 24 * 60 * 60);
- * const cost = projectCost(rate, 30 * 24 * 60 * 60);
- * console.log(formatUSDC(cost)); // "100.0000000"
- * ```
- */
-export function projectCost(ratePerSecond: bigint, durationSeconds: number): bigint {
-  if (ratePerSecond <= 0n) throw new SoroStreamError('ratePerSecond must be > 0');
-  if (durationSeconds <= 0) throw new SoroStreamError('durationSeconds must be > 0');
-  return ratePerSecond * BigInt(Math.floor(durationSeconds));
+  return { flowRate, startTime, endTime, durationSeconds, totalAmount, snapshots };
 }

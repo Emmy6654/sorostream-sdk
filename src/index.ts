@@ -66,10 +66,7 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
-  calculateStreamDelta,
-  buildMetadataUri,
-  parseMetadataUri,
-  projectCost,
+  simulateStream,
 } from './utils.js';
 export type { StreamMetadataFields } from './utils.js';
 export { templates } from './templates.js';
@@ -236,7 +233,9 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
-  OnStreamUpdateOptions,
+  SimulateStreamParams,
+  SimulateStreamResult,
+  SimulateStreamSnapshot,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';
