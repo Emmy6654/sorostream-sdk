@@ -331,20 +331,23 @@ export class RecipientValidationError extends SoroStreamError {
 }
 
 /**
- * Thrown by the WalletConnect adapter when the underlying WalletConnect
- * session has expired (or been deleted) between signing operations.
- *
- * The adapter clears the stale session before throwing, so the next
- * signing attempt triggers a fresh `signClient.connect()` — surfacing the
- * wallet's reconnect prompt to the user instead of silently failing.
- *
- * Issue #453.
+ * Thrown when a non-TLS (`http://`) RPC endpoint URL is supplied to the SDK
+ * (constructor, `setNetwork`, or `updateConfig`) for a non-loopback host
+ * (issue #463). Transaction data — including signed envelopes — must never
+ * be routed over an unencrypted connection. Loopback hosts (`localhost`,
+ * `127.0.0.1`, `::1`) are exempt to keep local Soroban quickstart workflows
+ * working.
  */
-export class WalletConnectSessionExpiredError extends SoroStreamError {
-  constructor(message?: string) {
+export class InsecureRpcUrlError extends SoroStreamError {
+  /** The rejected RPC URL. */
+  readonly rpcUrl: string;
+
+  constructor(rpcUrl: string) {
     super(
-      message ?? 'WalletConnect session has expired. Please reconnect your wallet to continue.',
+      `Insecure RPC URL "${rpcUrl}": non-TLS "http://" endpoints are not allowed. ` +
+        'Use an "https://" URL, or a loopback host (localhost/127.0.0.1) for local development.',
     );
-    this.name = 'WalletConnectSessionExpiredError';
+    this.name = 'InsecureRpcUrlError';
+    this.rpcUrl = rpcUrl;
   }
 }

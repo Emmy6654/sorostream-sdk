@@ -255,8 +255,32 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
 }
 
 /**
+ * Zeroes out a `Keypair`'s raw secret key buffers (issue #460). `Keypair`
+ * does not expose a way to do this itself, so this reaches into its
+ * internal `_secretSeed`/`_secretKey` buffers directly. Uses `.fill(0)`
+ * (a standard TypedArray method) rather than any Node `Buffer` API, so it
+ * works in browser/Workers environments too.
+ */
+function zeroKeypairSecret(keypair: Keypair): void {
+  const internal = keypair as unknown as {
+    _secretSeed?: Uint8Array;
+    _secretKey?: Uint8Array;
+  };
+  internal._secretSeed?.fill(0);
+  internal._secretKey?.fill(0);
+}
+
+/**
  * Creates a server-side WalletAdapter that signs directly with a Stellar Keypair.
  * Suitable for Node.js scripts, backends, and automated payouts.
+ *
+ * A fresh `Keypair` is derived from `secretKey` for each `signTransaction`
+ * call and its raw key buffers are zeroed immediately afterward (issue
+ * #460), so they aren't retained in memory longer than the signing
+ * operation itself. `getPublicKey` never needs the secret at all — the
+ * public key is derived once at creation and cached. Note that `secretKey`
+ * itself is a JS string, which cannot be zeroed in place; call `destroy()`
+ * to drop this adapter's reference to it once you're done with the adapter.
  *
  * @param secretKey - The Stellar secret key (base-32 encoded seed starting with "S").
  *
@@ -273,21 +297,39 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
  * ```
  */
 export function createKeypairAdapter(secretKey: string): WalletAdapter {
-  const keypair = Keypair.fromSecret(secretKey);
+  const initialKeypair = Keypair.fromSecret(secretKey);
+  const publicKey = initialKeypair.publicKey();
+  zeroKeypairSecret(initialKeypair);
+
+  let secret: string | null = secretKey;
+  let destroyed = false;
 
   return {
     async isConnected(): Promise<boolean> {
-      return true;
+      return !destroyed;
     },
 
     async getPublicKey(): Promise<string> {
-      return keypair.publicKey();
+      return publicKey;
     },
 
     async signTransaction(xdrStr: string, network: Network): Promise<string> {
-      const tx = TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASES[network]);
-      tx.sign(keypair);
-      return tx.toEnvelope().toXDR('base64');
+      if (destroyed || secret === null) {
+        throw new Error('createKeypairAdapter: cannot sign, adapter has been destroyed');
+      }
+      const keypair = Keypair.fromSecret(secret);
+      try {
+        const tx = TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASES[network]);
+        tx.sign(keypair);
+        return tx.toEnvelope().toXDR('base64');
+      } finally {
+        zeroKeypairSecret(keypair);
+      }
+    },
+
+    destroy(): void {
+      secret = null;
+      destroyed = true;
     },
   };
 }
@@ -675,7 +717,7 @@ export function createKmsWalletAdapter(config: KmsWalletAdapterConfig): WalletAd
 /** Alias for createKmsWalletAdapter. */
 export const createKmsAdapter = createKmsWalletAdapter;
 
-// ── Issue #367 / #453: WalletConnect v2 adapter ─────────────────────────────
+// ── Issue #367: WalletConnect v2 adapter ─────────────────────────────────────
 
 /**
  * Configuration for the WalletConnect v2 adapter.
@@ -692,19 +734,12 @@ export interface WalletConnectV2AdapterConfig {
     url?: string;
     icons?: string[];
   };
-  /** Optional chain ID to request (default: "stellar:pubnet"). */
+  /** Optional chain ID to request (default: "stellar:pubnet" or "stellar:testnet"). */
   chainId?: string;
 }
 
-type WalletConnectSession = {
-  topic: string;
-  /** Unix timestamp (seconds) at which the session expires. */
-  expiry: number;
-  namespaces: Record<string, { accounts: string[]; methods: string[]; events: string[] }>;
-};
-
 type WalletConnectSignClient = {
-  init(config: unknown): Promise<WalletConnectSignClient>;
+  init(config: unknown): Promise<void>;
   connect(params: {
     requiredNamespaces: Record<string, { methods: string[]; chains: string[]; events: string[] }>;
   }): Promise<{
@@ -719,10 +754,6 @@ type WalletConnectSignClient = {
     chainId: string;
     request: { method: string; params: unknown };
   }): Promise<unknown>;
-  session: {
-    get(topic: string): WalletConnectSession;
-    getAll(): WalletConnectSession[];
-  };
 };
 
 type WalletConnectSignClientModule = {
@@ -731,34 +762,10 @@ type WalletConnectSignClientModule = {
 };
 
 /**
- * True when a WalletConnect error indicates the session is gone (expired,
- * deleted, or the topic is no longer registered on the relay). Used to
- * normalise stale-session signing failures into a reconnect prompt instead
- * of a silent failure (issue #453).
- */
-function isSessionGoneError(error: unknown): boolean {
-  if (error instanceof Error && error.message.includes('WalletConnect session has expired')) {
-    return true;
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    /session/i.test(message) &&
-    /(expired|not found|no matching|missing|unknown|deleted|closed|disconnect)/i.test(message)
-  );
-}
-
-/**
  * Creates a WalletAdapter backed by WalletConnect v2, enabling mobile wallet
  * users to connect via QR code or deep link (issue #367).
  *
  * Dynamically imports `@walletconnect/sign-client` to avoid SSR issues.
- *
- * The adapter tracks the WalletConnect session's expiry and monitors the
- * `session_delete` / `session_expire` events. When a session expires between
- * signing operations, `isConnected()` reports `false` and the next
- * `signTransaction` / `getPublicKey` call re-runs `signClient.connect()` so
- * the user is prompted to reconnect — instead of silently attempting to sign
- * with the stale session (issue #453).
  *
  * @example
  * ```ts
@@ -806,57 +813,10 @@ export async function createWalletConnectV2Adapter(
 
   const chainId = config.chainId ?? 'stellar:pubnet';
   let sessionTopic: string | null = null;
-  /** Unix timestamp (seconds) at which the cached session expires, if known. */
-  let sessionExpiry: number | null = null;
   let publicKey: string | null = null;
-  const connectionListeners = new Set<(connected: boolean) => void>();
-
-  function emitConnection(connected: boolean): void {
-    for (const cb of connectionListeners) cb(connected);
-  }
-
-  /**
-   * Drops the cached session state and notifies connection subscribers that
-   * the wallet is no longer connected. Safe to call repeatedly.
-   */
-  function invalidateSession(): void {
-    if (sessionTopic === null) return;
-    sessionTopic = null;
-    sessionExpiry = null;
-    publicKey = null;
-    emitConnection(false);
-  }
-
-  /**
-   * Verifies the cached session is still usable: the topic must still be
-   * registered with the SignClient and must not have passed its `expiry`.
-   * This catches sessions that expired on the wallet side between signing
-   * operations, even when the `session_expire` event was missed (issue #453).
-   */
-  function isSessionValid(): boolean {
-    if (sessionTopic === null) return false;
-    try {
-      const session = signClient.session.get(sessionTopic);
-      if (!session) return false;
-      if (typeof session.expiry === 'number') {
-        sessionExpiry = session.expiry;
-        if (Date.now() / 1000 >= session.expiry) return false;
-      }
-      return true;
-    } catch {
-      // session.get throws when the topic is no longer registered.
-      return false;
-    }
-  }
 
   async function ensureSession(): Promise<string> {
-    // Reuse the cached session only while it is still valid. An expired or
-    // deleted session triggers a fresh connect() so the user is prompted to
-    // reconnect instead of failing at sign time (issue #453).
-    if (sessionTopic !== null) {
-      if (isSessionValid()) return sessionTopic;
-      invalidateSession();
-    }
+    if (sessionTopic) return sessionTopic;
 
     const { topic, namespaces } = await signClient.connect({
       requiredNamespaces: {
@@ -869,23 +829,8 @@ export async function createWalletConnectV2Adapter(
     });
 
     sessionTopic = topic;
-    sessionExpiry = null;
-    publicKey = null;
 
-    // Capture the session's expiry up-front so a stale session can be
-    // detected even if the `session_expire` event is missed (e.g. the page
-    // was asleep or the relay dropped the event).
-    try {
-      const session = signClient.session.get(topic);
-      if (session && typeof session.expiry === 'number') {
-        sessionExpiry = session.expiry;
-      }
-    } catch {
-      // Registry may not be populated synchronously; fall back to the
-      // event-driven expiry detection below.
-    }
-
-    // Extract the Stellar public key from the returned namespace accounts.
+    // Extract the Stellar public key from the returned namespace accounts
     const stellarNs = namespaces['stellar'];
     if (stellarNs?.accounts?.length) {
       // Account format: "stellar:pubnet:GABC..."
@@ -897,22 +842,18 @@ export async function createWalletConnectV2Adapter(
       throw new Error('WalletConnect session did not return a Stellar public key');
     }
 
-    emitConnection(true);
     return sessionTopic;
   }
 
-  // Issue #453: a wallet-side disconnect or expiry must invalidate the cached
-  // session so the next operation reconnects instead of signing with stale state.
+  // Handle session disconnect events
   signClient.on('session_delete', () => {
-    invalidateSession();
-  });
-  signClient.on('session_expire', () => {
-    invalidateSession();
+    sessionTopic = null;
+    publicKey = null;
   });
 
   return {
     async isConnected(): Promise<boolean> {
-      return sessionTopic !== null && isSessionValid();
+      return sessionTopic !== null;
     },
 
     async getPublicKey(): Promise<string> {
@@ -924,45 +865,20 @@ export async function createWalletConnectV2Adapter(
       const topic = await ensureSession();
       const passphrase = NETWORK_PASSPHRASES[network];
 
-      let result: unknown;
-      try {
-        result = await signClient.request({
-          topic,
-          chainId,
-          request: {
-            method: 'stellar_signXDR',
-            params: {
-              xdr: xdrStr,
-              networkPassphrase: passphrase,
-            },
+      const result = (await signClient.request({
+        topic,
+        chainId,
+        request: {
+          method: 'stellar_signXDR',
+          params: {
+            xdr: xdrStr,
+            networkPassphrase: passphrase,
           },
-        });
-      } catch (error) {
-        // Issue #453: a stale topic surfaces as a session error from the relay.
-        // Normalise it into a reconnect-prompting error and drop the cached
-        // session so the caller can prompt the user to reconnect.
-        if (isSessionGoneError(error)) {
-          invalidateSession();
-          throw new WalletConnectSessionExpiredError();
-        }
-        throw error;
-      }
+        },
+      })) as { signedXdr?: string; signed_tx_xdr?: string } | string;
 
       if (typeof result === 'string') return result;
-      const signed = result as { signedXdr?: string; signed_tx_xdr?: string };
-      return signed.signedXdr ?? signed.signed_tx_xdr ?? xdrStr;
-    },
-
-    /**
-     * Subscribes to WalletConnect session connect/disconnect changes
-     * (issue #453). Fires `false` when the session is deleted or expires,
-     * and `true` when a new session is established.
-     */
-    onConnectionChange(callback: (connected: boolean) => void): () => void {
-      connectionListeners.add(callback);
-      return () => {
-        connectionListeners.delete(callback);
-      };
+      return result.signedXdr ?? result.signed_tx_xdr ?? xdrStr;
     },
 
     /**
@@ -978,7 +894,79 @@ export async function createWalletConnectV2Adapter(
       } catch {
         // Session may already be expired
       }
-      invalidateSession();
+      sessionTopic = null;
+      publicKey = null;
     },
   } as WalletAdapter & { disconnect(): Promise<void> };
+}
+
+// ── Issue #368: XDEFI wallet adapter ─────────────────────────────────────────
+
+type XDEFIModule = {
+  stellar: {
+    isConnected(): Promise<boolean>;
+    getPublicKey(): Promise<string>;
+    sign(xdr: string, opts?: { networkPassphrase?: string }): Promise<string>;
+  };
+};
+
+/**
+ * Creates a WalletAdapter backed by the XDEFI Wallet browser extension
+ * (issue #368). Dynamically imports the XDEFI window provider to avoid SSR issues.
+ *
+ * @example
+ * ```ts
+ * import { createXDEFIAdapter } from "@sorostream/sdk/wallets";
+ *
+ * const adapter = await createXDEFIAdapter();
+ * const client = new SoroStreamClient({
+ *   network: "testnet",
+ *   contractId: "YOUR_CONTRACT_ID",
+ *   walletAdapter: adapter,
+ * });
+ * ```
+ */
+export async function createXDEFIAdapter(): Promise<WalletAdapter> {
+  if (typeof window === 'undefined') {
+    throw new Error('XDEFI adapter is only available in browser environments');
+  }
+
+  // XDEFI injects `window.xdefi` (or `window.xfi`) with a Stellar provider
+  const xdefi = (window as Record<string, unknown>)['xdefi'] as XDEFIModule | undefined;
+  const xfi = (window as Record<string, unknown>)['xfi'] as XDEFIModule | undefined;
+  const provider = xdefi?.stellar ?? xfi?.stellar;
+
+  if (!provider) {
+    throw new Error(
+      'XDEFI Wallet is not installed. ' +
+        'Visit https://xdefi.com to install the browser extension.',
+    );
+  }
+
+  return {
+    async isConnected(): Promise<boolean> {
+      try {
+        return await provider.isConnected();
+      } catch {
+        return false;
+      }
+    },
+
+    async getPublicKey(): Promise<string> {
+      const connected = await provider.isConnected();
+      if (!connected) {
+        throw new Error('XDEFI Wallet is not connected');
+      }
+      return provider.getPublicKey();
+    },
+
+    async signTransaction(xdrStr: string, network: Network): Promise<string> {
+      const connected = await provider.isConnected();
+      if (!connected) {
+        throw new Error('XDEFI Wallet is not connected');
+      }
+      const passphrase = NETWORK_PASSPHRASES[network];
+      return provider.sign(xdrStr, { networkPassphrase: passphrase });
+    },
+  };
 }
