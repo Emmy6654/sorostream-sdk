@@ -6,7 +6,7 @@ import type { Stream } from '../src/types.js';
 // getStreamHealth (issue #398)
 // ---------------------------------------------------------------------------
 
-const BASE_TIME = 1_700_000_000;
+const BASE_TIME = 1_700_000_000; // fixed "now" reference
 
 /** Helper that builds a minimal valid Active stream. */
 function makeStream(overrides: Partial<Stream> = {}): Stream {
@@ -40,7 +40,8 @@ describe('getStreamHealth (issue #398)', () => {
     const stream = makeStream();
     const result = getStreamHealth(stream, BASE_TIME);
 
-    // elapsed = 3600 s; streamed = 100 * 3600 = 360_000
+    // elapsed = BASE_TIME - (BASE_TIME - 3600) = 3600 s
+    // streamed = 100 * 3600 = 360_000
     // remaining = 10_000_000 - 360_000 = 9_640_000
     expect(result.remainingBalance).toBe(9_640_000n);
   });
@@ -73,6 +74,7 @@ describe('getStreamHealth (issue #398)', () => {
 
   it('deducts points when the stream is stalled (long since last withdrawal)', () => {
     // Duration = 7200 s, stall threshold = max(60, 7200 * 0.1) = 720 s
+    // Set lastWithdrawTime to 5000 s ago — well past the stall threshold
     const stream = makeStream({
       lastWithdrawTime: BASE_TIME - 5000,
     });
@@ -84,6 +86,7 @@ describe('getStreamHealth (issue #398)', () => {
   });
 
   it('deducts points when the stream is underfunded', () => {
+    // Set deposit very low so remaining < remaining payout
     const stream = makeStream({ deposit: 1n });
     const result = getStreamHealth(stream, BASE_TIME);
 
@@ -92,14 +95,15 @@ describe('getStreamHealth (issue #398)', () => {
   });
 
   it('deducts points when stream is > 90% elapsed with balance remaining', () => {
-    // 95% elapsed
+    // 95% elapsed: BASE_TIME - startTime = 0.95 * 7200 = 6840 s elapsed
     const stream = makeStream({
       startTime: BASE_TIME - 6840,
-      endTime: BASE_TIME + 360,
-      lastWithdrawTime: BASE_TIME - 30,
+      endTime: BASE_TIME + 360, // 360 s remaining
+      lastWithdrawTime: BASE_TIME - 30, // recent withdrawal — no stall
     });
     const result = getStreamHealth(stream, BASE_TIME);
 
+    // Should detect near-expiry
     expect(result.diagnostics.some((d) => d.includes('90%'))).toBe(true);
   });
 
@@ -121,11 +125,12 @@ describe('getStreamHealth (issue #398)', () => {
     expect(result.secondsSinceLastWithdrawal).toBe(0);
   });
 
-  it('status is "warning" or "critical" for moderate issues', () => {
+  it('status is "warning" for moderate issues (score 50–79)', () => {
+    // Stalled stream but not critically underfunded → warning zone
     const stream = makeStream({
       startTime: BASE_TIME - 7000,
       endTime: BASE_TIME + 200,
-      lastWithdrawTime: BASE_TIME - 3000,
+      lastWithdrawTime: BASE_TIME - 3000, // long stall
     });
     const result = getStreamHealth(stream, BASE_TIME);
 
@@ -133,6 +138,7 @@ describe('getStreamHealth (issue #398)', () => {
   });
 
   it('status is "critical" when score drops below 50', () => {
+    // Both underfunded and severely stalled
     const stream = makeStream({
       deposit: 1n,
       lastWithdrawTime: BASE_TIME - 100_000,

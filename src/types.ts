@@ -850,6 +850,22 @@ export type RecipientTrustScoreProvider = (
   recipient: string,
 ) => RecipientTrustScore | Promise<RecipientTrustScore>;
 
+// ── Issue #364: onStreamUpdate subscription ─────────────────────────────────
+
+/** Options for the {@link SoroStreamClient.onStreamUpdate} subscription. */
+export interface OnStreamUpdateOptions {
+  /**
+   * How often to poll the RPC for state changes, in ms.
+   * Defaults to 5000 (5 seconds).
+   */
+  pollIntervalMs?: number;
+  /**
+   * When true, fire the callback immediately with the current stream state
+   * before waiting for the first poll interval. Defaults to false.
+   */
+  immediate?: boolean;
+}
+
 // ── Stream filtering (issue #204) ───────────────────────────────────────────
 
 /** Criteria for filtering streams. */
@@ -1230,38 +1246,4 @@ export interface StreamHealthResult {
   secondsSinceLastWithdrawal: number;
   /** Human-readable diagnostics messages (empty when status is healthy). */
   diagnostics: string[];
-}
-
-// ── Issue #397: batchGetStreamHealth ────────────────────────────────────────
-
-/** A single entry in the result of {@link batchGetStreamHealth}. */
-export interface BatchStreamHealthEntry {
-  /** The stream ID. */
-  streamId: string;
-  /** The health result for this stream. */
-  health: StreamHealthResult;
-}
-
-/** Summary counts returned by {@link batchGetStreamHealth}. */
-export interface BatchStreamHealthSummary {
-  /** Total streams evaluated. */
-  total: number;
-  /** Number of streams with status "healthy". */
-  healthy: number;
-  /** Number of streams with status "warning". */
-  warning: number;
-  /** Number of streams with status "critical". */
-  critical: number;
-  /** Number of streams with status "completed". */
-  completed: number;
-  /** Number of streams with status "cancelled". */
-  cancelled: number;
-}
-
-/** Result of {@link batchGetStreamHealth}. */
-export interface BatchStreamHealthResult {
-  /** Per-stream health entries, preserving input order. */
-  entries: BatchStreamHealthEntry[];
-  /** Aggregated summary counts. */
-  summary: BatchStreamHealthSummary;
 }
