@@ -121,6 +121,7 @@ export {
   SoroStreamTransportError,
   InsecureRpcUrlError,
 } from './errors.js';
+export { assertEnvelopeUnmutated } from './xdrValidation.js';
 export { checkPeerDependencies } from './peerDependencies.js';
 export {
   isSoroStreamError,

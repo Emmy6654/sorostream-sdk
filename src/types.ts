@@ -407,6 +407,13 @@ export interface WalletAdapter {
    * Returns an unsubscribe function.
    */
   onConnectionChange?(callback: (connected: boolean) => void): () => void;
+  /**
+   * Optional: releases any retained key material (issue #460). Adapters that
+   * hold raw secret key buffers (e.g. `createKeypairAdapter`) zero them out
+   * here; adapters with nothing sensitive to hold in memory simply omit this
+   * method. Once called, the adapter should no longer be used.
+   */
+  destroy?(): void;
 }
 
 /** Result shape returned when a wallet adapter signs a transaction (issue #344). */

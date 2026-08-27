@@ -254,8 +254,32 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
 }
 
 /**
+ * Zeroes out a `Keypair`'s raw secret key buffers (issue #460). `Keypair`
+ * does not expose a way to do this itself, so this reaches into its
+ * internal `_secretSeed`/`_secretKey` buffers directly. Uses `.fill(0)`
+ * (a standard TypedArray method) rather than any Node `Buffer` API, so it
+ * works in browser/Workers environments too.
+ */
+function zeroKeypairSecret(keypair: Keypair): void {
+  const internal = keypair as unknown as {
+    _secretSeed?: Uint8Array;
+    _secretKey?: Uint8Array;
+  };
+  internal._secretSeed?.fill(0);
+  internal._secretKey?.fill(0);
+}
+
+/**
  * Creates a server-side WalletAdapter that signs directly with a Stellar Keypair.
  * Suitable for Node.js scripts, backends, and automated payouts.
+ *
+ * A fresh `Keypair` is derived from `secretKey` for each `signTransaction`
+ * call and its raw key buffers are zeroed immediately afterward (issue
+ * #460), so they aren't retained in memory longer than the signing
+ * operation itself. `getPublicKey` never needs the secret at all — the
+ * public key is derived once at creation and cached. Note that `secretKey`
+ * itself is a JS string, which cannot be zeroed in place; call `destroy()`
+ * to drop this adapter's reference to it once you're done with the adapter.
  *
  * @param secretKey - The Stellar secret key (base-32 encoded seed starting with "S").
  *
@@ -272,21 +296,39 @@ export async function createFreighterAdapter(): Promise<WalletAdapter> {
  * ```
  */
 export function createKeypairAdapter(secretKey: string): WalletAdapter {
-  const keypair = Keypair.fromSecret(secretKey);
+  const initialKeypair = Keypair.fromSecret(secretKey);
+  const publicKey = initialKeypair.publicKey();
+  zeroKeypairSecret(initialKeypair);
+
+  let secret: string | null = secretKey;
+  let destroyed = false;
 
   return {
     async isConnected(): Promise<boolean> {
-      return true;
+      return !destroyed;
     },
 
     async getPublicKey(): Promise<string> {
-      return keypair.publicKey();
+      return publicKey;
     },
 
     async signTransaction(xdrStr: string, network: Network): Promise<string> {
-      const tx = TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASES[network]);
-      tx.sign(keypair);
-      return tx.toEnvelope().toXDR('base64');
+      if (destroyed || secret === null) {
+        throw new Error('createKeypairAdapter: cannot sign, adapter has been destroyed');
+      }
+      const keypair = Keypair.fromSecret(secret);
+      try {
+        const tx = TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASES[network]);
+        tx.sign(keypair);
+        return tx.toEnvelope().toXDR('base64');
+      } finally {
+        zeroKeypairSecret(keypair);
+      }
+    },
+
+    destroy(): void {
+      secret = null;
+      destroyed = true;
     },
   };
 }
