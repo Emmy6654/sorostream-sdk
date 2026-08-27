@@ -4017,6 +4017,34 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
+   * Returns paginated on-chain events for a given stream.
+   *
+   * Each page contains up to `limit` events (default 100) in ledger order,
+   * plus a `cursor` value you can pass to the next call to retrieve the
+   * following page.
+   *
+   * @param streamId - The stream to query.
+   * @param cursor - Opaque pagination cursor from the previous page (omit for first page).
+   * @param limit - Maximum number of events per page (default 100).
+   * @returns `{ events, cursor, latestLedger }` — typed stream events and pagination state.
+   *
+   * @example
+   * ```ts
+   * const page1 = await client.getStreamHistory("42");
+   * const page2 = await client.getStreamHistory("42", page1.cursor, 50);
+   * ```
+   */
+  async getStreamHistory(
+    streamId: string,
+    cursor?: string,
+    limit?: number,
+  ): Promise<import('./indexer.js').PaginatedEvents> {
+    const { StreamIndexer } = await import('./indexer.js');
+    const indexer = new StreamIndexer(this.server, this.contract.contractId());
+    return indexer.getStreamHistory(streamId, { cursor, limit });
+  }
+
+  /**
    * Retrieves paginated transaction history for a specific stream from Horizon API (issue #200).
    *
    * @param streamId - The stream ID to query
