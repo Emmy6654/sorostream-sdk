@@ -26,9 +26,7 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
-  SimulateStreamParams,
-  SimulateStreamResult,
-  SimulateStreamSnapshot,
+  StreamHealthResult,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -1665,60 +1663,127 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
   return Memo.text(value);
 }
 
-// ── Issue #399: simulateStream ───────────────────────────────────────────────
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
 
 /**
- * Projects streamed amounts over time using a local simulation — no on-chain
- * transaction is submitted. Returns a {@link SimulateStreamResult} with the
- * computed flow rate, timeline, and a set of evenly spaced payout snapshots.
+ * Returns a health score (0–100) and status string for a stream based on its
+ * remaining balance, elapsed time, and last withdrawal timestamp.
  *
- * @param params - Stream parameters: amount, durationSeconds, optional startTime.
- * @param snapshotCount - Number of intermediate snapshots to generate (default 10).
- *   The result always includes the start and end points as well, so the actual
- *   `snapshots` array has `snapshotCount + 2` entries at most.
- * @returns A {@link SimulateStreamResult} with the projected timeline and snapshots.
+ * Scoring rules:
+ * - **100** — stream is healthy: on track, no stall, no underfunding.
+ * - **60–99** — warning: stalled (no recent withdrawal) or > 90 % elapsed with
+ *   balance remaining.
+ * - **0–59** — critical: severely stalled, near-drained, or underfunded.
+ * - **"completed"** — stream has ended and `status === 'Completed'`.
+ * - **"cancelled"** — stream has `status === 'Cancelled'`.
+ *
+ * @param stream - The stream to evaluate.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ * @returns A {@link StreamHealthResult} with numeric score and diagnostic messages.
  *
  * @example
  * ```ts
- * import { simulateStream, toStroops } from '@sorostream/sdk';
+ * import { getStreamHealth } from '@sorostream/sdk';
  *
- * const result = simulateStream({ amount: toStroops('100'), durationSeconds: 3600 });
- * console.log(result.flowRate);          // stroops/second
- * console.log(result.snapshots[5]);      // midpoint snapshot
+ * const health = getStreamHealth(stream);
+ * if (health.status === 'critical') {
+ *   console.warn(`Stream is at risk: ${health.diagnostics.join(', ')}`);
+ * }
  * ```
  */
-export function simulateStream(
-  params: SimulateStreamParams,
-  snapshotCount: number = 10,
-): SimulateStreamResult {
-  const { amount, durationSeconds } = params;
-  if (amount <= 0n) throw new SoroStreamError('simulateStream: amount must be > 0');
-  if (durationSeconds <= 0) throw new SoroStreamError('simulateStream: durationSeconds must be > 0');
+export function getStreamHealth(stream: Stream, now?: number): StreamHealthResult {
+  const nowSecs = now ?? Math.floor(Date.now() / 1000);
+  const diagnostics: string[] = [];
 
-  const startTime = params.startTime ?? Math.floor(Date.now() / 1000);
-  const endTime = startTime + durationSeconds;
-  const flowRate = amount / BigInt(durationSeconds);
-  const totalAmount = flowRate * BigInt(durationSeconds);
-
-  // Build evenly-spaced sample timestamps (start, N intermediate, end).
-  const step = Math.max(1, Math.floor(durationSeconds / (snapshotCount + 1)));
-  const sampleTimes: number[] = [startTime];
-  for (let i = 1; i <= snapshotCount; i++) {
-    const t = startTime + i * step;
-    if (t < endTime) sampleTimes.push(t);
-  }
-  if (sampleTimes[sampleTimes.length - 1] !== endTime) {
-    sampleTimes.push(endTime);
+  // ── Terminal states ──────────────────────────────────────────────────────
+  if (stream.status === 'Cancelled') {
+    return {
+      score: 0,
+      status: 'cancelled',
+      remainingBalance: 0n,
+      elapsedSeconds: 0,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: 0,
+      diagnostics: ['Stream has been cancelled'],
+    };
   }
 
-  const snapshots: SimulateStreamSnapshot[] = sampleTimes.map((t) => {
-    const elapsed = BigInt(Math.min(t - startTime, durationSeconds));
-    const streamed = flowRate * elapsed;
-    const remaining = totalAmount - streamed;
-    const percentComplete =
-      totalAmount > 0n ? Number((streamed * 10000n) / totalAmount) / 100 : 0;
-    return { timestamp: t, streamed, remaining, percentComplete };
-  });
+  if (stream.status === 'Completed') {
+    return {
+      score: 100,
+      status: 'completed',
+      remainingBalance: 0n,
+      elapsedSeconds: stream.endTime - stream.startTime,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: Math.max(0, nowSecs - stream.lastWithdrawTime),
+      diagnostics: [],
+    };
+  }
 
-  return { flowRate, startTime, endTime, durationSeconds, totalAmount, snapshots };
+  // ── Active / Paused ──────────────────────────────────────────────────────
+  const duration = stream.endTime - stream.startTime;
+  const elapsedSeconds = Math.max(0, Math.min(nowSecs - stream.startTime, duration));
+  const remainingSeconds = Math.max(0, stream.endTime - nowSecs);
+
+  // Remaining balance = deposit − (flowRate × elapsed since start, capped at deposit)
+  const streamedSoFar = stream.flowRate * BigInt(elapsedSeconds);
+  const remainingBalance =
+    stream.deposit > streamedSoFar ? stream.deposit - streamedSoFar : 0n;
+
+  const secondsSinceLastWithdrawal =
+    stream.lastWithdrawTime > 0 ? Math.max(0, nowSecs - stream.lastWithdrawTime) : 0;
+
+  // ── Scoring ──────────────────────────────────────────────────────────────
+  let score = 100;
+
+  // Check for stall: recipient hasn't withdrawn in > 10 % of stream duration
+  const stallThreshold = Math.max(60, Math.floor(duration * 0.1));
+  const isStalled =
+    stream.lastWithdrawTime > 0 && secondsSinceLastWithdrawal > stallThreshold;
+  if (isStalled) {
+    const penalty = Math.min(40, Math.floor((secondsSinceLastWithdrawal / stallThreshold) * 20));
+    score -= penalty;
+    diagnostics.push(
+      `No withdrawal in ${secondsSinceLastWithdrawal}s (stall threshold: ${stallThreshold}s)`,
+    );
+  }
+
+  // Check underfunding: remaining balance can't cover what's left to stream
+  const remainingToStream = stream.flowRate * BigInt(remainingSeconds);
+  const isUnderfunded = remainingBalance < remainingToStream;
+  if (isUnderfunded) {
+    score -= 30;
+    diagnostics.push(
+      `Underfunded: remaining balance (${remainingBalance}) < remaining payout (${remainingToStream})`,
+    );
+  }
+
+  // Check near-expiry with balance: > 90 % elapsed but balance still locked
+  const elapsedFraction = duration > 0 ? elapsedSeconds / duration : 0;
+  const nearExpiry = elapsedFraction > 0.9 && remainingBalance > 0n && remainingSeconds > 0;
+  if (nearExpiry) {
+    score -= 10;
+    diagnostics.push(`Stream is > 90% complete with ${remainingBalance} stroops still locked`);
+  }
+
+  score = Math.max(0, score);
+
+  let status: StreamHealthResult['status'];
+  if (score >= 80) {
+    status = 'healthy';
+  } else if (score >= 50) {
+    status = 'warning';
+  } else {
+    status = 'critical';
+  }
+
+  return {
+    score,
+    status,
+    remainingBalance,
+    elapsedSeconds,
+    remainingSeconds,
+    secondsSinceLastWithdrawal,
+    diagnostics,
+  };
 }

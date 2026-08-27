@@ -1222,48 +1222,28 @@ export interface ConfigUpdatedEvent {
   newValue: unknown;
 }
 
-// ── Issue #399: simulateStream ───────────────────────────────────────────────
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
 
-/** Parameters for {@link simulateStream}. Mirrors CreateStreamParams but all fields are required for simulation. */
-export interface SimulateStreamParams {
-  /** Total amount to stream in stroops. */
-  amount: bigint;
-  /** Stream duration in seconds. */
-  durationSeconds: number;
+/** Health status string returned by {@link getStreamHealth}. */
+export type StreamHealthStatus = 'healthy' | 'warning' | 'critical' | 'completed' | 'cancelled';
+
+/** Result returned by {@link getStreamHealth}. */
+export interface StreamHealthResult {
   /**
-   * Optional Unix timestamp (seconds) for when the simulation starts.
-   * Defaults to `Date.now() / 1000`.
+   * Numeric health score in the range 0–100.
+   * 100 = fully healthy; lower values indicate increasing risk.
    */
-  startTime?: number;
-}
-
-/** A projected snapshot at a specific point in a stream simulation. */
-export interface SimulateStreamSnapshot {
-  /** Unix timestamp (seconds) for this sample. */
-  timestamp: number;
-  /** Tokens streamed (claimable) up to this point in stroops. */
-  streamed: bigint;
-  /** Remaining tokens still locked in the stream in stroops. */
-  remaining: bigint;
-  /** Percentage of total amount streamed (0–100). */
-  percentComplete: number;
-}
-
-/** Result of {@link simulateStream} — a local projection without any on-chain interaction. */
-export interface SimulateStreamResult {
-  /** Token flow rate in stroops per second. */
-  flowRate: bigint;
-  /** Unix timestamp (seconds) when the stream starts. */
-  startTime: number;
-  /** Unix timestamp (seconds) when the stream ends. */
-  endTime: number;
-  /** Total stream duration in seconds. */
-  durationSeconds: number;
-  /** Total amount locked in the stream in stroops. */
-  totalAmount: bigint;
-  /**
-   * Projected snapshots sampled at regular intervals.
-   * By default includes ~10 evenly spaced points plus the start and end.
-   */
-  snapshots: SimulateStreamSnapshot[];
+  score: number;
+  /** Human-readable health status. */
+  status: StreamHealthStatus;
+  /** Remaining balance in stroops (deposit minus streamed so far). */
+  remainingBalance: bigint;
+  /** Seconds elapsed since stream started. */
+  elapsedSeconds: number;
+  /** Seconds remaining until stream ends (0 if ended). */
+  remainingSeconds: number;
+  /** Seconds since the last withdrawal (0 if never withdrawn). */
+  secondsSinceLastWithdrawal: number;
+  /** Human-readable diagnostics messages (empty when status is healthy). */
+  diagnostics: string[];
 }
