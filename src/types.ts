@@ -850,6 +850,22 @@ export type RecipientTrustScoreProvider = (
   recipient: string,
 ) => RecipientTrustScore | Promise<RecipientTrustScore>;
 
+// ── Issue #364: onStreamUpdate subscription ─────────────────────────────────
+
+/** Options for the {@link SoroStreamClient.onStreamUpdate} subscription. */
+export interface OnStreamUpdateOptions {
+  /**
+   * How often to poll the RPC for state changes, in ms.
+   * Defaults to 5000 (5 seconds).
+   */
+  pollIntervalMs?: number;
+  /**
+   * When true, fire the callback immediately with the current stream state
+   * before waiting for the first poll interval. Defaults to false.
+   */
+  immediate?: boolean;
+}
+
 // ── Stream filtering (issue #204) ───────────────────────────────────────────
 
 /** Criteria for filtering streams. */
@@ -1204,4 +1220,30 @@ export interface ConfigUpdatedEvent {
   field: string;
   oldValue: unknown;
   newValue: unknown;
+}
+
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
+
+/** Health status string returned by {@link getStreamHealth}. */
+export type StreamHealthStatus = 'healthy' | 'warning' | 'critical' | 'completed' | 'cancelled';
+
+/** Result returned by {@link getStreamHealth}. */
+export interface StreamHealthResult {
+  /**
+   * Numeric health score in the range 0–100.
+   * 100 = fully healthy; lower values indicate increasing risk.
+   */
+  score: number;
+  /** Human-readable health status. */
+  status: StreamHealthStatus;
+  /** Remaining balance in stroops (deposit minus streamed so far). */
+  remainingBalance: bigint;
+  /** Seconds elapsed since stream started. */
+  elapsedSeconds: number;
+  /** Seconds remaining until stream ends (0 if ended). */
+  remainingSeconds: number;
+  /** Seconds since the last withdrawal (0 if never withdrawn). */
+  secondsSinceLastWithdrawal: number;
+  /** Human-readable diagnostics messages (empty when status is healthy). */
+  diagnostics: string[];
 }
