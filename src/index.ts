@@ -22,6 +22,9 @@ export type {
 
 export { MockSoroStreamClient, SoroStreamSandbox } from './mock.js';
 
+export { StreamSimulator } from './simulator.js';
+export type { StreamExpiryCallback } from './simulator.js';
+
 export { WebhookForwarder } from './webhook.js';
 export {
   toStroops,
