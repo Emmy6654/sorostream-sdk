@@ -40,13 +40,19 @@ const STROOP_FACTOR = 10_000_000n;
 
 /**
  * Converts a token amount (as a decimal string like "100.50") to stroops/smallest unit.
- * @param amount - Amount as a decimal string.
+ * Also handles scientific notation strings like "1e-3", "1.5e7", "2.5E-4".
+ * @param amount - Amount as a decimal string (may be in scientific notation).
  * @param decimals - Number of decimal places the token uses (default 7 for SAC).
  */
 export function toStroops(amount: string, decimals: number = 7): bigint {
   const trimmed = amount.trim();
-  const negative = trimmed.startsWith('-');
-  const unsigned = negative ? trimmed.slice(1) : trimmed;
+
+  // Issue #451: expand scientific notation (e.g. "1e-3" → "0.001", "1.5e7" → "15000000")
+  // before splitting on the decimal point so fractional exponents parse correctly.
+  const expanded = /[eE]/.test(trimmed) ? expandScientific(trimmed) : trimmed;
+
+  const negative = expanded.startsWith('-');
+  const unsigned = negative ? expanded.slice(1) : expanded;
   const [whole = '0', decimal = ''] = unsigned.split('.');
   const factor = 10n ** BigInt(decimals);
 
@@ -63,6 +69,38 @@ export function toStroops(amount: string, decimals: number = 7): bigint {
     }
   }
   return negative ? -value : value;
+}
+
+/**
+ * Expands a number string in scientific notation into a plain decimal string.
+ * e.g. "1e-3" → "0.001", "1.5e7" → "15000000", "-2.5e-4" → "-0.00025"
+ * @internal
+ */
+function expandScientific(s: string): string {
+  // Match optional sign, significand (with optional decimal), and exponent.
+  const match = s.match(/^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/);
+  if (!match) return s; // not parseable as scientific — let the caller handle it
+
+  const sign = match[1] ?? '';
+  const intPart = match[2] ?? '0';
+  const fracPart = match[3] ?? '';
+  const exp = parseInt(match[4]!, 10);
+
+  // Combine significand digits (integer + fractional), then apply exponent.
+  const digits = intPart + fracPart;
+  // The decimal point was after intPart.length digits; after the shift it's at:
+  const dotPos = intPart.length + exp;
+
+  if (dotPos <= 0) {
+    // All digits are to the right of the decimal point (e.g. 1e-3 → 0.001)
+    return sign + '0.' + '0'.repeat(-dotPos) + digits;
+  } else if (dotPos >= digits.length) {
+    // All digits are to the left of the decimal point (e.g. 1.5e7 → 15000000)
+    return sign + digits + '0'.repeat(dotPos - digits.length);
+  } else {
+    // Mixed (e.g. 1.234e1 → 12.34)
+    return sign + digits.slice(0, dotPos) + '.' + digits.slice(dotPos);
+  }
 }
 
 /**
@@ -1622,4 +1660,148 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
     return Memo.hash(value);
   }
   return Memo.text(value);
+}
+
+// ── Issue #436: Stream delta calculation ──────────────────────────────────────
+
+/**
+ * Calculates the number of stroops streamed since the last poll by comparing
+ * the current claimable amount against a previously recorded value.
+ *
+ * Useful for real-time UIs that want to show "X USDC was streamed in the last
+ * tick" alongside a running total.
+ *
+ * @param stream - The stream object (used for live `claimableNow` estimate).
+ * @param previousClaimable - Claimable amount recorded at the previous poll, in stroops.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ * @returns The delta in stroops (≥ 0). Returns 0 when the stream is not active
+ *   or the current claimable is not greater than the previous value.
+ *
+ * @example
+ * ```ts
+ * let lastClaimable = await client.getClaimable(streamId);
+ * setInterval(async () => {
+ *   const stream = await client.getStream(streamId);
+ *   const delta = calculateStreamDelta(stream, lastClaimable);
+ *   console.log(`Streamed this tick: ${formatUSDC(delta)}`);
+ *   lastClaimable = claimableNow(stream);
+ * }, 5000);
+ * ```
+ */
+export function calculateStreamDelta(
+  stream: Stream,
+  previousClaimable: bigint,
+  now?: number,
+): bigint {
+  if (stream.status !== 'Active') return 0n;
+  const nowSecs = now ?? Date.now() / 1000;
+  const effectiveNow = Math.min(nowSecs, stream.endTime);
+  const elapsed = Math.max(0, effectiveNow - stream.lastWithdrawTime);
+  const currentClaimable = stream.flowRate * BigInt(Math.floor(elapsed));
+  const delta = currentClaimable - previousClaimable;
+  return delta > 0n ? delta : 0n;
+}
+
+// ── Issue #388: Stream metadata URI builder ───────────────────────────────────
+
+/** Structured metadata fields for a SoroStream stream. */
+export interface StreamMetadataFields {
+  /** Human-readable stream label (e.g. "Q3 contractor payout"). */
+  label?: string;
+  /** External URL pointing to an invoice, contract, or off-chain doc. */
+  url?: string;
+  /** Arbitrary string tag (e.g. "payroll", "grant", "subscription"). */
+  tag?: string;
+  /** Namespace for multi-tenant scoping. */
+  namespace?: string;
+  /** Additional caller-defined key-value pairs. */
+  [key: string]: string | undefined;
+}
+
+/**
+ * Serialises a metadata fields object to a URI-safe string that can be stored
+ * in a stream's `metadata` field on-chain.
+ *
+ * Format: `sorostream:v1?key=value&key2=value2` (URL-encoded query string).
+ * Unknown/extra keys are preserved and round-trip through {@link parseMetadataUri}.
+ *
+ * Issue #388.
+ *
+ * @param fields - Structured metadata key-value pairs. Undefined values are omitted.
+ * @returns A URI-safe string, or an empty string when `fields` is empty.
+ *
+ * @example
+ * ```ts
+ * const uri = buildMetadataUri({ label: "Q3 payout", tag: "payroll" });
+ * // "sorostream:v1?label=Q3%20payout&tag=payroll"
+ * ```
+ */
+export function buildMetadataUri(fields: StreamMetadataFields): string {
+  const entries = Object.entries(fields).filter(
+    ([, v]) => v !== undefined && v !== '',
+  ) as [string, string][];
+  if (entries.length === 0) return '';
+  const qs = entries.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+  return `sorostream:v1?${qs}`;
+}
+
+/**
+ * Parses a URI produced by {@link buildMetadataUri} back into a structured
+ * {@link StreamMetadataFields} object.
+ *
+ * Returns an empty object for unrecognised / non-SoroStream URI formats so
+ * callers can safely call `parseMetadataUri(stream.metadata ?? '')` without
+ * branching on the format.
+ *
+ * Issue #388.
+ *
+ * @param uri - A URI string previously created by `buildMetadataUri`.
+ * @returns Decoded metadata fields, or `{}` if the URI is empty or unparseable.
+ *
+ * @example
+ * ```ts
+ * const fields = parseMetadataUri("sorostream:v1?label=Q3%20payout&tag=payroll");
+ * // { label: "Q3 payout", tag: "payroll" }
+ * ```
+ */
+export function parseMetadataUri(uri: string): StreamMetadataFields {
+  if (!uri || !uri.startsWith('sorostream:')) return {};
+  const qsIndex = uri.indexOf('?');
+  if (qsIndex === -1) return {};
+  const qs = uri.slice(qsIndex + 1);
+  const result: StreamMetadataFields = {};
+  for (const pair of qs.split('&')) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = decodeURIComponent(pair.slice(0, eqIdx));
+    const value = decodeURIComponent(pair.slice(eqIdx + 1));
+    if (key) result[key] = value;
+  }
+  return result;
+}
+
+// ── Issue #382: Stream cost projection utility ────────────────────────────────
+
+/**
+ * Projects the total token cost for a stream given a per-second flow rate and
+ * a duration, so callers can display the projected spend before creating a stream.
+ *
+ * Issue #382.
+ *
+ * @param ratePerSecond - Flow rate in stroops per second.
+ * @param durationSeconds - Duration of the stream in seconds.
+ * @returns Total projected cost in stroops (`ratePerSecond × durationSeconds`).
+ * @throws {SoroStreamError} When either argument is not positive.
+ *
+ * @example
+ * ```ts
+ * const rate = calculateFlowRate(toStroops("100"), 30 * 24 * 60 * 60);
+ * const cost = projectCost(rate, 30 * 24 * 60 * 60);
+ * console.log(formatUSDC(cost)); // "100.0000000"
+ * ```
+ */
+export function projectCost(ratePerSecond: bigint, durationSeconds: number): bigint {
+  if (ratePerSecond <= 0n) throw new SoroStreamError('ratePerSecond must be > 0');
+  if (durationSeconds <= 0) throw new SoroStreamError('durationSeconds must be > 0');
+  return ratePerSecond * BigInt(Math.floor(durationSeconds));
 }

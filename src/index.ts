@@ -66,10 +66,12 @@ export {
   parseMemo,
   encodeStreamId,
   decodeStreamId,
-  toRatePerSecond,
-  fromRatePerSecond,
+  calculateStreamDelta,
+  buildMetadataUri,
+  parseMetadataUri,
+  projectCost,
 } from './utils.js';
-export type { RateUnit } from './utils.js';
+export type { StreamMetadataFields } from './utils.js';
 export { templates } from './templates.js';
 export { serializeStream, deserializeStream } from './serialization.js';
 export type { SerializedStream } from './serialization.js';
