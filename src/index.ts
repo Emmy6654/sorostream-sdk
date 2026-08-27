@@ -234,11 +234,7 @@ export type {
   SoroStreamClientConfig,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
-  GrantDelegateParams,
-  RevokeDelegateByStreamParams,
-  DiagnosticsResult,
-  AuditLogger,
-  AuditLogEntry,
+  OnStreamUpdateOptions,
 } from './types.js';
 
 export { RecipientValidationError } from './errors.js';
