@@ -1,4 +1,5 @@
 import { Keypair, TransactionBuilder, xdr, hash, nativeToScVal } from '@stellar/stellar-sdk';
+import { WalletConnectSessionExpiredError } from './errors.js';
 import type {
   WalletAdapter,
   Network,
