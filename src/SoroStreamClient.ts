@@ -167,6 +167,7 @@ import type {
   ConfigUpdatedEvent,
   RecipientTrustScore,
   RecipientTrustScoreProvider,
+  OnStreamUpdateOptions,
 } from './types.js';
 import { withRetry, type RetryOptions } from './retry.js';
 import type { EventPollerOptions, StreamRetryPolicy } from './events.js';
@@ -301,6 +302,23 @@ export interface SoroStreamClientOptions {
    * Issue #227.
    */
   auditLog?: boolean;
+  /**
+   * Optional caller-supplied logger for audit events (issue #389).
+   *
+   * When provided, every SDK write operation calls `auditLogger.info(entry)`
+   * in addition to (or instead of) the built-in storage-based audit log.
+   * Any object with an `info` method is accepted (`console`, `pino`, `winston`,
+   * custom loggers, etc.).
+   *
+   * @example
+   * ```ts
+   * const client = new SoroStreamClient({
+   *   // ...
+   *   auditLogger: console,  // or pino(), or winston.createLogger(...)
+   * });
+   * ```
+   */
+  auditLogger?: import('./types.js').AuditLogger;
   /** Auto fee bump configuration (issue #337). */
   feeBumpMonitoring?: FeeBumpMonitoringOptions;
   /** Skip peer dependency check at construction (issue #213). */
@@ -537,6 +555,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   >();
   // Issue #227: audit log toggle
   private readonly auditLogEnabled: boolean;
+  // Issue #389: caller-supplied audit logger
+  private readonly auditLogger: import('./types.js').AuditLogger | undefined;
+  // Issue #391: timestamp of the most recent successful RPC call (ms)
+  private lastRpcTimestampMs: number | null = null;
   // Issue #270: telemetry opt-out flag
   private readonly telemetryEnabled: boolean;
   // Issue #199: injectable storage/fetch adapters (replace direct browser global use)
@@ -674,6 +696,7 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     this.retryPolicy = options.retryPolicy;
     this.batchingOptions = options.batchingOptions;
     this.auditLogEnabled = options.auditLog ?? false;
+    this.auditLogger = options.auditLogger;
     this.telemetryEnabled = options.telemetry !== false;
     this.storageAdapter = options.adapters?.storage ?? getDefaultStorageAdapter();
     this.fetchAdapter = options.adapters?.fetch ?? getDefaultFetchAdapter() ?? fetch;
@@ -930,29 +953,50 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     result?: 'success' | 'error';
     error?: string;
     durationMs: number;
+    txHash?: string;
   }): void {
-    if (!this.auditLogEnabled || !this.storageAdapter) return;
-    try {
-      const raw = this.storageAdapter.getItem(SoroStreamClient.AUDIT_LOG_KEY);
-      const log: unknown[] = raw ? JSON.parse(raw) : [];
-      // Redact keys from params (keep values for debugging)
-      const redacted = entry.params ? this.redactParams(entry.params) : undefined;
-      log.push({
-        timestamp: new Date().toISOString(),
-        network: this.network,
-        operation: entry.operation,
-        params: redacted,
-        result: entry.result,
-        error: entry.error,
-        durationMs: entry.durationMs,
-      });
-      // Circular buffer: keep last N entries
-      while (log.length > SoroStreamClient.AUDIT_LOG_MAX_ENTRIES) {
-        log.shift();
+    const isEnabled = this.auditLogEnabled || this.auditLogger !== undefined;
+    if (!isEnabled) return;
+
+    const timestamp = new Date().toISOString();
+    const network = this.network;
+    const redacted = entry.params ? this.redactParams(entry.params) : undefined;
+
+    // Build the structured entry once, shared between storage and logger paths.
+    const logEntry: import('./types.js').AuditLogEntry = {
+      timestamp,
+      network,
+      operation: entry.operation,
+      params: redacted,
+      result: entry.result ?? 'success',
+      ...(entry.error !== undefined ? { error: entry.error } : {}),
+      durationMs: entry.durationMs,
+      ...(entry.txHash !== undefined ? { txHash: entry.txHash } : {}),
+    };
+
+    // Issue #389: dispatch to caller-supplied logger if provided.
+    if (this.auditLogger) {
+      try {
+        this.auditLogger.info(logEntry);
+      } catch {
+        // never throw from audit logger
       }
-      this.storageAdapter.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
-    } catch {
-      // storage may be unavailable or full — never throw
+    }
+
+    // Issue #227: write to storage-based log when auditLog option is set.
+    if (this.auditLogEnabled && this.storageAdapter) {
+      try {
+        const raw = this.storageAdapter.getItem(SoroStreamClient.AUDIT_LOG_KEY);
+        const log: unknown[] = raw ? JSON.parse(raw) : [];
+        log.push(logEntry);
+        // Circular buffer: keep last N entries
+        while (log.length > SoroStreamClient.AUDIT_LOG_MAX_ENTRIES) {
+          log.shift();
+        }
+        this.storageAdapter.setItem(SoroStreamClient.AUDIT_LOG_KEY, JSON.stringify(log));
+      } catch {
+        // storage may be unavailable or full — never throw
+      }
     }
   }
 
@@ -1040,6 +1084,39 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.networkVersion;
   }
 
+  /**
+   * Returns a snapshot of the client's current runtime state for support and
+   * debugging purposes.
+   *
+   * Issue #391.
+   *
+   * @returns A {@link DiagnosticsResult} containing SDK version, active network,
+   *   wallet adapter name, polling interval, and last successful RPC timestamp.
+   *
+   * @example
+   * ```ts
+   * const info = client.diagnostics();
+   * console.log(info.sdkVersion, info.network, info.lastRpcTimestampMs);
+   * ```
+   */
+  diagnostics(): import('./types.js').DiagnosticsResult {
+    const sdkVersion = '0.1.0'; // From package.json
+
+    // Determine wallet adapter display name.
+    let walletAdapter: string | null = null;
+    if (this.walletAdapter) {
+      const w = this.walletAdapter as { name?: string; adapterName?: string };
+      walletAdapter = w.name ?? w.adapterName ?? 'custom';
+    }
+
+    return {
+      sdkVersion,
+      network: this.network,
+      walletAdapter,
+      pollingIntervalMs: 5_000, // EventPoller default (see events.ts)
+      lastRpcTimestampMs: this.lastRpcTimestampMs,
+    };
+  }
   /**
    * Detects whether the deployed contract supports the `nonce` parameter on
    * `create_stream` by calling `get_version` and inspecting the response.
@@ -1593,8 +1670,12 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         operation: operationName,
         result: 'success',
         durationMs: Date.now() - opStart,
+        txHash: result.hash,
       });
     }
+
+    // Issue #391: track last successful RPC timestamp
+    this.lastRpcTimestampMs = Date.now();
 
     // Issue #271: capture confirmed ledger for RYOW consistency.
     const confirmedLedger: number = (response as unknown as { ledger?: number }).ledger ?? 0;
@@ -1676,7 +1757,10 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         .addOperation(operation)
         .setTimeout(30)
         .build();
-      return this.withBreaker(() => this.server.simulateTransaction(tx));
+      const result = await this.withBreaker(() => this.server.simulateTransaction(tx));
+      // Issue #391: update last successful RPC timestamp
+      this.lastRpcTimestampMs = Date.now();
+      return result;
     });
   }
 
@@ -2985,6 +3069,90 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
     return this.on('StreamResumed', callback);
   }
 
+  /**
+   * Subscribes to live state changes for a specific stream by polling.
+   *
+   * The callback is invoked each time the stream's state changes between
+   * poll cycles — including status transitions (Active → Cancelled),
+   * balance changes, and any other field mutations.
+   *
+   * @param streamId - The stream to watch.
+   * @param callback - Called with `{ stream, previous, streamId }` on each state change.
+   * @param options - Optional polling configuration.
+   * @param options.pollIntervalMs - How often to poll (default 5000 ms).
+   * @param options.immediate - When true, call the callback immediately with the current state.
+   * @returns A `StreamSubscription` — call `.unsubscribe()` to stop polling.
+   *
+   * @example
+   * ```ts
+   * const sub = client.onStreamUpdate("42", ({ stream, previous }) => {
+   *   if (previous && stream.status !== previous.status) {
+   *     console.log(`Stream status changed: ${previous.status} → ${stream.status}`);
+   *   }
+   * });
+   * // Later:
+   * sub.unsubscribe();
+   * ```
+   */
+  onStreamUpdate(
+    streamId: string,
+    callback: (payload: { stream: Stream; previous: Stream | undefined; streamId: string }) => void,
+    options?: OnStreamUpdateOptions,
+  ): StreamSubscription {
+    const pollIntervalMs = options?.pollIntervalMs ?? 5_000;
+    let previous: Stream | undefined = undefined;
+    let stopped = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const stream = await this.getStream(streamId);
+        const hasChanged =
+          previous === undefined ||
+          stream.status !== previous.status ||
+          stream.deposit !== previous.deposit ||
+          stream.lastWithdrawTime !== previous.lastWithdrawTime ||
+          stream.endTime !== previous.endTime ||
+          stream.flowRate !== previous.flowRate ||
+          stream.pausedAt !== previous.pausedAt;
+
+        if (hasChanged) {
+          callback({ stream, previous, streamId });
+          previous = stream;
+        }
+      } catch {
+        // RPC errors are silently swallowed so the poller stays alive.
+        // Callers that need error visibility should use getStream directly.
+      }
+      if (!stopped) {
+        timerId = setTimeout(() => void poll(), pollIntervalMs);
+        if (timerId && typeof (timerId as unknown as { unref?: () => void }).unref === 'function') {
+          (timerId as unknown as { unref: () => void }).unref();
+        }
+      }
+    };
+
+    if (options?.immediate) {
+      void poll();
+    } else {
+      timerId = setTimeout(() => void poll(), pollIntervalMs);
+      if (timerId && typeof (timerId as unknown as { unref?: () => void }).unref === 'function') {
+        (timerId as unknown as { unref: () => void }).unref();
+      }
+    }
+
+    return {
+      unsubscribe: () => {
+        stopped = true;
+        if (timerId !== null) {
+          clearTimeout(timerId);
+          timerId = null;
+        }
+      },
+    };
+  }
+
   // ── Read methods (with retry) ────────────────────────────────────────────────
   // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -3934,6 +4102,34 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
   }
 
   /**
+   * Returns paginated on-chain events for a given stream.
+   *
+   * Each page contains up to `limit` events (default 100) in ledger order,
+   * plus a `cursor` value you can pass to the next call to retrieve the
+   * following page.
+   *
+   * @param streamId - The stream to query.
+   * @param cursor - Opaque pagination cursor from the previous page (omit for first page).
+   * @param limit - Maximum number of events per page (default 100).
+   * @returns `{ events, cursor, latestLedger }` — typed stream events and pagination state.
+   *
+   * @example
+   * ```ts
+   * const page1 = await client.getStreamHistory("42");
+   * const page2 = await client.getStreamHistory("42", page1.cursor, 50);
+   * ```
+   */
+  async getStreamHistory(
+    streamId: string,
+    cursor?: string,
+    limit?: number,
+  ): Promise<import('./indexer.js').PaginatedEvents> {
+    const { StreamIndexer } = await import('./indexer.js');
+    const indexer = new StreamIndexer(this.server, this.contract.contractId());
+    return indexer.getStreamHistory(streamId, { cursor, limit });
+  }
+
+  /**
    * Retrieves paginated transaction history for a specific stream from Horizon API (issue #200).
    *
    * @param streamId - The stream ID to query
@@ -4317,6 +4513,123 @@ export class SoroStreamClient<TEventData = Record<string, unknown>> {
         options?.memo,
       );
       return { txHash };
+    });
+  }
+
+  // ── Issue #329: Stream-scoped delegation API ─────────────────────────────
+
+  /**
+   * Grants a delegate address permission to call `withdraw` on a specific
+   * stream on behalf of the stream sender.
+   *
+   * Unlike {@link addDelegate} (account-level delegation), this method is
+   * scoped to a single stream identified by `streamId`.
+   *
+   * Issue #329.
+   *
+   * @param streamId - The ID of the stream to grant delegation on.
+   * @param delegate - The address to authorize as a delegate for this stream.
+   * @param options - Optional write parameters (memo, feeBump, signal).
+   * @returns Object containing the confirming transaction hash.
+   * @throws {StreamNotFoundError} If the stream does not exist.
+   * @throws {InvalidAddressError} If `delegate` is not a valid Stellar address.
+   */
+  async grantDelegate(
+    streamId: string,
+    delegate: string,
+    options?: WriteOptions,
+  ): Promise<{ txHash: string }> {
+    return this.runWithMiddleware('grantDelegate', [streamId, delegate], async () => {
+      validateStringLength('streamId', streamId);
+      validateStringLength('delegate', delegate);
+      if (!isValidStellarAddress(delegate)) {
+        throw new InvalidAddressError(delegate);
+      }
+      const sender = await this.requireWalletAdapter().getPublicKey();
+      const operation = this.contract.call(
+        'grant_stream_delegate',
+        nativeToScVal(sender, { type: 'address' }),
+        nativeToScVal(streamId, { type: 'string' }),
+        nativeToScVal(delegate, { type: 'address' }),
+      );
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const { txHash } = await this.buildAndSubmit(
+        operation,
+        options?.signal,
+        feeBump,
+        'grantDelegate',
+        options?.memo,
+      );
+      return { txHash };
+    });
+  }
+
+  /**
+   * Revokes a previously granted stream-level delegation.
+   *
+   * Removes the `delegate` address from the list of addresses authorised to
+   * call `withdraw` on `streamId` on behalf of the stream sender.
+   *
+   * Issue #329.
+   *
+   * @param streamId - The ID of the stream to revoke delegation from.
+   * @param delegate - The address to remove from the stream's delegate list.
+   * @param options - Optional write parameters (memo, feeBump, signal).
+   * @returns Object containing the confirming transaction hash.
+   * @throws {StreamNotFoundError} If the stream does not exist.
+   * @throws {InvalidAddressError} If `delegate` is not a valid Stellar address.
+   */
+  async revokeDelegateFromStream(
+    streamId: string,
+    delegate: string,
+    options?: WriteOptions,
+  ): Promise<{ txHash: string }> {
+    return this.runWithMiddleware('revokeDelegateFromStream', [streamId, delegate], async () => {
+      validateStringLength('streamId', streamId);
+      validateStringLength('delegate', delegate);
+      if (!isValidStellarAddress(delegate)) {
+        throw new InvalidAddressError(delegate);
+      }
+      const sender = await this.requireWalletAdapter().getPublicKey();
+      const operation = this.contract.call(
+        'revoke_stream_delegate',
+        nativeToScVal(sender, { type: 'address' }),
+        nativeToScVal(streamId, { type: 'string' }),
+        nativeToScVal(delegate, { type: 'address' }),
+      );
+      const feeBump = this.resolveFeeBump(options?.feeBump);
+      const { txHash } = await this.buildAndSubmit(
+        operation,
+        options?.signal,
+        feeBump,
+        'revokeDelegateFromStream',
+        options?.memo,
+      );
+      return { txHash };
+    });
+  }
+
+  /**
+   * Returns all delegates currently authorised for a specific stream.
+   *
+   * Issue #329.
+   *
+   * @param streamId - The stream ID to query delegates for.
+   * @returns Array of authorized delegate addresses, or an empty array.
+   */
+  async getStreamDelegates(streamId: string): Promise<string[]> {
+    return this.runWithMiddleware('getStreamDelegates', [streamId], async () => {
+      validateStringLength('streamId', streamId);
+      const operation = this.contract.call(
+        'get_stream_delegates',
+        nativeToScVal(streamId, { type: 'string' }),
+      );
+      const result = await this.simulateOp(operation);
+      if (rpc.Api.isSimulationSuccess(result) && result.result) {
+        const delegates = scValToNative(result.result.retval) as string[];
+        return Array.isArray(delegates) ? delegates : [];
+      }
+      return [];
     });
   }
 }
