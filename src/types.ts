@@ -319,6 +319,21 @@ export interface RevokeDelegateParams {
   delegate: string;
 }
 
+/**
+ * Summary object passed to the {@link WatchClaimableOptions.onStreamCompleted} callback
+ * when a watched stream reaches its end time.
+ *
+ * Issue #385.
+ */
+export interface StreamCompletedSummary {
+  /** The stream ID that completed. */
+  streamId: string;
+  /** Total tokens streamed from startTime to endTime (deposit in stroops). */
+  totalStreamed: bigint;
+  /** Unix timestamp (seconds) when the stream ended. */
+  endTime: number;
+}
+
 /** Options for {@link watchClaimable}. */
 export interface WatchClaimableOptions {
   /** Interval in ms between interpolation ticks (default: 200). */
@@ -364,6 +379,23 @@ export interface WatchClaimableOptions {
    * global (issue #199).
    */
   webSocketFactory?: WebSocketFactory;
+  /**
+   * Called once when the watched stream reaches its `endTime`.
+   * Receives the stream ID and a {@link StreamCompletedSummary} with the
+   * total tokens streamed and the stream's end timestamp.
+   *
+   * Issue #385.
+   *
+   * @example
+   * ```ts
+   * watchClaimable(stream, reconcile, onTick, {
+   *   onStreamCompleted: (streamId, summary) => {
+   *     console.log(`Stream ${streamId} finished. Total streamed: ${summary.totalStreamed}`);
+   *   },
+   * });
+   * ```
+   */
+  onStreamCompleted?: (streamId: string, summary: StreamCompletedSummary) => void;
 }
 
 /** Options for {@link watchTotalClaimable}. */

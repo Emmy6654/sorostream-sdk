@@ -6,7 +6,8 @@ import {
 } from './errors.js';
 import { getDefaultWebSocketFactory } from './adapters.js';
 import type { FetchAdapter, WebSocketFactory } from './adapters.js';
-import { Memo } from '@stellar/stellar-sdk';
+import { Memo, TransactionBuilder, Transaction, Networks } from '@stellar/stellar-sdk';
+import type { FeeBumpTransaction } from '@stellar/stellar-sdk';
 import type {
   PriceFeedAdapter,
   Stream,
@@ -689,6 +690,22 @@ export function watchClaimable(
   let lastEmitted: bigint | null = null;
   let stopped = false;
   let lastNetworkVersion = options?.getNetworkVersion?.();
+  // Issue #385: fire onStreamCompleted exactly once when stream reaches endTime.
+  let completedFired = false;
+
+  function maybeFireCompleted(): void {
+    if (completedFired || stopped || !options?.onStreamCompleted) return;
+    const nowSecs = Date.now() / 1000;
+    if (nowSecs >= stream.endTime) {
+      completedFired = true;
+      const summary: StreamCompletedSummary = {
+        streamId: stream.id,
+        totalStreamed: stream.deposit,
+        endTime: stream.endTime,
+      };
+      options.onStreamCompleted(stream.id, summary);
+    }
+  }
 
   function emit() {
     if (stopped) return;
@@ -709,6 +726,8 @@ export function watchClaimable(
     if (interpolated === lastEmitted) return;
     lastEmitted = interpolated;
     onTick(interpolated);
+    // Issue #385: check completion on every tick.
+    maybeFireCompleted();
   }
 
   // Seed the dedupe cache BEFORE the initial onTick so that a re-entrant
@@ -750,6 +769,8 @@ export function watchClaimable(
       baseValue = actual;
       baseTime = Date.now();
       emit();
+      // Issue #385: also check completion after each reconcile.
+      maybeFireCompleted();
     } catch {
       // swallow — keep interpolating from last known value
     }
@@ -1065,6 +1086,69 @@ export function totalValueStreamed(streams: Stream[]): StreamTotals {
     totalClaimable,
     totalClaimed,
     totalRemaining,
+  };
+}
+
+// ── Issue #386: aggregateStreams ──────────────────────────────────────────────
+
+/**
+ * Computes cross-stream analytics — total value locked, average flow rate, and
+ * a per-status breakdown — across any set of streams.
+ *
+ * Unlike {@link totalValueStreamed} (which sums all deposits), `totalValueLocked`
+ * reflects only the remaining deposits held by active streams, making it a
+ * meaningful on-chain "TVL" metric for dashboards.
+ *
+ * @param streams - Stream list (may be empty; all statuses are accepted).
+ * @returns An {@link StreamsAggregate} object with TVL, averageRate, and statusBreakdown.
+ *
+ * @example
+ * ```ts
+ * const agg = aggregateStreams(await client.getStreamsBySender(sender));
+ * console.log(formatUSDC(agg.totalValueLocked)); // e.g. "9500.0000000"
+ * console.log(agg.statusBreakdown); // { active: 3, cancelled: 1, completed: 2 }
+ * ```
+ *
+ * Issue #386.
+ */
+export function aggregateStreams(streams: Stream[]): StreamsAggregate {
+  let totalValueLocked = 0n;
+  let rateSum = 0n;
+  let activeCount = 0;
+  let cancelled = 0;
+  let completed = 0;
+
+  const nowSecs = Math.floor(Date.now() / 1000);
+
+  for (const s of streams) {
+    if (s.status === 'Active') {
+      activeCount++;
+      // TVL: deposit minus what has already been released by the stream.
+      // Released = flowRate × elapsed, where elapsed = min(now, endTime) - startTime.
+      const effectiveNow = Math.min(nowSecs, s.endTime);
+      const elapsedSecs = BigInt(Math.max(0, effectiveNow - s.startTime));
+      const released = s.flowRate * elapsedSecs;
+      const remaining = s.deposit > released ? s.deposit - released : 0n;
+      totalValueLocked += remaining;
+      rateSum += s.flowRate;
+    } else if (s.status === 'Cancelled') {
+      cancelled++;
+    } else if (s.status === 'Completed') {
+      completed++;
+    }
+  }
+
+  const averageRate = activeCount > 0 ? rateSum / BigInt(activeCount) : 0n;
+
+  return {
+    totalStreams: streams.length,
+    totalValueLocked,
+    averageRate,
+    statusBreakdown: {
+      active: activeCount,
+      cancelled,
+      completed,
+    },
   };
 }
 
