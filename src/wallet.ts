@@ -715,3 +715,257 @@ export function createKmsWalletAdapter(config: KmsWalletAdapterConfig): WalletAd
 
 /** Alias for createKmsWalletAdapter. */
 export const createKmsAdapter = createKmsWalletAdapter;
+
+// ── Issue #367: WalletConnect v2 adapter ─────────────────────────────────────
+
+/**
+ * Configuration for the WalletConnect v2 adapter.
+ */
+export interface WalletConnectV2AdapterConfig {
+  /** WalletConnect Cloud project ID (required for v2 protocol). */
+  projectId: string;
+  /** Optional relay URL. Defaults to WalletConnect's default relay. */
+  relayUrl?: string;
+  /** Optional metadata for the dapp (displayed in the wallet approval prompt). */
+  metadata?: {
+    name?: string;
+    description?: string;
+    url?: string;
+    icons?: string[];
+  };
+  /** Optional chain ID to request (default: "stellar:pubnet" or "stellar:testnet"). */
+  chainId?: string;
+}
+
+type WalletConnectSignClient = {
+  init(config: unknown): Promise<void>;
+  connect(params: {
+    requiredNamespaces: Record<string, { methods: string[]; chains: string[]; events: string[] }>;
+  }): Promise<{
+    topic: string;
+    namespaces: Record<string, { accounts: string[]; methods: string[]; events: string[] }>;
+  }>;
+  disconnect(params: { topic: string; reason: unknown }): Promise<void>;
+  on(event: string, callback: (...args: unknown[]) => void): void;
+  off(event: string, callback: (...args: unknown[]) => void): void;
+  request(params: {
+    topic: string;
+    chainId: string;
+    request: { method: string; params: unknown };
+  }): Promise<unknown>;
+};
+
+type WalletConnectSignClientModule = {
+  default?: { init?(config: unknown): Promise<WalletConnectSignClient> };
+  init?(config: unknown): Promise<WalletConnectSignClient>;
+};
+
+/**
+ * Creates a WalletAdapter backed by WalletConnect v2, enabling mobile wallet
+ * users to connect via QR code or deep link (issue #367).
+ *
+ * Dynamically imports `@walletconnect/sign-client` to avoid SSR issues.
+ *
+ * @example
+ * ```ts
+ * import { createWalletConnectV2Adapter } from "@sorostream/sdk/wallets";
+ *
+ * const adapter = await createWalletConnectV2Adapter({
+ *   projectId: "YOUR_WALLETCONNECT_PROJECT_ID",
+ *   metadata: {
+ *     name: "My SoroStream App",
+ *     description: "Streaming payments on Stellar",
+ *     url: "https://myapp.example.com",
+ *   },
+ * });
+ *
+ * const client = new SoroStreamClient({
+ *   network: "testnet",
+ *   contractId: "YOUR_CONTRACT_ID",
+ *   walletAdapter: adapter,
+ * });
+ * ```
+ */
+export async function createWalletConnectV2Adapter(
+  config: WalletConnectV2AdapterConfig,
+): Promise<WalletAdapter> {
+  let mod: WalletConnectSignClientModule;
+  try {
+    mod = (await import('@walletconnect/sign-client')) as unknown as WalletConnectSignClientModule;
+  } catch {
+    throw new Error(
+      'WalletConnect Sign Client is not installed. ' +
+        'Run: npm install @walletconnect/sign-client',
+    );
+  }
+
+  const initFn = mod.default?.init ?? mod.init;
+  if (typeof initFn !== 'function') {
+    throw new Error('WalletConnect Sign Client init function not found');
+  }
+
+  const signClient = await initFn({
+    projectId: config.projectId,
+    relayUrl: config.relayUrl,
+    metadata: config.metadata,
+  });
+
+  const chainId = config.chainId ?? 'stellar:pubnet';
+  let sessionTopic: string | null = null;
+  let publicKey: string | null = null;
+
+  async function ensureSession(): Promise<string> {
+    if (sessionTopic) return sessionTopic;
+
+    const { topic, namespaces } = await signClient.connect({
+      requiredNamespaces: {
+        stellar: {
+          methods: ['stellar_signXDR'],
+          chains: [chainId],
+          events: [],
+        },
+      },
+    });
+
+    sessionTopic = topic;
+
+    // Extract the Stellar public key from the returned namespace accounts
+    const stellarNs = namespaces['stellar'];
+    if (stellarNs?.accounts?.length) {
+      // Account format: "stellar:pubnet:GABC..."
+      const parts = stellarNs.accounts[0]!.split(':');
+      publicKey = parts[2] ?? null;
+    }
+
+    if (!publicKey) {
+      throw new Error('WalletConnect session did not return a Stellar public key');
+    }
+
+    return sessionTopic;
+  }
+
+  // Handle session disconnect events
+  signClient.on('session_delete', () => {
+    sessionTopic = null;
+    publicKey = null;
+  });
+
+  return {
+    async isConnected(): Promise<boolean> {
+      return sessionTopic !== null;
+    },
+
+    async getPublicKey(): Promise<string> {
+      await ensureSession();
+      return publicKey!;
+    },
+
+    async signTransaction(xdrStr: string, network: Network): Promise<string> {
+      const topic = await ensureSession();
+      const passphrase = NETWORK_PASSPHRASES[network];
+
+      const result = (await signClient.request({
+        topic,
+        chainId,
+        request: {
+          method: 'stellar_signXDR',
+          params: {
+            xdr: xdrStr,
+            networkPassphrase: passphrase,
+          },
+        },
+      })) as { signedXdr?: string; signed_tx_xdr?: string } | string;
+
+      if (typeof result === 'string') return result;
+      return result.signedXdr ?? result.signed_tx_xdr ?? xdrStr;
+    },
+
+    /**
+     * Disconnects the WalletConnect session, releasing resources.
+     */
+    async disconnect(): Promise<void> {
+      if (!sessionTopic) return;
+      try {
+        await signClient.disconnect({
+          topic: sessionTopic,
+          reason: { code: 6000, message: 'User disconnected' },
+        });
+      } catch {
+        // Session may already be expired
+      }
+      sessionTopic = null;
+      publicKey = null;
+    },
+  } as WalletAdapter & { disconnect(): Promise<void> };
+}
+
+// ── Issue #368: XDEFI wallet adapter ─────────────────────────────────────────
+
+type XDEFIModule = {
+  stellar: {
+    isConnected(): Promise<boolean>;
+    getPublicKey(): Promise<string>;
+    sign(xdr: string, opts?: { networkPassphrase?: string }): Promise<string>;
+  };
+};
+
+/**
+ * Creates a WalletAdapter backed by the XDEFI Wallet browser extension
+ * (issue #368). Dynamically imports the XDEFI window provider to avoid SSR issues.
+ *
+ * @example
+ * ```ts
+ * import { createXDEFIAdapter } from "@sorostream/sdk/wallets";
+ *
+ * const adapter = await createXDEFIAdapter();
+ * const client = new SoroStreamClient({
+ *   network: "testnet",
+ *   contractId: "YOUR_CONTRACT_ID",
+ *   walletAdapter: adapter,
+ * });
+ * ```
+ */
+export async function createXDEFIAdapter(): Promise<WalletAdapter> {
+  if (typeof window === 'undefined') {
+    throw new Error('XDEFI adapter is only available in browser environments');
+  }
+
+  // XDEFI injects `window.xdefi` (or `window.xfi`) with a Stellar provider
+  const xdefi = (window as Record<string, unknown>)['xdefi'] as XDEFIModule | undefined;
+  const xfi = (window as Record<string, unknown>)['xfi'] as XDEFIModule | undefined;
+  const provider = xdefi?.stellar ?? xfi?.stellar;
+
+  if (!provider) {
+    throw new Error(
+      'XDEFI Wallet is not installed. ' +
+        'Visit https://xdefi.com to install the browser extension.',
+    );
+  }
+
+  return {
+    async isConnected(): Promise<boolean> {
+      try {
+        return await provider.isConnected();
+      } catch {
+        return false;
+      }
+    },
+
+    async getPublicKey(): Promise<string> {
+      const connected = await provider.isConnected();
+      if (!connected) {
+        throw new Error('XDEFI Wallet is not connected');
+      }
+      return provider.getPublicKey();
+    },
+
+    async signTransaction(xdrStr: string, network: Network): Promise<string> {
+      const connected = await provider.isConnected();
+      if (!connected) {
+        throw new Error('XDEFI Wallet is not connected');
+      }
+      const passphrase = NETWORK_PASSPHRASES[network];
+      return provider.sign(xdrStr, { networkPassphrase: passphrase });
+    },
+  };
+}

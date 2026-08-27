@@ -331,31 +331,23 @@ export class RecipientValidationError extends SoroStreamError {
 }
 
 /**
- * Thrown when a caller-supplied stream ID is not a valid non-negative u64
- * decimal string (issue #458). Caught before the value is converted to a
- * `BigInt` and interpolated into a contract call, so a malformed ID fails
- * with a clear message instead of a raw `SyntaxError` or an opaque
- * contract-level rejection.
+ * Thrown when a non-TLS (`http://`) RPC endpoint URL is supplied to the SDK
+ * (constructor, `setNetwork`, or `updateConfig`) for a non-loopback host
+ * (issue #463). Transaction data — including signed envelopes — must never
+ * be routed over an unencrypted connection. Loopback hosts (`localhost`,
+ * `127.0.0.1`, `::1`) are exempt to keep local Soroban quickstart workflows
+ * working.
  */
-export class InvalidStreamIdError extends SoroStreamError {
-  constructor(streamId: string) {
-    super(`Invalid stream ID: ${streamId}`);
-    this.name = 'InvalidStreamIdError';
-  }
-}
+export class InsecureRpcUrlError extends SoroStreamError {
+  /** The rejected RPC URL. */
+  readonly rpcUrl: string;
 
-/**
- * Thrown when the signed XDR envelope returned by a wallet adapter does not
- * match the transaction that was submitted for signing (issue #459). Caught
- * before the signed transaction is broadcast, so an unexpectedly mutated
- * operation, amount, address, source account, sequence number, or fee never
- * reaches the network.
- */
-export class TransactionMutatedError extends SoroStreamError {
-  constructor(reason: string) {
+  constructor(rpcUrl: string) {
     super(
-      `Signed transaction envelope does not match the transaction submitted for signing: ${reason}`,
+      `Insecure RPC URL "${rpcUrl}": non-TLS "http://" endpoints are not allowed. ` +
+        'Use an "https://" URL, or a loopback host (localhost/127.0.0.1) for local development.',
     );
-    this.name = 'TransactionMutatedError';
+    this.name = 'InsecureRpcUrlError';
+    this.rpcUrl = rpcUrl;
   }
 }

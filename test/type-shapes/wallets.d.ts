@@ -10,16 +10,6 @@
  * // Node / server (no browser code pulled in)
  * import { SoroStreamClient } from "@sorostream/sdk";
  */
-export {
-  createFreighterAdapter,
-  connectWallet,
-  createMultisigAdapter,
-  createClaimDelegateAdapter,
-  KmsWalletAdapter,
-  createKmsWalletAdapter,
-  createKmsAdapter,
-  createWalletConnectV2Adapter,
-  createXDEFIAdapter,
-} from './wallet.js';
-export type { ClaimDelegateConfig, WalletConnectV2AdapterConfig } from './wallet.js';
+export { createFreighterAdapter, connectWallet, createMultisigAdapter, createClaimDelegateAdapter, KmsWalletAdapter, createKmsWalletAdapter, createKmsAdapter, } from './wallet.js';
+export type { ClaimDelegateConfig } from './wallet.js';
 export type { KmsWalletAdapterConfig } from './types.js';
