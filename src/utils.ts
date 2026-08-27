@@ -1,4 +1,9 @@
-import { SoroStreamError, SoroStreamValidationError, FederationResolutionError } from './errors.js';
+import {
+  SoroStreamError,
+  SoroStreamValidationError,
+  FederationResolutionError,
+  InsecureRpcUrlError,
+} from './errors.js';
 import { getDefaultWebSocketFactory } from './adapters.js';
 import type { FetchAdapter, WebSocketFactory } from './adapters.js';
 import { Memo } from '@stellar/stellar-sdk';
@@ -26,6 +31,7 @@ import type {
   HorizonTransactionRecord,
   ParsedMemo,
   MemoHash,
+  StreamHealthResult,
 } from './types.js';
 
 /** A single point in a stream's payout forecast. */
@@ -40,13 +46,19 @@ const STROOP_FACTOR = 10_000_000n;
 
 /**
  * Converts a token amount (as a decimal string like "100.50") to stroops/smallest unit.
- * @param amount - Amount as a decimal string.
+ * Also handles scientific notation strings like "1e-3", "1.5e7", "2.5E-4".
+ * @param amount - Amount as a decimal string (may be in scientific notation).
  * @param decimals - Number of decimal places the token uses (default 7 for SAC).
  */
 export function toStroops(amount: string, decimals: number = 7): bigint {
   const trimmed = amount.trim();
-  const negative = trimmed.startsWith('-');
-  const unsigned = negative ? trimmed.slice(1) : trimmed;
+
+  // Issue #451: expand scientific notation (e.g. "1e-3" → "0.001", "1.5e7" → "15000000")
+  // before splitting on the decimal point so fractional exponents parse correctly.
+  const expanded = /[eE]/.test(trimmed) ? expandScientific(trimmed) : trimmed;
+
+  const negative = expanded.startsWith('-');
+  const unsigned = negative ? expanded.slice(1) : expanded;
   const [whole = '0', decimal = ''] = unsigned.split('.');
   const factor = 10n ** BigInt(decimals);
 
@@ -63,6 +75,38 @@ export function toStroops(amount: string, decimals: number = 7): bigint {
     }
   }
   return negative ? -value : value;
+}
+
+/**
+ * Expands a number string in scientific notation into a plain decimal string.
+ * e.g. "1e-3" → "0.001", "1.5e7" → "15000000", "-2.5e-4" → "-0.00025"
+ * @internal
+ */
+function expandScientific(s: string): string {
+  // Match optional sign, significand (with optional decimal), and exponent.
+  const match = s.match(/^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/);
+  if (!match) return s; // not parseable as scientific — let the caller handle it
+
+  const sign = match[1] ?? '';
+  const intPart = match[2] ?? '0';
+  const fracPart = match[3] ?? '';
+  const exp = parseInt(match[4]!, 10);
+
+  // Combine significand digits (integer + fractional), then apply exponent.
+  const digits = intPart + fracPart;
+  // The decimal point was after intPart.length digits; after the shift it's at:
+  const dotPos = intPart.length + exp;
+
+  if (dotPos <= 0) {
+    // All digits are to the right of the decimal point (e.g. 1e-3 → 0.001)
+    return sign + '0.' + '0'.repeat(-dotPos) + digits;
+  } else if (dotPos >= digits.length) {
+    // All digits are to the left of the decimal point (e.g. 1.5e7 → 15000000)
+    return sign + digits + '0'.repeat(dotPos - digits.length);
+  } else {
+    // Mixed (e.g. 1.234e1 → 12.34)
+    return sign + digits.slice(0, dotPos) + '.' + digits.slice(dotPos);
+  }
 }
 
 /**
@@ -159,6 +203,31 @@ export function detectNetworkFromRpcUrl(rpcUrl: string): Network | undefined {
   return undefined;
 }
 
+/** Loopback hosts exempt from the HTTPS-only RPC URL requirement (local dev). */
+const LOOPBACK_RPC_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Rejects non-TLS (`http://`) RPC endpoint URLs so transaction data — including
+ * signed envelopes — is never routed over an unencrypted connection (issue #463).
+ *
+ * Loopback hosts (`localhost`, `127.0.0.1`, `::1`) are exempt so local Soroban
+ * quickstart / standalone-network workflows keep working. URLs that fail to
+ * parse are left for the RPC transport to reject with its own error.
+ *
+ * @throws {InsecureRpcUrlError} When `rpcUrl` is an `http://` URL for a non-loopback host.
+ */
+export function assertSecureRpcUrl(rpcUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(rpcUrl);
+  } catch {
+    return;
+  }
+  if (parsed.protocol === 'http:' && !LOOPBACK_RPC_HOSTS.has(parsed.hostname)) {
+    throw new InsecureRpcUrlError(rpcUrl);
+  }
+}
+
 /**
  * Checks whether a string looks like a valid Stellar address (account or contract).
  */
@@ -243,6 +312,60 @@ export function calculateFlowRate(totalAmount: bigint, durationSeconds: number):
   if (totalAmount <= 0n) throw new SoroStreamError('totalAmount must be > 0');
   if (durationSeconds <= 0) throw new SoroStreamError('durationSeconds must be > 0');
   return totalAmount / BigInt(durationSeconds);
+}
+
+/** Time unit for {@link toRatePerSecond} and {@link fromRatePerSecond}. */
+export type RateUnit = 'second' | 'minute' | 'hour' | 'day' | 'week';
+
+const RATE_UNIT_SECONDS: Record<RateUnit, bigint> = {
+  second: 1n,
+  minute: 60n,
+  hour: 3_600n,
+  day: 86_400n,
+  week: 604_800n,
+};
+
+/**
+ * Converts a human-readable token amount per `unit` into a stroop-per-second
+ * on-chain flow rate.
+ *
+ * @param amount - Total stroops flowing per `unit` (e.g. `toStroops("10")` for 10 USDC/day).
+ * @param unit - The time unit the `amount` refers to (default `"second"`).
+ * @returns The equivalent flow rate in stroops per second (integer division).
+ * @throws {SoroStreamError} When `amount` is not positive.
+ *
+ * @example
+ * ```ts
+ * // 10 USDC per day expressed as stroops/second
+ * const rate = toRatePerSecond(toStroops("10"), "day");
+ * ```
+ */
+export function toRatePerSecond(amount: bigint, unit: RateUnit = 'second'): bigint {
+  if (amount <= 0n) throw new SoroStreamError('amount must be > 0');
+  const unitSeconds = RATE_UNIT_SECONDS[unit];
+  return amount / unitSeconds;
+}
+
+/**
+ * Converts a stroop-per-second on-chain flow rate back into a human-readable
+ * stroops-per-`unit` value.
+ *
+ * @param stroopsPerSecond - The raw on-chain flow rate in stroops/second.
+ * @param unit - The time unit to normalise into (default `"second"`).
+ * @returns The equivalent amount of stroops that flow within one `unit`.
+ * @throws {SoroStreamError} When `stroopsPerSecond` is negative.
+ *
+ * @example
+ * ```ts
+ * // How many stroops flow per day?
+ * const dailyStroops = fromRatePerSecond(stream.flowRate, "day");
+ * console.log(formatUSDC(dailyStroops)); // "10.0000000"
+ * ```
+ */
+export function fromRatePerSecond(stroopsPerSecond: bigint, unit: RateUnit = 'second'): bigint {
+  if (stroopsPerSecond < 0n) throw new SoroStreamError('stroopsPerSecond must be >= 0');
+  const unitSeconds = RATE_UNIT_SECONDS[unit];
+  return stroopsPerSecond * unitSeconds;
 }
 
 /**
@@ -1568,4 +1691,129 @@ export function parseMemo(value: string | null | undefined): import('@stellar/st
     return Memo.hash(value);
   }
   return Memo.text(value);
+}
+
+// ── Issue #398: getStreamHealth ──────────────────────────────────────────────
+
+/**
+ * Returns a health score (0–100) and status string for a stream based on its
+ * remaining balance, elapsed time, and last withdrawal timestamp.
+ *
+ * Scoring rules:
+ * - **100** — stream is healthy: on track, no stall, no underfunding.
+ * - **60–99** — warning: stalled (no recent withdrawal) or > 90 % elapsed with
+ *   balance remaining.
+ * - **0–59** — critical: severely stalled, near-drained, or underfunded.
+ * - **"completed"** — stream has ended and `status === 'Completed'`.
+ * - **"cancelled"** — stream has `status === 'Cancelled'`.
+ *
+ * @param stream - The stream to evaluate.
+ * @param now - Optional override for "now" in Unix seconds (default: `Date.now() / 1000`).
+ * @returns A {@link StreamHealthResult} with numeric score and diagnostic messages.
+ *
+ * @example
+ * ```ts
+ * import { getStreamHealth } from '@sorostream/sdk';
+ *
+ * const health = getStreamHealth(stream);
+ * if (health.status === 'critical') {
+ *   console.warn(`Stream is at risk: ${health.diagnostics.join(', ')}`);
+ * }
+ * ```
+ */
+export function getStreamHealth(stream: Stream, now?: number): StreamHealthResult {
+  const nowSecs = now ?? Math.floor(Date.now() / 1000);
+  const diagnostics: string[] = [];
+
+  // ── Terminal states ──────────────────────────────────────────────────────
+  if (stream.status === 'Cancelled') {
+    return {
+      score: 0,
+      status: 'cancelled',
+      remainingBalance: 0n,
+      elapsedSeconds: 0,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: 0,
+      diagnostics: ['Stream has been cancelled'],
+    };
+  }
+
+  if (stream.status === 'Completed') {
+    return {
+      score: 100,
+      status: 'completed',
+      remainingBalance: 0n,
+      elapsedSeconds: stream.endTime - stream.startTime,
+      remainingSeconds: 0,
+      secondsSinceLastWithdrawal: Math.max(0, nowSecs - stream.lastWithdrawTime),
+      diagnostics: [],
+    };
+  }
+
+  // ── Active / Paused ──────────────────────────────────────────────────────
+  const duration = stream.endTime - stream.startTime;
+  const elapsedSeconds = Math.max(0, Math.min(nowSecs - stream.startTime, duration));
+  const remainingSeconds = Math.max(0, stream.endTime - nowSecs);
+
+  // Remaining balance = deposit − (flowRate × elapsed since start, capped at deposit)
+  const streamedSoFar = stream.flowRate * BigInt(elapsedSeconds);
+  const remainingBalance =
+    stream.deposit > streamedSoFar ? stream.deposit - streamedSoFar : 0n;
+
+  const secondsSinceLastWithdrawal =
+    stream.lastWithdrawTime > 0 ? Math.max(0, nowSecs - stream.lastWithdrawTime) : 0;
+
+  // ── Scoring ──────────────────────────────────────────────────────────────
+  let score = 100;
+
+  // Check for stall: recipient hasn't withdrawn in > 10 % of stream duration
+  const stallThreshold = Math.max(60, Math.floor(duration * 0.1));
+  const isStalled =
+    stream.lastWithdrawTime > 0 && secondsSinceLastWithdrawal > stallThreshold;
+  if (isStalled) {
+    const penalty = Math.min(40, Math.floor((secondsSinceLastWithdrawal / stallThreshold) * 20));
+    score -= penalty;
+    diagnostics.push(
+      `No withdrawal in ${secondsSinceLastWithdrawal}s (stall threshold: ${stallThreshold}s)`,
+    );
+  }
+
+  // Check underfunding: remaining balance can't cover what's left to stream
+  const remainingToStream = stream.flowRate * BigInt(remainingSeconds);
+  const isUnderfunded = remainingBalance < remainingToStream;
+  if (isUnderfunded) {
+    score -= 30;
+    diagnostics.push(
+      `Underfunded: remaining balance (${remainingBalance}) < remaining payout (${remainingToStream})`,
+    );
+  }
+
+  // Check near-expiry with balance: > 90 % elapsed but balance still locked
+  const elapsedFraction = duration > 0 ? elapsedSeconds / duration : 0;
+  const nearExpiry = elapsedFraction > 0.9 && remainingBalance > 0n && remainingSeconds > 0;
+  if (nearExpiry) {
+    score -= 10;
+    diagnostics.push(`Stream is > 90% complete with ${remainingBalance} stroops still locked`);
+  }
+
+  score = Math.max(0, score);
+
+  let status: StreamHealthResult['status'];
+  if (score >= 80) {
+    status = 'healthy';
+  } else if (score >= 50) {
+    status = 'warning';
+  } else {
+    status = 'critical';
+  }
+
+  return {
+    score,
+    status,
+    remainingBalance,
+    elapsedSeconds,
+    remainingSeconds,
+    secondsSinceLastWithdrawal,
+    diagnostics,
+  };
 }
